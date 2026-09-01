@@ -1,0 +1,61 @@
+course:
+  id: functional_analysis_2026
+  title: Функциональный анализ
+  language: ru
+  lectures:
+    - id: lecture_01
+      title: Лекция 1
+      source:
+        type: youtube
+        url: https://www.youtube.com/watch?v=REPLACE_ME
+    # Local files are supported as well:
+    # - id: lecture_02
+    #   title: Лекция 2
+    #   source:
+    #     type: file
+    #     path: ../data/lecture_02.mp4
+
+asr:
+  backend: qwen3
+  model: Qwen/Qwen3-ASR-1.7B-hf
+  aligner_model: Qwen/Qwen3-ForcedAligner-0.6B-hf
+  language: ru
+  chunk_seconds: 60
+  hotwords: []
+
+llm:
+  base_url: http://127.0.0.1:8000/v1
+  api_key: EMPTY
+  model: Qwen/Qwen3.8-27B-FP8
+  temperature: 0.2
+  max_tokens: 4096
+  timeout_seconds: 300
+  thinking: false
+
+notes:
+  chunk_target_seconds: 180
+  visual_rule_selector: true
+  visual_llm_selector: true
+  visual_dedupe_seconds: 8
+
+vision:
+  frame_offsets_seconds: [-3, 2, 7]
+  youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
+  max_requests_per_chunk: 4
+
+literature:
+  enabled: false
+  directory: ../literature
+  retrieval_top_k: 4
+  chunk_chars: 1800
+
+latex:
+  output_dir: ../tex
+  compiler: latexmk
+  compile: false
+
+runtime:
+  work_dir: ../work
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
+  yt_dlp: yt-dlp
