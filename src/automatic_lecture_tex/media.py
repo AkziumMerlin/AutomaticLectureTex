@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from .config import RuntimeConfig, SourceConfig, VisionConfig
 from .schemas import ExtractedFrame
@@ -104,6 +105,37 @@ class YouTubeMediaSource(MediaSource):
     def __init__(self, url: str, runtime: RuntimeConfig, vision: VisionConfig) -> None:
         super().__init__(runtime, vision)
         self.url = url
+        self._resolved_url: str | None = None
+
+    def _is_playlist_url(self) -> bool:
+        parsed = urlparse(self.url)
+        query = parse_qs(parsed.query)
+        return parsed.path.rstrip("/").endswith("playlist") or ("list" in query and "v" not in query)
+
+    def _media_url(self) -> str:
+        if not self._is_playlist_url():
+            return self.url
+        if self._resolved_url is not None:
+            return self._resolved_url
+        proc = run_checked(
+            [
+                self.runtime.yt_dlp,
+                "--flat-playlist",
+                "--playlist-items",
+                "1",
+                "--no-warnings",
+                "--print",
+                "webpage_url",
+                self.url,
+            ]
+        )
+        urls = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        if len(urls) != 1:
+            raise RuntimeError(
+                f"yt-dlp resolved {len(urls)} playlist entries, expected exactly one"
+            )
+        self._resolved_url = urls[0]
+        return self._resolved_url
 
     def prepare_audio(self, output_wav: Path) -> Path:
         output_wav.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +152,7 @@ class YouTubeMediaSource(MediaSource):
                     "bestaudio",
                     "-o",
                     str(template),
-                    self.url,
+                    self._media_url(),
                 ]
             )
             candidates = [p for p in tmp.glob("audio.*") if p.is_file()]
@@ -153,7 +185,7 @@ class YouTubeMediaSource(MediaSource):
                     self.vision.youtube_video_format,
                     "-o",
                     str(template),
-                    self.url,
+                    self._media_url(),
                 ]
             )
             candidates = [p for p in tmp.glob("segment.*") if p.is_file()]
