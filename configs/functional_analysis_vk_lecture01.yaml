@@ -1,0 +1,76 @@
+course:
+  id: functional_analysis_vk
+  title: Функциональный анализ
+  language: ru
+  lectures:
+    - id: lecture_01
+      title: Лекция 1
+      source:
+        # Direct VK Video URLs are passed through to yt-dlp unchanged.
+        # `youtube` is the current legacy name of the generic yt-dlp-backed source type.
+        type: youtube
+        url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
+
+asr:
+  backend: qwen3
+  model: Qwen/Qwen3-ASR-1.7B-hf
+  aligner_model: Qwen/Qwen3-ForcedAligner-0.6B-hf
+  language: ru
+  chunk_seconds: 60
+  max_new_tokens: 768
+  dtype: bfloat16
+  device: cuda
+  hotwords:
+    - функциональный анализ
+    - нормированное пространство
+    - банахово пространство
+    - гильбертово пространство
+    - линейный оператор
+    - ограниченный оператор
+    - непрерывный оператор
+    - линейный функционал
+    - сопряжённый оператор
+    - скалярное произведение
+    - норма
+    - слабая сходимость
+    - сильная сходимость
+    - компактность
+    - спектр
+    - резольвента
+
+llm:
+  base_url: http://127.0.0.1:8000/v1
+  api_key: EMPTY
+  model: Qwen/Qwen3.8-27B-FP8
+  temperature: 0.2
+  max_tokens: 4096
+  timeout_seconds: 300
+  thinking: false
+
+notes:
+  chunk_target_seconds: 180
+  visual_rule_selector: true
+  visual_llm_selector: true
+  visual_dedupe_seconds: 8
+
+vision:
+  frame_offsets_seconds: [-3, 2, 7]
+  youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
+  max_requests_per_chunk: 4
+
+literature:
+  enabled: false
+  directory: ../literature
+  retrieval_top_k: 4
+  chunk_chars: 1800
+
+latex:
+  output_dir: ../tex
+  compiler: latexmk
+  compile: false
+
+runtime:
+  work_dir: ../work
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
+  yt_dlp: yt-dlp
