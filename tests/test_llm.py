@@ -1,3 +1,5 @@
+import json
+
 from pydantic import BaseModel
 
 from automatic_lecture_tex.llm import LectureModelClient
@@ -19,8 +21,9 @@ def test_response_format_uses_json_schema() -> None:
 
 def test_parse_json_preserves_latex_backslashes() -> None:
     client = LectureModelClient.__new__(LectureModelClient)
-    raw = r'{"latex":"\\theta + \\frac{1}{2} + \\beta"}'.replace(r'\"', '"')
+    latex = r"\theta + \frac{1}{2} + \beta"
+    raw = json.dumps({"latex": latex})
 
     parsed = client._parse_json(raw, LatexPayload)
 
-    assert parsed.latex == r"\theta + \frac{1}{2} + \beta"
+    assert parsed.latex == latex
