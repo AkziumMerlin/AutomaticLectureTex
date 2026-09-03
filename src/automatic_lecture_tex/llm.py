@@ -50,6 +50,16 @@ class LectureModelClient:
             }
         }
 
+    def _response_format(self, schema: type[T]) -> dict:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema.__name__,
+                "schema": schema.model_json_schema(),
+                "strict": True,
+            },
+        }
+
     def _parse_json(self, raw: str, schema: type[T]) -> T:
         text = strip_thinking_and_fences(raw)
         try:
@@ -87,6 +97,7 @@ class LectureModelClient:
             ],
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
+            response_format=self._response_format(schema),
             extra_body=self._extra_body(),
         )
         raw = response.choices[0].message.content or ""
