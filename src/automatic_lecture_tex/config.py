@@ -69,11 +69,25 @@ class LLMConfig(BaseModel):
 
 
 class NotesConfig(BaseModel):
-    chunk_target_seconds: float = 180.0
+    architecture: Literal["knowledge", "legacy"] = "knowledge"
+    chunk_target_seconds: float = Field(default=480.0, gt=0)
+    chunk_overlap_seconds: float = Field(default=120.0, ge=0)
+    boundary_context_seconds: float = Field(default=120.0, ge=0)
+    knowledge_max_active_claims: int = Field(default=160, ge=20, le=1000)
+    knowledge_recent_observations: int = Field(default=80, ge=10, le=1000)
+    max_outline_sections: int = Field(default=40, ge=1, le=200)
+    global_validation: bool = True
+    global_validation_apply_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     visual_rule_selector: bool = True
     visual_llm_selector: bool = False
     visual_dedupe_seconds: float = 8.0
     max_low_confidence_visual_requests: int = Field(default=1, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def validate_chunk_geometry(self) -> NotesConfig:
+        if self.chunk_overlap_seconds >= self.chunk_target_seconds:
+            raise ValueError("notes.chunk_overlap_seconds must be smaller than chunk_target_seconds")
+        return self
 
 
 class VisionConfig(BaseModel):
