@@ -8,24 +8,17 @@ from typing import TYPE_CHECKING, Any
 
 from .config import NotesConfig
 from .schemas import (
-    AnchorKind,
     ChunkNotes,
     ClaimStatus,
     CorrectionRecord,
     GlobalValidation,
-    KnowledgeClaim,
     KnowledgeUpdate,
     LectureChunk,
     LectureIR,
     LectureKnowledgeBase,
     LectureObservation,
     LectureOutline,
-    NoteBlock,
-    ObservationKind,
     OutlineSection,
-    SemanticAnchor,
-    SourceStatus,
-    SymbolRecord,
     Transcript,
     VisualEvidence,
     WindowObservations,
@@ -349,8 +342,6 @@ class KnowledgeOrchestrator:
     output_language: str
 
     def _structured(self, prompt: str, schema, *, operation: str, max_tokens: int | None = None):
-        # Kept in one adapter so LectureModelClient can later expose this as a public method without
-        # spreading the private-call dependency through the pipeline.
         return self.llm._structured(  # noqa: SLF001
             prompt,
             schema,
