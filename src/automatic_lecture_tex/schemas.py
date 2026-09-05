@@ -107,6 +107,8 @@ class NoteBlock(BaseModel):
     latex: str = ""
     asset_path: str | None = None
     caption: str | None = None
+    source_claim_ids: list[str] = Field(default_factory=list)
+    source_evidence_ids: list[str] = Field(default_factory=list)
 
     @field_validator("latex")
     @classmethod
@@ -148,6 +150,158 @@ class MathAuditCorrection(BaseModel):
 
 class MathAudit(BaseModel):
     corrections: list[MathAuditCorrection] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class ObservationKind(StrEnum):
+    DEFINITION = "definition"
+    CLAIM = "claim"
+    EQUATION = "equation"
+    PROOF_STEP = "proof_step"
+    EXAMPLE = "example"
+    NOTATION = "notation"
+    CORRECTION = "correction"
+    RETRACTION = "retraction"
+    TRANSITION = "transition"
+    REMARK = "remark"
+    UNRESOLVED = "unresolved"
+
+
+class SourceStatus(StrEnum):
+    OBSERVED = "observed"
+    RECONSTRUCTED = "reconstructed"
+    INFERRED = "inferred"
+
+
+class ClaimStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    RETRACTED = "retracted"
+    UNRESOLVED = "unresolved"
+
+
+class MathStatus(StrEnum):
+    UNCHECKED = "unchecked"
+    CONSISTENT = "consistent"
+    SUSPICIOUS = "suspicious"
+    INCORRECT = "incorrect"
+
+
+class AnchorKind(StrEnum):
+    TOPIC = "topic"
+    DEFINITION = "definition"
+    THEOREM = "theorem"
+    PROOF = "proof"
+    EXAMPLE = "example"
+    NOTATION = "notation"
+    CORRECTION = "correction"
+
+
+class LectureObservation(BaseModel):
+    id: str = ""
+    window_id: str = ""
+    start: float
+    end: float
+    kind: ObservationKind
+    text: str = ""
+    latex: str | None = None
+    target_observation_id: str | None = None
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    source_status: SourceStatus = SourceStatus.OBSERVED
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class WindowObservations(BaseModel):
+    window_id: str = ""
+    start: float = 0.0
+    end: float = 0.0
+    observations: list[LectureObservation] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class KnowledgeClaim(BaseModel):
+    id: str = ""
+    kind: ObservationKind = ObservationKind.CLAIM
+    content: str
+    latex: str | None = None
+    scope: str = ""
+    status: ClaimStatus = ClaimStatus.ACTIVE
+    math_status: MathStatus = MathStatus.UNCHECKED
+    source_status: SourceStatus = SourceStatus.OBSERVED
+    evidence_ids: list[str] = Field(default_factory=list)
+    supersedes: list[str] = Field(default_factory=list)
+    introduced_at: float = 0.0
+
+
+class SymbolRecord(BaseModel):
+    id: str = ""
+    symbol: str
+    meaning: str
+    type_hint: str = ""
+    scope: str = ""
+    introduced_at: float = 0.0
+    evidence_ids: list[str] = Field(default_factory=list)
+    active: bool = True
+
+
+class SemanticAnchor(BaseModel):
+    id: str = ""
+    timestamp: float
+    title: str
+    kind: AnchorKind = AnchorKind.TOPIC
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class KnowledgeUpdate(BaseModel):
+    claims: list[KnowledgeClaim] = Field(default_factory=list)
+    symbols: list[SymbolRecord] = Field(default_factory=list)
+    anchors: list[SemanticAnchor] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class LectureKnowledgeBase(BaseModel):
+    lecture_id: str
+    title: str
+    observations: list[LectureObservation] = Field(default_factory=list)
+    claims: list[KnowledgeClaim] = Field(default_factory=list)
+    symbols: list[SymbolRecord] = Field(default_factory=list)
+    anchors: list[SemanticAnchor] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class OutlineSection(BaseModel):
+    id: str = ""
+    title: str
+    start: float
+    end: float
+    anchor_ids: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class LectureOutline(BaseModel):
+    sections: list[OutlineSection] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class GlobalBlockCorrection(BaseModel):
+    section_index: int = Field(ge=0)
+    block_index: int = Field(ge=0)
+    corrected_latex: str
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("corrected_latex")
+    @classmethod
+    def reject_raw_environments(cls, value: str) -> str:
+        if r"\begin{" in value or r"\end{" in value:
+            raise ValueError("global corrections must not contain raw LaTeX environments")
+        return value
+
+
+class GlobalValidation(BaseModel):
+    corrections: list[GlobalBlockCorrection] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
 
 

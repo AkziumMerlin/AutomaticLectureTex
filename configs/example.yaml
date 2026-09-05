@@ -43,7 +43,15 @@ llm:
   math_audit_min_equals: 4
 
 notes:
-  chunk_target_seconds: 180
+  architecture: knowledge
+  chunk_target_seconds: 480
+  chunk_overlap_seconds: 120
+  boundary_context_seconds: 120
+  knowledge_max_active_claims: 160
+  knowledge_recent_observations: 80
+  max_outline_sections: 40
+  global_validation: true
+  global_validation_apply_threshold: 0.85
   visual_rule_selector: true
   visual_llm_selector: false
   visual_dedupe_seconds: 8

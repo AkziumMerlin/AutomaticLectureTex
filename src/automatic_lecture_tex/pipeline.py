@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from .asr import make_asr_backend
 from .chunking import chunk_transcript
 from .config import AppConfig, LectureConfig
+from .knowledge_pipeline import run_knowledge_pipeline
 from .latex import compile_tex, write_course_tex
 from .literature import load_literature, retrieve
 from .llm import LectureModelClient
@@ -26,7 +27,7 @@ from .vision import (
 logger = logging.getLogger(__name__)
 
 ASR_CACHE_VERSION = 2
-NOTES_CACHE_VERSION = 6
+NOTES_CACHE_VERSION = 7
 
 
 class Pipeline:
@@ -156,6 +157,24 @@ class Pipeline:
         if ir_path.exists() and manifest.get("ir_fingerprint") == ir_fingerprint and not force:
             logger.info("[%s] LectureIR cache hit", lecture.id)
             return self._load_ir(ir_path)
+
+        if self.config.notes.architecture == "knowledge":
+            return run_knowledge_pipeline(
+                self,
+                lecture=lecture,
+                transcript=transcript,
+                source=source,
+                source_identity=source_identity,
+                work=work,
+                ir_path=ir_path,
+                manifest_path=manifest_path,
+                manifest=manifest,
+                notation=notation,
+                media_seconds=media_seconds,
+                asr_seconds=asr_seconds,
+                run_started=run_started,
+                force=force,
+            )
 
         self.llm.reset_usage()
         notes_started = time.perf_counter()
@@ -326,6 +345,7 @@ class Pipeline:
             work / "run_metrics.json",
             {
                 "lecture_id": lecture.id,
+                "architecture": "legacy",
                 "media_seconds": round(media_seconds, 3),
                 "asr_seconds": round(asr_seconds, 3),
                 "notes_seconds": round(time.perf_counter() - notes_started, 3),

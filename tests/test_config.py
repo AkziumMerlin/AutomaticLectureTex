@@ -18,6 +18,8 @@ def test_minimal_config_parses():
     )
     assert cfg.course.lectures[0].source.path == Path("lecture.mp4")
     assert cfg.asr.backend == "qwen3"
+    assert cfg.notes.architecture == "knowledge"
+    assert cfg.notes.chunk_overlap_seconds < cfg.notes.chunk_target_seconds
 
 
 def test_lecture_id_cannot_escape_work_directory():
@@ -31,5 +33,24 @@ def test_lecture_id_cannot_escape_work_directory():
                         {"id": "../escape", "source": {"type": "file", "path": "lecture.mp4"}}
                     ],
                 }
+            }
+        )
+
+
+def test_overlap_must_be_smaller_than_chunk():
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {
+                "course": {
+                    "id": "course",
+                    "title": "Course",
+                    "lectures": [
+                        {"id": "lecture", "source": {"type": "file", "path": "lecture.mp4"}}
+                    ],
+                },
+                "notes": {
+                    "chunk_target_seconds": 100,
+                    "chunk_overlap_seconds": 100,
+                },
             }
         )

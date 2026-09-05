@@ -62,7 +62,11 @@ def test_pipeline_reuses_completed_chunk_after_interruption(tmp_path):
                 "title": "Course",
                 "lectures": [{"id": "lecture", "source": {"type": "file", "path": source_path}}],
             },
-            "notes": {"visual_rule_selector": False, "visual_llm_selector": False},
+            "notes": {
+                "architecture": "legacy",
+                "visual_rule_selector": False,
+                "visual_llm_selector": False,
+            },
             "runtime": {"work_dir": tmp_path / "work"},
             "latex": {"output_dir": tmp_path / "tex"},
         }
@@ -124,7 +128,11 @@ def test_pipeline_reuses_audio_when_asr_config_changes(tmp_path, monkeypatch):
                 "title": "Course",
                 "lectures": [{"id": "lecture", "source": {"type": "file", "path": source_path}}],
             },
-            "notes": {"visual_rule_selector": False, "visual_llm_selector": False},
+            "notes": {
+                "architecture": "legacy",
+                "visual_rule_selector": False,
+                "visual_llm_selector": False,
+            },
             "runtime": {"work_dir": tmp_path / "work"},
             "latex": {"output_dir": tmp_path / "tex"},
         }
