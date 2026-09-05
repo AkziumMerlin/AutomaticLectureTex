@@ -12,14 +12,20 @@ course:
         url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
 
 asr:
-  backend: qwen3
-  model: Qwen/Qwen3-ASR-1.7B-hf
-  aligner_model: Qwen/Qwen3-ForcedAligner-0.6B-hf
+  backend: faster_whisper
+  model: large-v3
+  aligner_model: null
   language: ru
   chunk_seconds: 60
-  max_new_tokens: 768
+  max_new_tokens: 2048
   dtype: bfloat16
   device: cuda
+  whisper_compute_type: float16
+  whisper_beam_size: 5
+  vad_filter: true
+  vad_min_silence_ms: 500
+  condition_on_previous_text: true
+  hallucination_silence_threshold: 2.0
   hotwords:
     - функциональный анализ
     - нормированное пространство
@@ -42,21 +48,25 @@ llm:
   base_url: http://127.0.0.1:8000/v1
   api_key: EMPTY
   model: Qwen/Qwen3.8-27B-FP8
-  temperature: 0.2
+  output_language: ru
+  temperature: 0.0
   max_tokens: 4096
   timeout_seconds: 300
   thinking: false
+  math_audit: true
+  math_audit_min_equals: 4
 
 notes:
   chunk_target_seconds: 180
   visual_rule_selector: true
-  visual_llm_selector: true
+  visual_llm_selector: false
   visual_dedupe_seconds: 8
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
   youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
   max_requests_per_chunk: 4
+  max_workers: 3
 
 literature:
   enabled: false
@@ -65,12 +75,12 @@ literature:
   chunk_chars: 1800
 
 latex:
-  output_dir: ../tex
+  output_dir: ../tex/functional_analysis_vk
   compiler: latexmk
   compile: false
 
 runtime:
-  work_dir: ../work
+  work_dir: ../work/functional_analysis_vk
   ffmpeg: ffmpeg
   ffprobe: ffprobe
   yt_dlp: yt-dlp

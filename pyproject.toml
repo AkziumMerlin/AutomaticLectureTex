@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "automatic-lecture-tex"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-driven pipeline for turning recorded lectures into reproducible LaTeX notes."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,17 +18,14 @@ dependencies = [
 
 [project.optional-dependencies]
 qwen-asr = [
-  "accelerate>=1.2",
-  "torch>=2.6",
-  "transformers>=5.13.0",
+  "qwen-asr>=0.0.6,<0.1",
 ]
+qwen-asr-hf = ["accelerate>=1.2", "torch>=2.6", "transformers>=5.13.0"]
 whisper = ["faster-whisper>=1.1.0"]
 review = ["pymupdf>=1.25"]
 dev = ["pytest>=8.3", "ruff>=0.9"]
 all = [
-  "accelerate>=1.2",
-  "torch>=2.6",
-  "transformers>=5.13.0",
+  "qwen-asr>=0.0.6,<0.1",
   "faster-whisper>=1.1.0",
   "pymupdf>=1.25",
 ]

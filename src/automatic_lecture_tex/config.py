@@ -13,7 +13,7 @@ class SourceConfig(BaseModel):
     url: str | None = None
 
     @model_validator(mode="after")
-    def validate_source(self) -> "SourceConfig":
+    def validate_source(self) -> SourceConfig:
         if self.type == "file" and self.path is None:
             raise ValueError("file source requires path")
         if self.type == "youtube" and not self.url:
@@ -22,52 +22,65 @@ class SourceConfig(BaseModel):
 
 
 class LectureConfig(BaseModel):
-    id: str
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     title: str | None = None
     source: SourceConfig
 
 
 class CourseConfig(BaseModel):
-    id: str
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     title: str
     language: str = "ru"
     lectures: list[LectureConfig]
 
 
 class ASRConfig(BaseModel):
-    backend: Literal["qwen3", "faster_whisper"] = "qwen3"
-    model: str = "Qwen/Qwen3-ASR-1.7B-hf"
-    aligner_model: str | None = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
+    backend: Literal["qwen3", "qwen3_hf", "faster_whisper"] = "qwen3"
+    model: str = "Qwen/Qwen3-ASR-1.7B"
+    aligner_model: str | None = "Qwen/Qwen3-ForcedAligner-0.6B"
     language: str | None = "ru"
     hotwords: list[str] = Field(default_factory=list)
     chunk_seconds: float = 60.0
-    max_new_tokens: int = 768
+    max_new_tokens: int = 2048
+    batch_size: int = Field(default=4, ge=1)
+    segment_target_seconds: float = Field(default=20.0, gt=0)
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
     device: str = "cuda"
     whisper_compute_type: str = "float16"
+    whisper_beam_size: int = Field(default=5, ge=1)
+    vad_filter: bool = True
+    vad_min_silence_ms: int = Field(default=500, ge=0)
+    condition_on_previous_text: bool = True
+    hallucination_silence_threshold: float | None = Field(default=2.0, gt=0)
 
 
 class LLMConfig(BaseModel):
     base_url: str = "http://127.0.0.1:8000/v1"
     api_key: str = "EMPTY"
     model: str = "Qwen/Qwen3.8-27B-FP8"
+    output_language: str = "ru"
     temperature: float = 0.2
     max_tokens: int = 4096
     timeout_seconds: float = 300.0
     thinking: bool = False
+    max_retries: int = Field(default=2, ge=0, le=5)
+    math_audit: bool = True
+    math_audit_min_equals: int = Field(default=4, ge=1, le=50)
 
 
 class NotesConfig(BaseModel):
     chunk_target_seconds: float = 180.0
     visual_rule_selector: bool = True
-    visual_llm_selector: bool = True
+    visual_llm_selector: bool = False
     visual_dedupe_seconds: float = 8.0
+    max_low_confidence_visual_requests: int = Field(default=1, ge=0, le=10)
 
 
 class VisionConfig(BaseModel):
     frame_offsets_seconds: list[float] = Field(default_factory=lambda: [-3.0, 2.0, 7.0])
     youtube_video_format: str = "bestvideo[height<=1080]/best[height<=1080]"
     max_requests_per_chunk: int = 4
+    max_workers: int = Field(default=3, ge=1, le=8)
 
 
 class LiteratureConfig(BaseModel):

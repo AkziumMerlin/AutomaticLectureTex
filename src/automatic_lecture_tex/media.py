@@ -70,24 +70,25 @@ class LocalMediaSource(MediaSource):
         for index, timestamp in enumerate(timestamps):
             timestamp = max(0.0, timestamp)
             path = output_dir / f"frame_{index:02d}_{timestamp:.3f}.jpg"
-            run_checked(
-                [
-                    self.runtime.ffmpeg,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-ss",
-                    f"{timestamp:.3f}",
-                    "-i",
-                    str(self.path),
-                    "-frames:v",
-                    "1",
-                    "-q:v",
-                    "2",
-                    str(path),
-                ]
-            )
+            if not path.is_file() or path.stat().st_size == 0:
+                run_checked(
+                    [
+                        self.runtime.ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-ss",
+                        f"{timestamp:.3f}",
+                        "-i",
+                        str(self.path),
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "2",
+                        str(path),
+                    ]
+                )
             frames.append(ExtractedFrame(timestamp=timestamp, path=path))
         return frames
 
@@ -110,7 +111,9 @@ class YouTubeMediaSource(MediaSource):
     def _is_playlist_url(self) -> bool:
         parsed = urlparse(self.url)
         query = parse_qs(parsed.query)
-        return parsed.path.rstrip("/").endswith("playlist") or ("list" in query and "v" not in query)
+        return parsed.path.rstrip("/").endswith("playlist") or (
+            "list" in query and "v" not in query
+        )
 
     def _media_url(self) -> str:
         if not self._is_playlist_url():
@@ -157,7 +160,9 @@ class YouTubeMediaSource(MediaSource):
             )
             candidates = [p for p in tmp.glob("audio.*") if p.is_file()]
             if len(candidates) != 1:
-                raise RuntimeError(f"yt-dlp produced {len(candidates)} audio files, expected exactly one")
+                raise RuntimeError(
+                    f"yt-dlp produced {len(candidates)} audio files, expected exactly one"
+                )
             return self._normalize_audio(candidates[0], output_wav)
 
     def extract_frames(self, timestamps: list[float], output_dir: Path) -> list[ExtractedFrame]:
@@ -165,6 +170,15 @@ class YouTubeMediaSource(MediaSource):
             return []
         output_dir.mkdir(parents=True, exist_ok=True)
         safe_times = [max(0.0, value) for value in timestamps]
+        targets = [
+            output_dir / f"frame_{index:02d}_{timestamp:.3f}.jpg"
+            for index, timestamp in enumerate(safe_times)
+        ]
+        if all(path.is_file() and path.stat().st_size > 0 for path in targets):
+            return [
+                ExtractedFrame(timestamp=timestamp, path=path)
+                for timestamp, path in zip(safe_times, targets, strict=True)
+            ]
         start = max(0.0, min(safe_times) - 2.0)
         end = max(safe_times) + 2.0
 
@@ -196,25 +210,26 @@ class YouTubeMediaSource(MediaSource):
             frames: list[ExtractedFrame] = []
             for index, timestamp in enumerate(safe_times):
                 relative = max(0.0, timestamp - start)
-                path = output_dir / f"frame_{index:02d}_{timestamp:.3f}.jpg"
-                run_checked(
-                    [
-                        self.runtime.ffmpeg,
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-y",
-                        "-ss",
-                        f"{relative:.3f}",
-                        "-i",
-                        str(segment),
-                        "-frames:v",
-                        "1",
-                        "-q:v",
-                        "2",
-                        str(path),
-                    ]
-                )
+                path = targets[index]
+                if not path.is_file() or path.stat().st_size == 0:
+                    run_checked(
+                        [
+                            self.runtime.ffmpeg,
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-y",
+                            "-ss",
+                            f"{relative:.3f}",
+                            "-i",
+                            str(segment),
+                            "-frames:v",
+                            "1",
+                            "-q:v",
+                            "2",
+                            str(path),
+                        ]
+                    )
                 frames.append(ExtractedFrame(timestamp=timestamp, path=path))
             return frames
 

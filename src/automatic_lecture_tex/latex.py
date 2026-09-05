@@ -6,7 +6,6 @@ from pathlib import Path
 from .schemas import BlockType, LectureIR, NoteBlock
 from .util import run_checked
 
-
 _TEX_ESCAPES = {
     "&": r"\&",
     "%": r"\%",
@@ -69,6 +68,15 @@ def render_lecture(ir: LectureIR) -> str:
             previous_section = section
         for block in chunk.blocks:
             lines.append(render_block(block))
+        if chunk.corrections:
+            lines.append("% Reconstruction corrections:")
+            lines.extend(
+                "% - "
+                + f"[{item.basis}, confidence={item.confidence:.2f}] "
+                + f"{item.original!r} -> {item.corrected!r}: {item.reason}"
+                for item in chunk.corrections
+            )
+            lines.append("")
         if chunk.unresolved:
             lines.append("% Unresolved reconstruction issues:")
             lines.extend(f"% - {item}" for item in chunk.unresolved)
@@ -124,6 +132,8 @@ def write_course_tex(course_title: str, lectures: list[LectureIR], output_dir: P
 
 def compile_tex(main_tex: Path, compiler: str) -> None:
     if compiler == "latexmk":
-        run_checked([compiler, "-xelatex", "-interaction=nonstopmode", main_tex.name], cwd=main_tex.parent)
+        run_checked(
+            [compiler, "-xelatex", "-interaction=nonstopmode", main_tex.name], cwd=main_tex.parent
+        )
     else:
         run_checked([compiler, "-interaction=nonstopmode", main_tex.name], cwd=main_tex.parent)

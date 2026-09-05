@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import math
+import re
 import tempfile
 from abc import ABC, abstractmethod
+from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any
 
 from .config import ASRConfig, RuntimeConfig
 from .media import probe_duration
@@ -21,12 +24,135 @@ class ASRBackend(ABC):
         raise NotImplementedError
 
 
+def _normalized_words(text: str) -> str:
+    return " ".join(re.findall(r"[\w]+", text.casefold(), flags=re.UNICODE))
+
+
+def is_hotword_prompt_echo(text: str, hotwords: list[str]) -> bool:
+    if len(hotwords) < 3 or len(text) < 40:
+        return False
+    candidate = _normalized_words(text)
+    reference = _normalized_words(" ".join(hotwords))
+    return SequenceMatcher(a=candidate, b=reference, autojunk=False).ratio() >= 0.88
+
+
+def _qwen_language(language: str | None) -> str | None:
+    if language is None:
+        return None
+    aliases = {"ru": "Russian", "en": "English", "zh": "Chinese"}
+    return aliases.get(language.casefold(), language)
+
+
+def _segments_from_aligned_items(
+    items: list[Any], target_seconds: float, hotwords: list[str]
+) -> list[TranscriptSegment]:
+    segments: list[TranscriptSegment] = []
+    current: list[Any] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        text = " ".join(str(item.text).strip() for item in current).strip()
+        text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+        if text and not is_hotword_prompt_echo(text, hotwords):
+            words = [
+                TranscriptWord(
+                    text=str(item.text),
+                    start=float(item.start_time),
+                    end=float(item.end_time),
+                )
+                for item in current
+            ]
+            segments.append(
+                TranscriptSegment(
+                    id=f"seg_{len(segments):05d}",
+                    start=words[0].start,
+                    end=words[-1].end,
+                    text=text,
+                    words=words,
+                )
+            )
+        current.clear()
+
+    for item in items:
+        if current:
+            gap = float(item.start_time) - float(current[-1].end_time)
+            duration = float(current[-1].end_time) - float(current[0].start_time)
+            sentence_end = str(current[-1].text).rstrip().endswith((".", "!", "?"))
+            if gap >= 1.0 or (duration >= target_seconds and sentence_end):
+                flush()
+        current.append(item)
+        if float(item.end_time) - float(current[0].start_time) >= target_seconds * 1.5:
+            flush()
+    flush()
+    return segments
+
+
 class Qwen3ASRBackend(ASRBackend):
     def __init__(self, config: ASRConfig, runtime: RuntimeConfig) -> None:
         super().__init__(config, runtime)
         try:
             import torch
-            from transformers import AutoModelForMultimodalLM, AutoModelForTokenClassification, AutoProcessor
+            from qwen_asr import Qwen3ASRModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "Qwen3 ASR backend requires the official toolkit: "
+                "pip install 'automatic-lecture-tex[qwen-asr]'"
+            ) from exc
+
+        dtype = getattr(torch, config.dtype)
+        device = "cuda:0" if config.device == "cuda" else config.device
+        aligner_kwargs = {"dtype": dtype, "device_map": device}
+        self.model = Qwen3ASRModel.from_pretrained(
+            config.model,
+            dtype=dtype,
+            device_map=device,
+            forced_aligner=config.aligner_model,
+            forced_aligner_kwargs=aligner_kwargs,
+            max_inference_batch_size=config.batch_size,
+            max_new_tokens=config.max_new_tokens,
+        )
+
+    def transcribe(self, lecture_id: str, audio_path: Path) -> Transcript:
+        context = ""
+        if self.config.hotwords:
+            context = "Термины курса: " + ", ".join(self.config.hotwords)
+        result = self.model.transcribe(
+            audio=str(audio_path),
+            context=context,
+            language=_qwen_language(self.config.language),
+            return_time_stamps=self.config.aligner_model is not None,
+        )[0]
+        aligned = list(result.time_stamps or [])
+        if aligned:
+            segments = _segments_from_aligned_items(
+                aligned, self.config.segment_target_seconds, self.config.hotwords
+            )
+        else:
+            duration = probe_duration(audio_path, self.runtime)
+            text = result.text.strip()
+            segments = (
+                []
+                if is_hotword_prompt_echo(text, self.config.hotwords)
+                else [TranscriptSegment(id="seg_00000", start=0.0, end=duration, text=text)]
+            )
+        return Transcript(
+            lecture_id=lecture_id,
+            language=result.language or self.config.language,
+            segments=segments,
+        )
+
+
+class LegacyQwen3HFBackend(ASRBackend):
+    def __init__(self, config: ASRConfig, runtime: RuntimeConfig) -> None:
+        super().__init__(config, runtime)
+        try:
+            import torch
+            from transformers import (
+                AutoModelForMultimodalLM,
+                AutoModelForTokenClassification,
+                AutoProcessor,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "Qwen3 ASR backend requires the 'qwen-asr' extra: "
@@ -180,32 +306,44 @@ class FasterWhisperBackend(ASRBackend):
         )
 
     def transcribe(self, lecture_id: str, audio_path: Path) -> Transcript:
-        initial_prompt = None
-        if self.config.hotwords:
-            initial_prompt = "Vocabulary: " + ", ".join(self.config.hotwords)
         raw_segments, info = self.model.transcribe(
             str(audio_path),
             language=self.config.language,
-            vad_filter=True,
+            task="transcribe",
+            beam_size=self.config.whisper_beam_size,
+            vad_filter=self.config.vad_filter,
+            vad_parameters={"min_silence_duration_ms": self.config.vad_min_silence_ms},
             word_timestamps=True,
-            initial_prompt=initial_prompt,
+            hotwords=", ".join(self.config.hotwords) or None,
+            condition_on_previous_text=self.config.condition_on_previous_text,
+            hallucination_silence_threshold=self.config.hallucination_silence_threshold,
         )
         segments: list[TranscriptSegment] = []
-        for index, segment in enumerate(raw_segments):
-            confidence = None
-            if getattr(segment, "avg_logprob", None) is not None:
-                confidence = max(0.0, min(1.0, math.exp(float(segment.avg_logprob))))
+        for segment in raw_segments:
+            text = segment.text.strip()
+            if not text or is_hotword_prompt_echo(text, self.config.hotwords):
+                continue
             words = [
                 TranscriptWord(text=w.word, start=float(w.start), end=float(w.end))
                 for w in (segment.words or [])
                 if w.start is not None and w.end is not None
             ]
+            word_probabilities = [
+                float(w.probability)
+                for w in (segment.words or [])
+                if getattr(w, "probability", None) is not None
+            ]
+            confidence = None
+            if word_probabilities:
+                confidence = sum(word_probabilities) / len(word_probabilities)
+            elif getattr(segment, "avg_logprob", None) is not None:
+                confidence = max(0.0, min(1.0, math.exp(float(segment.avg_logprob))))
             segments.append(
                 TranscriptSegment(
-                    id=f"seg_{index:05d}",
+                    id=f"seg_{len(segments):05d}",
                     start=float(segment.start),
                     end=float(segment.end),
-                    text=segment.text.strip(),
+                    text=text,
                     confidence=confidence,
                     words=words,
                 )
@@ -216,4 +354,6 @@ class FasterWhisperBackend(ASRBackend):
 def make_asr_backend(config: ASRConfig, runtime: RuntimeConfig) -> ASRBackend:
     if config.backend == "qwen3":
         return Qwen3ASRBackend(config, runtime)
+    if config.backend == "qwen3_hf":
+        return LegacyQwen3HFBackend(config, runtime)
     return FasterWhisperBackend(config, runtime)

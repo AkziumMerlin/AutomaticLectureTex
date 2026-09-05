@@ -14,8 +14,7 @@ def run_checked(args: list[str], *, cwd: Path | None = None) -> subprocess.Compl
         args,
         cwd=cwd,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if proc.returncode != 0:
@@ -41,6 +40,16 @@ def atomic_json_dump(path: Path, value: Any) -> None:
 def stable_hash(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def format_timestamp(seconds: float) -> str:
+    milliseconds = max(0, round(seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, milliseconds = divmod(remainder, 1000)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
+    return f"{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
 
 
 def strip_thinking_and_fences(text: str) -> str:

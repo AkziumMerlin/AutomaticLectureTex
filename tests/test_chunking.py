@@ -15,3 +15,4 @@ def test_chunk_transcript_respects_segment_boundaries():
     chunks = chunk_transcript(transcript, target_seconds=150)
     assert [c.segment_ids for c in chunks] == [["s0", "s1"], ["s2", "s3"]]
     assert chunks[0].text == "a\nb"
+    assert chunks[0].timestamped_text == "[00:00.000-01:00.000] a\n[01:00.000-02:00.000] b"
