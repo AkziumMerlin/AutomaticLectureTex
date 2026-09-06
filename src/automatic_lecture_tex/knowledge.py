@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .config import NotesConfig
+from .episode_graph import reconcile_window_observations
 from .schemas import (
     ChunkNotes,
     ClaimStatus,
     CorrectionRecord,
+    EpisodeHierarchyPlan,
+    EpisodeStatus,
+    EpisodeTrackingUpdate,
     GlobalValidation,
     KnowledgeUpdate,
     LectureChunk,
     LectureIR,
     LectureKnowledgeBase,
-    LectureObservation,
-    LectureOutline,
     OutlineSection,
     Transcript,
     VisualEvidence,
@@ -28,70 +29,23 @@ if TYPE_CHECKING:
     from .llm import LectureModelClient
 
 
-_WS = re.compile(r"\s+")
-
-
-def _norm(value: str | None) -> str:
-    if not value:
-        return ""
-    return _WS.sub("", value).lower()
-
-
 def _merge_unique(left: list[str], right: Iterable[str]) -> list[str]:
     seen = set(left)
     result = list(left)
     for item in right:
-        if item not in seen:
+        if item and item not in seen:
             result.append(item)
             seen.add(item)
     return result
-
-
-def _observation_key(obs: LectureObservation) -> tuple[str, str, str]:
-    return obs.kind.value, _norm(obs.text), _norm(obs.latex)
 
 
 def merge_window_observations(
     kb: LectureKnowledgeBase,
     batch: WindowObservations,
 ) -> list[str]:
-    """Merge one overlapping evidence window into the event-sourced lecture KB.
+    """Backward-compatible name for overlap reconciliation."""
 
-    Exact content repeated by overlapping windows is collapsed when the timestamp intervals overlap.
-    The function never decides that two mathematically similar but textually different statements are
-    equivalent; that semantic decision belongs to the LLM knowledge-update pass.
-    """
-    existing_by_key: dict[tuple[str, str, str], list[LectureObservation]] = {}
-    for item in kb.observations:
-        existing_by_key.setdefault(_observation_key(item), []).append(item)
-
-    added_ids: list[str] = []
-    for index, raw in enumerate(batch.observations):
-        obs = raw.model_copy(deep=True)
-        obs.window_id = batch.window_id
-        if not obs.id:
-            obs.id = f"obs_{batch.window_id}_{index:03d}"
-        if not obs.evidence_refs:
-            obs.evidence_refs = [batch.window_id]
-
-        duplicate = None
-        for candidate in existing_by_key.get(_observation_key(obs), []):
-            if min(candidate.end, obs.end) >= max(candidate.start, obs.start):
-                duplicate = candidate
-                break
-        if duplicate is not None:
-            duplicate.start = min(duplicate.start, obs.start)
-            duplicate.end = max(duplicate.end, obs.end)
-            duplicate.confidence = max(duplicate.confidence, obs.confidence)
-            duplicate.evidence_refs = _merge_unique(duplicate.evidence_refs, obs.evidence_refs)
-            continue
-
-        kb.observations.append(obs)
-        existing_by_key.setdefault(_observation_key(obs), []).append(obs)
-        added_ids.append(obs.id)
-
-    kb.unresolved = _merge_unique(kb.unresolved, batch.unresolved)
-    return added_ids
+    return reconcile_window_observations(kb, batch)
 
 
 def _unique_id(prefix: str, existing: set[str], seed: int) -> str:
@@ -109,18 +63,23 @@ def apply_knowledge_update(
     *,
     window_id: str,
 ) -> None:
+    """Legacy updater retained for compatibility tests/tools.
+
+    The knowledge architecture no longer calls this function: canonical claims are derived from
+    canonical observations inside semantic episodes. Keeping it here avoids breaking old artifacts
+    and makes the migration explicit.
+    """
+
     claim_ids = {item.id for item in kb.claims if item.id}
     symbol_ids = {item.id for item in kb.symbols if item.id}
-    anchor_ids = {item.id for item in kb.anchors if item.id}
-
     claim_by_id = {item.id: item for item in kb.claims if item.id}
+
     for index, raw in enumerate(update.claims):
         claim = raw.model_copy(deep=True)
         for old_id in claim.supersedes:
             old = claim_by_id.get(old_id)
             if old is not None and old.status == ClaimStatus.ACTIVE:
                 old.status = ClaimStatus.SUPERSEDED
-
         if not claim.id:
             claim.id = _unique_id(f"claim_{window_id}", claim_ids, index)
         elif claim.id in claim_by_id:
@@ -129,65 +88,35 @@ def apply_knowledge_update(
             existing.latex = claim.latex
             existing.kind = claim.kind
             existing.scope = claim.scope
+            existing.episode_id = claim.episode_id
             existing.status = claim.status
             existing.math_status = claim.math_status
             existing.source_status = claim.source_status
             existing.evidence_ids = _merge_unique(existing.evidence_ids, claim.evidence_ids)
             existing.supersedes = _merge_unique(existing.supersedes, claim.supersedes)
-            if claim.introduced_at:
-                existing.introduced_at = min(existing.introduced_at, claim.introduced_at)
             continue
         else:
             claim_ids.add(claim.id)
-
         kb.claims.append(claim)
         claim_by_id[claim.id] = claim
 
-    symbol_by_key = {(item.symbol, item.scope): item for item in kb.symbols if item.active}
     for index, raw in enumerate(update.symbols):
         symbol = raw.model_copy(deep=True)
         key = (symbol.symbol, symbol.scope)
-        existing = symbol_by_key.get(key)
+        existing = next(
+            (item for item in kb.symbols if item.active and (item.symbol, item.scope) == key),
+            None,
+        )
         if existing is not None:
             if symbol.meaning:
                 existing.meaning = symbol.meaning
             if symbol.type_hint:
                 existing.type_hint = symbol.type_hint
             existing.evidence_ids = _merge_unique(existing.evidence_ids, symbol.evidence_ids)
-            existing.introduced_at = min(existing.introduced_at, symbol.introduced_at)
             continue
-        if not symbol.id:
+        if not symbol.id or symbol.id in symbol_ids:
             symbol.id = _unique_id(f"sym_{window_id}", symbol_ids, index)
-        elif symbol.id in symbol_ids:
-            symbol.id = _unique_id(f"sym_{window_id}", symbol_ids, index)
-        else:
-            symbol_ids.add(symbol.id)
         kb.symbols.append(symbol)
-        symbol_by_key[key] = symbol
-
-    for index, raw in enumerate(update.anchors):
-        anchor = raw.model_copy(deep=True)
-        duplicate = next(
-            (
-                item
-                for item in kb.anchors
-                if item.title.strip().lower() == anchor.title.strip().lower()
-                and abs(item.timestamp - anchor.timestamp) <= 30.0
-            ),
-            None,
-        )
-        if duplicate is not None:
-            duplicate.claim_ids = _merge_unique(duplicate.claim_ids, anchor.claim_ids)
-            duplicate.evidence_ids = _merge_unique(duplicate.evidence_ids, anchor.evidence_ids)
-            duplicate.timestamp = min(duplicate.timestamp, anchor.timestamp)
-            continue
-        if not anchor.id:
-            anchor.id = _unique_id(f"anchor_{window_id}", anchor_ids, index)
-        elif anchor.id in anchor_ids:
-            anchor.id = _unique_id(f"anchor_{window_id}", anchor_ids, index)
-        else:
-            anchor_ids.add(anchor.id)
-        kb.anchors.append(anchor)
 
     kb.unresolved = _merge_unique(kb.unresolved, update.unresolved)
 
@@ -196,6 +125,7 @@ def compact_knowledge_state(kb: LectureKnowledgeBase, config: NotesConfig) -> di
     active_claims = [item for item in kb.claims if item.status == ClaimStatus.ACTIVE]
     claims = active_claims[-config.knowledge_max_active_claims :]
     observations = kb.observations[-config.knowledge_recent_observations :]
+    episodes = kb.episodes[-80:]
     return {
         "lecture_id": kb.lecture_id,
         "title": kb.title,
@@ -205,8 +135,9 @@ def compact_knowledge_state(kb: LectureKnowledgeBase, config: NotesConfig) -> di
             for item in kb.symbols
             if item.active
         ],
-        "anchors": [item.model_dump(mode="json") for item in kb.anchors],
+        "episodes": [item.model_dump(mode="json") for item in episodes],
         "recent_observations": [item.model_dump(mode="json") for item in observations],
+        "observation_aliases": dict(kb.observation_aliases),
         "unresolved": kb.unresolved[-50:],
     }
 
@@ -227,22 +158,29 @@ def transcript_context(
     )
 
 
-def anchor_contexts(
+def episode_contexts(
     kb: LectureKnowledgeBase,
     transcript: Transcript,
     config: NotesConfig,
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "anchor": anchor.model_dump(mode="json"),
-            "context": transcript_context(
-                transcript,
-                center=anchor.timestamp,
-                radius=config.boundary_context_seconds,
-            ),
-        }
-        for anchor in kb.anchors
-    ]
+    contexts: list[dict[str, Any]] = []
+    for episode in sorted(kb.episodes, key=lambda item: (item.start, item.end)):
+        contexts.append(
+            {
+                "episode": episode.model_dump(mode="json"),
+                "start_context": transcript_context(
+                    transcript,
+                    center=episode.start,
+                    radius=config.boundary_context_seconds,
+                ),
+                "end_context": transcript_context(
+                    transcript,
+                    center=episode.end,
+                    radius=config.boundary_context_seconds,
+                ),
+            }
+        )
+    return contexts
 
 
 def evidence_for_section(
@@ -251,8 +189,20 @@ def evidence_for_section(
     transcript: Transcript,
     config: NotesConfig,
 ) -> dict[str, Any]:
+    episode_ids = set(section.episode_ids)
+    episodes = [
+        item
+        for item in sorted(kb.episodes, key=lambda item: (item.start, item.end))
+        if item.id in episode_ids
+    ]
+
     claim_ids = set(section.claim_ids)
     evidence_ids = set(section.evidence_ids)
+    if episodes:
+        for episode in episodes:
+            claim_ids.update(episode.claim_ids)
+            evidence_ids.update(episode.observation_ids)
+
     claims = [
         item
         for item in kb.claims
@@ -265,12 +215,18 @@ def evidence_for_section(
         item
         for item in kb.observations
         if item.id in evidence_ids
-        or (item.end >= section.start and item.start <= section.end)
     ]
+    if not observations:
+        observations = [
+            item
+            for item in kb.observations
+            if item.end >= section.start and item.start <= section.end
+        ]
+
     symbols = [
         item
         for item in kb.symbols
-        if item.active and item.introduced_at <= section.end
+        if item.active and (item.episode_id in episode_ids or item.introduced_at <= section.end)
     ]
     transcript_text = "\n".join(
         f"[{segment.start:.3f}-{segment.end:.3f}] {segment.text}"
@@ -280,6 +236,7 @@ def evidence_for_section(
     )
     return {
         "section": section.model_dump(mode="json"),
+        "episodes": [item.model_dump(mode="json") for item in episodes],
         "claims": [item.model_dump(mode="json") for item in claims],
         "observations": [item.model_dump(mode="json") for item in observations],
         "symbols": [item.model_dump(mode="json") for item in symbols],
@@ -365,8 +322,17 @@ class KnowledgeOrchestrator:
             for item in kb.symbols
             if item.active
         ]
+        recent_observations = [
+            item.model_dump(mode="json")
+            for item in kb.observations[-20:]
+        ]
+        open_episodes = [
+            item.model_dump(mode="json")
+            for item in kb.episodes
+            if item.status == EpisodeStatus.OPEN
+        ]
         prompt = f"""Extract evidence events from one OVERLAPPING technical window of a university
-lecture. Do not write lecture notes yet. A later pass will merge windows and generate prose.
+lecture. Do not write lecture notes and do not decide final document sections.
 
 Window id: {chunk.id}
 Window bounds: [{chunk.start:.3f}, {chunk.end:.3f}]
@@ -379,19 +345,25 @@ Visual evidence:
 Known symbol registry:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
+Recent canonical observations from the previous overlap/context:
+{json.dumps(recent_observations, ensure_ascii=False, separators=(",", ":"))}
+
+Currently open semantic episodes:
+{json.dumps(open_episodes, ensure_ascii=False, separators=(",", ":"))}
+
 Return observations in temporal order. Use only these event meanings:
 - definition/claim/equation/proof_step/example/notation/remark: something actually asserted or
   written in this window;
 - correction: the lecturer explicitly corrects a previous statement, sign, symbol, derivation, or
-  board entry. Point target_observation_id at an observation from THIS window when possible;
-- retraction: the lecturer explicitly withdraws a statement;
-- transition: a topic/proof/example boundary that can later become a semantic anchor;
+  board entry. If it targets a recent canonical observation shown above, use that exact id in
+  target_observation_id; if the target is earlier in THIS window, use the local observation id;
+- retraction: the lecturer explicitly withdraws a statement, with target_observation_id when known;
+- transition: a real topic/proof/example transition, not a technical window edge;
 - unresolved: evidence is too ambiguous to reconstruct safely.
 
-The lecturer may make mistakes and then fix them. Preserve BOTH the mistaken event and the later
-correction as evidence. Do not silently replace the first by textbook knowledge. Conversely, do not
-label a statement wrong merely because it conflicts with textbook knowledge: source faithfulness is
-separate from mathematical validation.
+The lecturer may make mistakes and then fix them. Preserve both the mistaken event and the later
+correction as evidence. Do not replace either with textbook knowledge. Technical window overlap is
+not semantic structure: repeated material is expected and will be reconciled by the host.
 
 `source_status=observed` means directly supported by audio/visible board. Use `reconstructed` only
 for a local reconstruction strongly forced by the evidence; use `inferred` sparingly and never for
@@ -410,6 +382,7 @@ Write descriptive strings in language code `{self.output_language}`.
         result.end = chunk.end
         for index, item in enumerate(result.observations):
             item.window_id = chunk.id
+            item.window_ids = _merge_unique(item.window_ids, [chunk.id])
             if not item.id:
                 item.id = f"obs_{chunk.id}_{index:03d}"
             item.start = min(max(item.start, chunk.start), chunk.end)
@@ -418,92 +391,97 @@ Write descriptive strings in language code `{self.output_language}`.
                 item.evidence_refs = [chunk.id]
         return result
 
-    def update_knowledge(
+    def track_episodes(
         self,
         kb: LectureKnowledgeBase,
         batch: WindowObservations,
         added_observation_ids: list[str],
-    ) -> KnowledgeUpdate:
-        state = compact_knowledge_state(kb, self.config)
+    ) -> EpisodeTrackingUpdate:
+        new_ids = set(added_observation_ids)
         new_observations = [
             item.model_dump(mode="json")
             for item in kb.observations
-            if item.id in set(added_observation_ids)
+            if item.id in new_ids
         ]
-        prompt = f"""Update the canonical event-sourced knowledge state of a lecture after one
-overlapping evidence window. Return only a DELTA, not a rewritten knowledge base.
+        recent_episodes = [
+            item.model_dump(mode="json")
+            for item in kb.episodes[-8:]
+        ]
+        active_symbols = [
+            item.model_dump(mode="json")
+            for item in kb.symbols
+            if item.active
+        ][-80:]
+        prompt = f"""Track semantic episodes in a university lecture. The host owns all evidence
+and will assign EVERY canonical observation to an episode. Your job is only to place semantic
+boundaries and describe typed symbols; never create claims or document sections.
 
-Current compact state:
-{json.dumps(state, ensure_ascii=False, separators=(",", ":"))}
+Recent/open episodes:
+{json.dumps(recent_episodes, ensure_ascii=False, separators=(",", ":"))}
 
-New observations from {batch.window_id}:
+New canonical observations from {batch.window_id}:
 {json.dumps(new_observations, ensure_ascii=False, separators=(",", ":"))}
 
-Rules:
-1. Claims are canonical statements used later to write the lecture. Deduplicate repeated overlap
-   evidence. Every claim must cite observation ids in evidence_ids.
-2. If a later observation explicitly corrects/retracts an earlier active claim, create the corrected
-   claim and put the old claim id in `supersedes`. Do NOT supersede merely because you believe the old
-   claim is mathematically wrong.
-3. `source_status` describes provenance. `math_status` is independent: normally keep it `unchecked`
-   here. This pass is not the mathematical auditor.
-4. Maintain scoped typed symbols. The same glyph may have different meanings in different scopes;
-   create separate SymbolRecord entries instead of merging incompatible meanings.
-5. Add semantic anchors for real topic/definition/theorem/proof/example/notation/correction
-   transitions. Technical window boundaries are not anchors.
-6. Preserve unresolved conflicts instead of inventing a resolution.
-7. For an already-existing claim that only gains evidence, reuse its exact existing id and return an
-   upsert with the union of relevant evidence ids. New ids may be left empty; the host assigns them.
+Active symbols:
+{json.dumps(active_symbols, ensure_ascii=False, separators=(",", ":"))}
 
-Write strings in language code `{self.output_language}`.
+For `boundaries`, emit a boundary BEFORE an observation only when a genuinely new semantic episode
+starts: a new definition/theorem/proof/example/derivation/topic, not merely because a technical
+window began. If the first observations continue the currently open proof/topic, emit no boundary.
+A lecturer correction normally stays in the same episode. `close_after_observation_ids` is optional
+and should be used only when an episode clearly ends without another episode starting immediately.
+
+For symbols, give meaning/type_hint and cite canonical observation ids in evidence_ids. Do not choose
+a global scope: the host derives symbol scope from the semantic episode containing the evidence.
+Do not repeat unchanged symbols just because they reappear in an overlapping window.
+
+This is state tracking, not summarization. Preserve ambiguity in `unresolved`. Write labels/descriptions
+in language code `{self.output_language}`.
 """
         return self._structured(
             prompt,
-            KnowledgeUpdate,
-            operation="knowledge_update",
-            max_tokens=4096,
+            EpisodeTrackingUpdate,
+            operation="episode_track",
+            max_tokens=3072,
         )
 
-    def plan_outline(
+    def plan_episode_hierarchy(
         self,
         kb: LectureKnowledgeBase,
         transcript: Transcript,
-    ) -> LectureOutline:
-        state = compact_knowledge_state(kb, self.config)
-        contexts = anchor_contexts(kb, transcript, self.config)
-        prompt = f"""Plan the final lecture structure AFTER the entire video has been processed.
-Technical extraction windows overlap and must be ignored as document boundaries.
+    ) -> EpisodeHierarchyPlan:
+        episodes = [
+            item.model_dump(mode="json")
+            for item in sorted(kb.episodes, key=lambda item: (item.start, item.end))
+            if item.observation_ids
+        ]
+        contexts = episode_contexts(kb, transcript, self.config)
+        prompt = f"""Build a hierarchy over an ALREADY FIXED ordered sequence of semantic episodes.
+You are not allowed to invent/remove/reorder episodes, claims, timestamps, or evidence. Return only
+boundary decisions before existing episode ids.
 
-Canonical knowledge state:
-{json.dumps(state, ensure_ascii=False, separators=(",", ":"))}
+Semantic episodes (immutable leaves, chronological):
+{json.dumps(episodes, ensure_ascii=False, separators=(",", ":"))}
 
-Raw transcript context around semantic anchors:
+Transcript context around their boundaries:
 {json.dumps(contexts, ensure_ascii=False, separators=(",", ":"))}
 
-Create at most {self.config.max_outline_sections} semantic sections in chronological order. Merge
-anchors that are really one proof/definition/example split by a window boundary. A section may span
-many extraction windows. Conversely, split only at genuine semantic transitions visible in the
-evidence.
+Use `level=topic` for a small number of major lecture sections and `level=subtopic` for useful
+internal groupings. The first episode implicitly starts a topic; include a boundary before it only if
+you want to provide a better title. Group adjacent episodes according to the actual lecture structure:
+a theorem and its proof normally stay in one top-level topic, as do a definition and its immediate
+properties. Technical window boundaries are irrelevant.
 
-Each section must cite active claim ids and/or evidence observation ids. Do not include superseded
-or retracted claims as final mathematical content. They may matter only to understand a correction.
-Set start/end to cover the evidence supporting the section and ensure the intervals are monotone,
-nonempty, and collectively cover the meaningful lecture content. Write titles in language code
-`{self.output_language}`. Do not add textbook topics absent from the lecture.
+This operation only groups leaves. The host will derive every section's time range, claims and
+evidence by unioning its episodes, so do not attempt to specify those fields. Do not add textbook
+topics absent from the evidence. Write titles in language code `{self.output_language}`.
 """
-        outline = self._structured(
+        return self._structured(
             prompt,
-            LectureOutline,
-            operation="outline_plan",
-            max_tokens=4096,
+            EpisodeHierarchyPlan,
+            operation="episode_hierarchy",
+            max_tokens=3072,
         )
-        outline.sections.sort(key=lambda item: (item.start, item.end))
-        for index, section in enumerate(outline.sections):
-            if not section.id:
-                section.id = f"section_{index:03d}"
-            if section.end < section.start:
-                section.end = section.start
-        return outline
 
     def write_section(
         self,
@@ -512,25 +490,26 @@ nonempty, and collectively cover the meaningful lecture content. Write titles in
         transcript: Transcript,
     ) -> ChunkNotes:
         evidence = evidence_for_section(kb, section, transcript, self.config)
-        prompt = f"""Write ONE final LaTeX-ready lecture-note section from the canonical lecture
-knowledge base and local raw evidence. This is a synthesis pass, not a transcript chunk summary.
+        prompt = f"""Write ONE final LaTeX-ready lecture-note section from a FIXED group of semantic
+episodes. The episode sequence is the document structure; do not repartition it and do not create
+material outside it.
 
 Section evidence:
 {json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
-- Use active canonical claims as the default mathematical content.
-- Preserve the lecturer's terminology, notation, proof order, and level of detail.
-- A superseded/retracted lecturer mistake must not appear as a current theorem/formula. If the
-  correction itself is pedagogically relevant, it may be mentioned briefly.
+- Follow semantic episodes in their given order. Their observations/claims are the source of truth.
+- Preserve the lecturer's terminology, notation, proof order, corrections, and level of detail.
+- A superseded/retracted lecturer mistake must not appear as current mathematical content.
 - Do not silently replace an unresolved lecturer statement with textbook knowledge.
-- Do not introduce mathematical assertions not supported by a claim/observation/transcript excerpt.
-- `source_claim_ids` and `source_evidence_ids` on every NoteBlock are mandatory provenance for
-  substantive blocks.
-- Use formal block types only when the lecturer presents the material as such. Do not emit raw
-  LaTeX environment or section commands.
-- Put uncertain material in `unresolved`, not in note blocks.
-- Keep the section coherent even when its evidence came from several overlapping technical windows.
+- Do not introduce mathematical assertions unsupported by the supplied episode evidence.
+- Reconstructed/inferred observations are weaker evidence than directly observed ones; if the raw
+  evidence does not support a safe statement, put it in `unresolved` instead of completing it from
+  general knowledge.
+- `source_claim_ids` and/or `source_evidence_ids` on every substantive NoteBlock must point into this
+  section's episode evidence.
+- Use formal block types only when the lecturer presents the material as such. Do not emit raw LaTeX
+  environment or section commands.
 - Write prose in language code `{self.output_language}` and mathematics in LaTeX.
 """
         notes = self._structured(
@@ -555,6 +534,7 @@ Rules:
             item.model_dump(mode="json")
             for item in kb.claims[-2 * self.config.knowledge_max_active_claims :]
         ]
+        state["episodes"] = [item.model_dump(mode="json") for item in kb.episodes]
         draft = [
             {
                 "section_index": section_index,
@@ -571,26 +551,23 @@ Rules:
         ]
         prompt = f"""Perform a final DOCUMENT-LEVEL validation of reconstructed lecture notes.
 
-Canonical lecture state:
+Canonical lecture state and semantic episodes:
 {json.dumps(state, ensure_ascii=False, separators=(",", ":"))}
 
 Draft:
 {json.dumps(draft, ensure_ascii=False, separators=(",", ":"))}
 
-This pass exists to catch errors that local windows cannot see:
-- a superseded lecturer typo accidentally surviving after a later correction;
-- inconsistent symbol meaning/domain/codomain across sections;
-- duplicated fragments caused by overlapping windows;
-- a proof/definition split incorrectly at a former chunk boundary;
-- algebraic/sign/type errors introduced by reconstruction;
-- unsupported textbook extrapolation presented as if the lecturer said it.
+The episode graph already determines structure. This pass must not create missing lecture content or
+reorganize sections. It exists only to detect residual inconsistencies between the rendered draft and
+the episode evidence: a superseded lecturer typo surviving after correction, duplicated rendered
+content, a symbol meaning leaking across episode scopes, or algebra/type damage introduced during
+section synthesis.
 
-Do not 'correct' an active lecturer statement solely because external mathematics says it is wrong.
-If source-faithful content is mathematically suspicious but was not corrected in the lecture, add an
-unresolved item. Apply a block correction only when the canonical evidence supports the replacement
-or the draft itself contains a reconstruction inconsistency. Do not rewrite for style. Return the
-complete corrected block latex for each correction and write reasons in language code
-`{self.output_language}`.
+Do not complete an empty/ambiguous proof from unchecked or reconstructed claims. Do not 'correct' an
+active lecturer statement solely because external mathematics says it is wrong. If evidence is
+insufficient, add an unresolved item rather than a replacement. Apply a block correction only when
+the replacement is directly supported by canonical episode evidence. Do not rewrite for style.
+Return complete corrected block latex and write reasons in language code `{self.output_language}`.
 """
         return self._structured(
             prompt,

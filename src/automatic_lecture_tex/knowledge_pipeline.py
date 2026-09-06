@@ -10,10 +10,14 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
+from .episode_graph import (
+    apply_episode_tracking,
+    build_outline_from_episodes,
+    close_open_episodes,
+)
 from .knowledge import (
     KnowledgeOrchestrator,
     apply_global_validation,
-    apply_knowledge_update,
     compact_knowledge_state,
     merge_window_observations,
 )
@@ -21,12 +25,12 @@ from .llm import LectureModelClient
 from .media import copy_asset
 from .schemas import (
     ChunkNotes,
+    EpisodeHierarchyPlan,
+    EpisodeTrackingUpdate,
     GlobalValidation,
-    KnowledgeUpdate,
     LectureIR,
     LectureKnowledgeBase,
     LectureOutline,
-    OutlineSection,
     VisualEvidence,
     WindowObservations,
 )
@@ -44,7 +48,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-KNOWLEDGE_CACHE_VERSION = 1
+# Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
+# replayed into the episode graph because they let an LLM create canonical claims independently.
+KNOWLEDGE_CACHE_VERSION = 2
 
 
 def _collect_visual_evidence(
@@ -137,40 +143,10 @@ def _load_window_artifact(path: Path, fingerprint: str):
         if payload.get("fingerprint") != fingerprint:
             return None
         batch = WindowObservations.model_validate(payload["observations"])
-        update = KnowledgeUpdate.model_validate(payload["knowledge_update"])
-        return payload, batch, update
+        tracking = EpisodeTrackingUpdate.model_validate(payload["episode_update"])
+        return payload, batch, tracking
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
-
-
-def _ensure_outline(
-    outline: LectureOutline,
-    kb: LectureKnowledgeBase,
-    transcript: Transcript,
-    lecture_title: str,
-) -> LectureOutline:
-    if outline.sections:
-        return outline
-    if not transcript.segments:
-        return outline
-    outline.sections = [
-        OutlineSection(
-            id="section_000",
-            title=lecture_title,
-            start=transcript.segments[0].start,
-            end=transcript.segments[-1].end,
-            claim_ids=[
-                item.id
-                for item in kb.claims
-                if item.status == "active"
-            ],
-            evidence_ids=[item.id for item in kb.observations],
-        )
-    ]
-    outline.unresolved.append(
-        "Семантический планировщик не вернул секции; использована одна секция на всю лекцию."
-    )
-    return outline
 
 
 def run_knowledge_pipeline(
@@ -214,7 +190,7 @@ def run_knowledge_pipeline(
     visual_evidence_successful = 0
     vision_seconds = 0.0
     extract_seconds = 0.0
-    update_seconds = 0.0
+    episode_track_seconds = 0.0
 
     for chunk in chunks:
         state_before = compact_knowledge_state(kb, pipeline.config.notes)
@@ -232,20 +208,20 @@ def run_knowledge_pipeline(
         artifact = work / "knowledge_windows" / f"{chunk.id}.json"
         cached = None if force else _load_window_artifact(artifact, window_fingerprint)
         if cached is not None:
-            payload, batch, update = cached
+            payload, batch, tracking = cached
             added_ids = merge_window_observations(kb, batch)
-            apply_knowledge_update(kb, update, window_id=chunk.id)
+            apply_episode_tracking(kb, tracking, added_ids, window_id=chunk.id)
             cache_hits += 1
             visual_requests_processed += len(payload.get("visual_requests", []))
             visual_evidence_successful += sum(
                 item.get("kind") != "none" and float(item.get("confidence", 0.0)) >= 0.75
                 for item in payload.get("visual_evidence", [])
             )
-            logger.info("[%s] %s knowledge cache hit", lecture.id, chunk.id)
+            logger.info("[%s] %s episode cache hit", lecture.id, chunk.id)
             continue
 
         logger.info(
-            "[%s] extracting knowledge from %s (%d/%d)",
+            "[%s] extracting evidence/episodes from %s (%d/%d)",
             lecture.id,
             chunk.id,
             processed_windows + cache_hits + 1,
@@ -272,10 +248,10 @@ def run_knowledge_pipeline(
         extract_seconds += time.perf_counter() - extract_started
         added_ids = merge_window_observations(kb, batch)
 
-        update_started = time.perf_counter()
-        update = orchestrator.update_knowledge(kb, batch, added_ids)
-        update_seconds += time.perf_counter() - update_started
-        apply_knowledge_update(kb, update, window_id=chunk.id)
+        track_started = time.perf_counter()
+        tracking = orchestrator.track_episodes(kb, batch, added_ids)
+        episode_track_seconds += time.perf_counter() - track_started
+        apply_episode_tracking(kb, tracking, added_ids, window_id=chunk.id)
         processed_windows += 1
 
         atomic_json_dump(
@@ -286,11 +262,13 @@ def run_knowledge_pipeline(
                 "visual_requests": [item.model_dump(mode="json") for item in requests],
                 "visual_evidence": [item.model_dump(mode="json") for item in evidence],
                 "observations": batch.model_dump(mode="json"),
-                "knowledge_update": update.model_dump(mode="json"),
+                "episode_update": tracking.model_dump(mode="json"),
             },
         )
         atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
+    # A technical window never closes an episode. End-of-lecture is the only unconditional close.
+    close_open_episodes(kb)
     kb_fingerprint = stable_hash(
         {
             "kb": kb.model_dump(mode="json"),
@@ -301,35 +279,52 @@ def run_knowledge_pipeline(
     )
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
-    outline_path = work / "lecture_outline.json"
-    outline_fingerprint = stable_hash(
+    hierarchy_path = work / "episode_hierarchy.json"
+    hierarchy_fingerprint = stable_hash(
         {
             "kb_fingerprint": kb_fingerprint,
             "transcript": transcript.model_dump(mode="json"),
             "boundary_context_seconds": pipeline.config.notes.boundary_context_seconds,
-            "max_outline_sections": pipeline.config.notes.max_outline_sections,
         }
     )
-    outline: LectureOutline | None = None
-    if outline_path.exists() and not force:
+    hierarchy: EpisodeHierarchyPlan | None = None
+    if hierarchy_path.exists() and not force:
         try:
-            payload = json.loads(outline_path.read_text(encoding="utf-8"))
-            if payload.get("fingerprint") == outline_fingerprint:
-                outline = LectureOutline.model_validate(payload["outline"])
+            payload = json.loads(hierarchy_path.read_text(encoding="utf-8"))
+            if payload.get("fingerprint") == hierarchy_fingerprint:
+                hierarchy = EpisodeHierarchyPlan.model_validate(payload["hierarchy"])
         except (json.JSONDecodeError, KeyError, ValidationError):
-            outline = None
-    outline_started = time.perf_counter()
-    if outline is None:
-        outline = orchestrator.plan_outline(kb, transcript)
-        outline = _ensure_outline(outline, kb, transcript, lecture.title or lecture.id)
+            hierarchy = None
+
+    hierarchy_started = time.perf_counter()
+    if hierarchy is None:
+        hierarchy = orchestrator.plan_episode_hierarchy(kb, transcript)
         atomic_json_dump(
-            outline_path,
+            hierarchy_path,
             {
-                "fingerprint": outline_fingerprint,
-                "outline": outline.model_dump(mode="json"),
+                "fingerprint": hierarchy_fingerprint,
+                "hierarchy": hierarchy.model_dump(mode="json"),
             },
         )
-    outline_seconds = time.perf_counter() - outline_started
+    hierarchy_seconds = time.perf_counter() - hierarchy_started
+
+    # This is a deterministic projection of the episode graph. The hierarchy LLM only chooses
+    # boundaries/titles; it cannot create, drop, reorder, resize, or populate a section independently.
+    outline = LectureOutline(
+        sections=build_outline_from_episodes(
+            kb,
+            hierarchy,
+            lecture_title=lecture.title or lecture.id,
+        ),
+        unresolved=list(hierarchy.unresolved),
+    )
+    atomic_json_dump(
+        work / "lecture_outline.json",
+        {
+            "fingerprint": hierarchy_fingerprint,
+            "outline": outline.model_dump(mode="json"),
+        },
+    )
 
     note_sections: list[ChunkNotes] = []
     section_cache_hits = 0
@@ -411,8 +406,8 @@ def run_knowledge_pipeline(
         if symbol.active and symbol.symbol and symbol.meaning:
             symbol_meanings.setdefault(symbol.symbol, set()).add(symbol.meaning)
     for symbol, meanings in symbol_meanings.items():
-        # The course-level legacy registry is unscoped. Export only unambiguous symbols; scoped
-        # collisions remain represented faithfully in lecture_kb.json.
+        # The course-level legacy registry is unscoped. Export only symbols whose meaning is
+        # unambiguous across episode scopes.
         if len(meanings) == 1:
             notation.setdefault(symbol, next(iter(meanings)))
     pipeline._save_notation_registry(notation)
@@ -426,25 +421,31 @@ def run_knowledge_pipeline(
         work / "run_metrics.json",
         {
             "lecture_id": lecture.id,
-            "architecture": "knowledge",
+            "architecture": "knowledge_episode_graph",
             "media_seconds": round(media_seconds, 3),
             "asr_seconds": round(asr_seconds, 3),
             "notes_seconds": round(time.perf_counter() - notes_started, 3),
             "vision_seconds": round(vision_seconds, 3),
             "knowledge_extract_seconds": round(extract_seconds, 3),
-            "knowledge_update_seconds": round(update_seconds, 3),
-            "outline_seconds": round(outline_seconds, 3),
+            "episode_track_seconds": round(episode_track_seconds, 3),
+            "hierarchy_seconds": round(hierarchy_seconds, 3),
             "section_write_seconds": round(section_write_seconds, 3),
             "global_validation_seconds": round(validation_seconds, 3),
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "windows_total": len(chunks),
             "windows_processed": processed_windows,
             "window_cache_hits": cache_hits,
+            "episodes_total": len(kb.episodes),
+            "topic_sections_total": len(outline.sections),
+            "subtopics_total": sum(len(item.subsections) for item in outline.sections),
             "sections_total": len(note_sections),
             "section_cache_hits": section_cache_hits,
             "observations_total": len(kb.observations),
+            "observation_aliases_total": len(kb.observation_aliases),
             "claims_total": len(kb.claims),
             "active_claims": sum(item.status == "active" for item in kb.claims),
+            "superseded_claims": sum(item.status == "superseded" for item in kb.claims),
+            "retracted_claims": sum(item.status == "retracted" for item in kb.claims),
             "symbols_total": len(kb.symbols),
             "anchors_total": len(kb.anchors),
             "visual_requests_processed": visual_requests_processed,

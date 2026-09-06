@@ -197,9 +197,32 @@ class AnchorKind(StrEnum):
     CORRECTION = "correction"
 
 
+class EpisodeKind(StrEnum):
+    TOPIC = "topic"
+    DEFINITION = "definition"
+    THEOREM = "theorem"
+    PROOF = "proof"
+    EXAMPLE = "example"
+    DERIVATION = "derivation"
+    NOTATION = "notation"
+    REMARK = "remark"
+
+
+class EpisodeStatus(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class HierarchyLevel(StrEnum):
+    TOPIC = "topic"
+    SUBTOPIC = "subtopic"
+
+
 class LectureObservation(BaseModel):
     id: str = ""
     window_id: str = ""
+    window_ids: list[str] = Field(default_factory=list)
+    episode_id: str = ""
     start: float
     end: float
     kind: ObservationKind
@@ -225,6 +248,7 @@ class KnowledgeClaim(BaseModel):
     content: str
     latex: str | None = None
     scope: str = ""
+    episode_id: str = ""
     status: ClaimStatus = ClaimStatus.ACTIVE
     math_status: MathStatus = MathStatus.UNCHECKED
     source_status: SourceStatus = SourceStatus.OBSERVED
@@ -239,6 +263,7 @@ class SymbolRecord(BaseModel):
     meaning: str
     type_hint: str = ""
     scope: str = ""
+    episode_id: str = ""
     introduced_at: float = 0.0
     evidence_ids: list[str] = Field(default_factory=list)
     active: bool = True
@@ -253,7 +278,58 @@ class SemanticAnchor(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class SemanticEpisode(BaseModel):
+    id: str = ""
+    title: str
+    kind: EpisodeKind = EpisodeKind.TOPIC
+    start: float
+    end: float
+    status: EpisodeStatus = EpisodeStatus.OPEN
+    observation_ids: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    symbol_ids: list[str] = Field(default_factory=list)
+    window_ids: list[str] = Field(default_factory=list)
+
+    @property
+    def anchor_kind(self) -> AnchorKind:
+        mapping = {
+            EpisodeKind.DEFINITION: AnchorKind.DEFINITION,
+            EpisodeKind.THEOREM: AnchorKind.THEOREM,
+            EpisodeKind.PROOF: AnchorKind.PROOF,
+            EpisodeKind.EXAMPLE: AnchorKind.EXAMPLE,
+            EpisodeKind.NOTATION: AnchorKind.NOTATION,
+        }
+        return mapping.get(self.kind, AnchorKind.TOPIC)
+
+
+class EpisodeBoundary(BaseModel):
+    before_observation_id: str
+    kind: EpisodeKind = EpisodeKind.TOPIC
+    title: str
+
+
+class EpisodeTrackingUpdate(BaseModel):
+    boundaries: list[EpisodeBoundary] = Field(default_factory=list)
+    close_after_observation_ids: list[str] = Field(default_factory=list)
+    symbols: list[SymbolRecord] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class HierarchyBoundary(BaseModel):
+    before_episode_id: str
+    level: HierarchyLevel = HierarchyLevel.TOPIC
+    title: str
+
+
+class EpisodeHierarchyPlan(BaseModel):
+    boundaries: list[HierarchyBoundary] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
 class KnowledgeUpdate(BaseModel):
+    """Legacy delta schema retained for cached/legacy tooling; the knowledge pipeline no longer
+    lets an LLM create canonical claims or independent anchors."""
+
     claims: list[KnowledgeClaim] = Field(default_factory=list)
     symbols: list[SymbolRecord] = Field(default_factory=list)
     anchors: list[SemanticAnchor] = Field(default_factory=list)
@@ -264,10 +340,20 @@ class LectureKnowledgeBase(BaseModel):
     lecture_id: str
     title: str
     observations: list[LectureObservation] = Field(default_factory=list)
+    observation_aliases: dict[str, str] = Field(default_factory=dict)
     claims: list[KnowledgeClaim] = Field(default_factory=list)
     symbols: list[SymbolRecord] = Field(default_factory=list)
+    episodes: list[SemanticEpisode] = Field(default_factory=list)
+    # Compatibility view only: anchors are deterministically derived from episodes.
     anchors: list[SemanticAnchor] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
+
+
+class OutlineSubsection(BaseModel):
+    title: str
+    start: float
+    end: float
+    episode_ids: list[str] = Field(default_factory=list)
 
 
 class OutlineSection(BaseModel):
@@ -275,9 +361,11 @@ class OutlineSection(BaseModel):
     title: str
     start: float
     end: float
+    episode_ids: list[str] = Field(default_factory=list)
     anchor_ids: list[str] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+    subsections: list[OutlineSubsection] = Field(default_factory=list)
 
 
 class LectureOutline(BaseModel):
