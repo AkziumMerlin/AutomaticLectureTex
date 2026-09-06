@@ -2,15 +2,16 @@ from automatic_lecture_tex.config import AppConfig
 from automatic_lecture_tex.pipeline import Pipeline
 from automatic_lecture_tex.schemas import (
     ChunkNotes,
+    EpisodeBoundary,
+    EpisodeHierarchyPlan,
+    EpisodeKind,
+    EpisodeTrackingUpdate,
     GlobalValidation,
-    KnowledgeClaim,
-    KnowledgeUpdate,
+    HierarchyBoundary,
+    HierarchyLevel,
     LectureObservation,
-    LectureOutline,
     NoteBlock,
     ObservationKind,
-    OutlineSection,
-    SemanticAnchor,
     Transcript,
     TranscriptSegment,
     WindowObservations,
@@ -70,33 +71,23 @@ class FakeKnowledgeLLM:
                     )
                 ]
             )
-        if schema is KnowledgeUpdate:
-            return KnowledgeUpdate(
-                claims=[
-                    KnowledgeClaim(
-                        content="Определение функционала",
-                        evidence_ids=["obs_window_0000_000"],
-                        introduced_at=0,
+        if schema is EpisodeTrackingUpdate:
+            return EpisodeTrackingUpdate(
+                boundaries=[
+                    EpisodeBoundary(
+                        before_observation_id="obs_window_0000_000",
+                        kind=EpisodeKind.DEFINITION,
+                        title="Определение функционала",
                     )
-                ],
-                anchors=[
-                    SemanticAnchor(
-                        timestamp=0,
-                        title="Линейные функционалы",
-                        evidence_ids=["obs_window_0000_000"],
-                    )
-                ],
+                ]
             )
-        if schema is LectureOutline:
-            return LectureOutline(
-                sections=[
-                    OutlineSection(
-                        id="section_000",
+        if schema is EpisodeHierarchyPlan:
+            return EpisodeHierarchyPlan(
+                boundaries=[
+                    HierarchyBoundary(
+                        before_episode_id="episode_0000",
+                        level=HierarchyLevel.TOPIC,
                         title="Линейные функционалы",
-                        start=0,
-                        end=40,
-                        claim_ids=["claim_window_0000_0000"],
-                        evidence_ids=["obs_window_0000_000"],
                     )
                 ]
             )
@@ -107,7 +98,7 @@ class FakeKnowledgeLLM:
                     NoteBlock(
                         type="paragraph",
                         latex="Определение функционала.",
-                        source_claim_ids=["claim_window_0000_0000"],
+                        source_claim_ids=["claim_obs_window_0000_000"],
                         source_evidence_ids=["obs_window_0000_000"],
                     )
                 ],
@@ -117,7 +108,7 @@ class FakeKnowledgeLLM:
         raise AssertionError(f"unexpected schema: {schema}")
 
 
-def test_knowledge_pipeline_builds_kb_outline_and_ir(tmp_path, monkeypatch):
+def test_knowledge_pipeline_builds_episode_graph_outline_and_ir(tmp_path, monkeypatch):
     source_path = tmp_path / "lecture.mp4"
     source_path.write_bytes(b"source")
     cfg = AppConfig.model_validate(
@@ -153,14 +144,15 @@ def test_knowledge_pipeline_builds_kb_outline_and_ir(tmp_path, monkeypatch):
 
     work = cfg.runtime.work_dir / "lecture"
     assert (work / "lecture_kb.json").exists()
+    assert (work / "episode_hierarchy.json").exists()
     assert (work / "lecture_outline.json").exists()
     assert (work / "global_validation.json").exists()
     assert ir.chunks[0].section_title == "Линейные функционалы"
     assert ir.chunks[0].blocks[0].latex == "Определение функционала."
     assert fake_llm.operations == [
         "knowledge_extract",
-        "knowledge_update",
-        "outline_plan",
+        "episode_track",
+        "episode_hierarchy",
         "section_write",
         "global_validation",
     ]
