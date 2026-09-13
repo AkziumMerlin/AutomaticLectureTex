@@ -9,8 +9,8 @@ from .schemas import (
     ClaimStatus,
     CorrectionRecord,
     EpisodeHierarchyPlan,
-    MathAudit,
     LectureKnowledgeBase,
+    MathAudit,
     OutlineSection,
     SemanticEpisode,
 )
@@ -18,6 +18,7 @@ from .schemas import (
 if TYPE_CHECKING:
     from .config import NotesConfig
     from .knowledge import KnowledgeOrchestrator
+    from .schemas import Transcript
 
 HIERARCHY_CACHE_VERSION = 2
 EPISODE_SYNTHESIS_CACHE_VERSION = 1
@@ -74,7 +75,9 @@ def _compact_symbol(item) -> dict[str, Any]:
 
 
 def _episode_summary(kb: LectureKnowledgeBase, episode: SemanticEpisode) -> dict[str, Any]:
-    observations = [item for item in kb.observations if item.id in set(episode.observation_ids)]
+    observations = [
+        item for item in kb.observations if item.id in set(episode.observation_ids)
+    ]
     observations.sort(key=lambda item: (item.start, item.end, item.id))
 
     def endpoint(item):
@@ -129,10 +132,18 @@ of semantic lecture episodes. Episodes are immutable leaves: never invent, remov
 or rewrite them. Return boundaries only before episode ids from CURRENT BATCH.
 
 Previous context (read-only; do not return boundaries for these ids):
-{json.dumps([_episode_summary(kb, item) for item in previous], ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(
+    [_episode_summary(kb, item) for item in previous],
+    ensure_ascii=False,
+    separators=(",", ":"),
+)}
 
 Current batch:
-{json.dumps([_episode_summary(kb, item) for item in batch], ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(
+    [_episode_summary(kb, item) for item in batch],
+    ensure_ascii=False,
+    separators=(",", ":"),
+)}
 
 Use `level=topic` only for genuine major lecture-topic boundaries and `level=subtopic` for useful
 internal groupings. A theorem and its proof normally remain in the same topic, as do a definition
@@ -149,7 +160,8 @@ Write titles in language code `{orchestrator.output_language}`.
         for boundary in partial.boundaries:
             if boundary.before_episode_id not in allowed_ids:
                 unresolved.append(
-                    f"Ignored hierarchy boundary for out-of-batch episode {boundary.before_episode_id}."
+                    "Ignored hierarchy boundary for out-of-batch episode "
+                    f"{boundary.before_episode_id}."
                 )
                 continue
             key = (boundary.before_episode_id, boundary.level)
@@ -167,6 +179,7 @@ def _episode_payload_for_observation_ids(
     episode: SemanticEpisode,
     observation_ids: list[str],
     config: NotesConfig,
+    transcript: Transcript | None = None,
 ) -> dict[str, Any]:
     selected_ids = set(observation_ids)
     observations = [item for item in kb.observations if item.id in selected_ids]
@@ -181,23 +194,44 @@ def _episode_payload_for_observation_ids(
         and bool(selected_ids.intersection(item.evidence_ids))
     ]
 
-    local_symbols = [
+    direct_symbols = [
         item
         for item in kb.symbols
-        if item.active
-        and (item.episode_id == episode.id or bool(selected_ids.intersection(item.evidence_ids)))
+        if item.active and bool(selected_ids.intersection(item.evidence_ids))
     ]
-    local_symbol_ids = {item.id for item in local_symbols}
-    previous_symbols = sorted(
+    direct_symbol_ids = {item.id for item in direct_symbols}
+    batch_start = observations[0].start if observations else episode.start
+    previous_symbol_candidates = sorted(
         [
             item
             for item in kb.symbols
             if item.active
-            and item.id not in local_symbol_ids
-            and item.introduced_at <= episode.start
+            and item.id not in direct_symbol_ids
+            and item.introduced_at <= batch_start
         ],
         key=lambda item: (item.introduced_at, item.id),
-    )[-config.episode_symbol_context_limit :]
+    )
+    if config.episode_symbol_context_limit:
+        previous_symbols = previous_symbol_candidates[-config.episode_symbol_context_limit :]
+    else:
+        previous_symbols = []
+
+    transcript_segments = []
+    if transcript is not None and observations:
+        context = config.episode_transcript_context_seconds
+        start = observations[0].start - context
+        end = observations[-1].end + context
+        transcript_segments = [
+            {
+                "id": segment.id,
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text,
+                "confidence": segment.confidence,
+            }
+            for segment in transcript.segments
+            if segment.end >= start and segment.start <= end
+        ]
 
     return {
         "episode": {
@@ -209,7 +243,8 @@ def _episode_payload_for_observation_ids(
         },
         "observations": [_compact_observation(item) for item in observations],
         "claims": [_compact_claim(item, selected_ids) for item in claims],
-        "symbols": [_compact_symbol(item) for item in [*previous_symbols, *local_symbols]],
+        "symbols": [_compact_symbol(item) for item in [*previous_symbols, *direct_symbols]],
+        "transcript": transcript_segments,
     }
 
 
@@ -221,6 +256,7 @@ def episode_evidence_batches(
     kb: LectureKnowledgeBase,
     episode: SemanticEpisode,
     config: NotesConfig,
+    transcript: Transcript | None = None,
 ) -> list[dict[str, Any]]:
     """Split one semantic episode into evidence payloads with a hard serialized-size budget."""
 
@@ -238,12 +274,18 @@ def episode_evidence_batches(
 
     for observation_id in ordered_ids:
         candidate_ids = [*current_ids, observation_id]
-        candidate = _episode_payload_for_observation_ids(kb, episode, candidate_ids, config)
+        candidate = _episode_payload_for_observation_ids(
+            kb, episode, candidate_ids, config, transcript
+        )
         if current_ids and _payload_size(candidate) > packing_limit:
-            payload = _episode_payload_for_observation_ids(kb, episode, current_ids, config)
+            payload = _episode_payload_for_observation_ids(
+                kb, episode, current_ids, config, transcript
+            )
             batches.append(payload)
             current_ids = [observation_id]
-            single = _episode_payload_for_observation_ids(kb, episode, current_ids, config)
+            single = _episode_payload_for_observation_ids(
+                kb, episode, current_ids, config, transcript
+            )
             if _payload_size(single) > packing_limit:
                 raise ValueError(
                     f"single evidence atom in {episode.id} exceeds "
@@ -258,7 +300,9 @@ def episode_evidence_batches(
                 )
 
     if current_ids:
-        batches.append(_episode_payload_for_observation_ids(kb, episode, current_ids, config))
+        batches.append(
+            _episode_payload_for_observation_ids(kb, episode, current_ids, config, transcript)
+        )
 
     for index, payload in enumerate(batches):
         payload["batch"] = {"index": index, "count": len(batches)}
@@ -288,7 +332,8 @@ def write_episode_batch(
     previous_context: list[dict[str, Any]],
 ) -> ChunkNotes:
     prompt = f"""Write LaTeX-ready lecture notes for ONE bounded evidence batch inside ONE fixed
-semantic episode. Do not create document sections and do not pull material from outside this payload.
+semantic episode. Do not create document sections and do not pull material from outside this
+payload.
 
 Episode evidence:
 {json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
@@ -329,7 +374,9 @@ Rules:
         original_claims = list(block.source_claim_ids)
         original_evidence = list(block.source_evidence_ids)
         block.source_claim_ids = [item for item in original_claims if item in allowed_claims]
-        block.source_evidence_ids = [item for item in original_evidence if item in allowed_observations]
+        block.source_evidence_ids = [
+            item for item in original_evidence if item in allowed_observations
+        ]
         unknown_claims = sorted(set(original_claims) - allowed_claims)
         unknown_evidence = sorted(set(original_evidence) - allowed_observations)
         if unknown_claims or unknown_evidence:
@@ -368,9 +415,9 @@ Generated blocks:
 
 Report a correction only when a generated block contradicts or algebraically damages the supplied
 evidence. Do not improve style, add textbook material, or infer missing proof steps. If evidence is
-insufficient, add an `unresolved` item instead. `corrected_latex` must contain the complete corrected
-content of that block. Internal mathematical environments are allowed; renderer-owned outer
-section/theorem/proof/definition wrappers are not. Write reasons in language code
+insufficient, add an `unresolved` item instead. `corrected_latex` must contain the complete
+corrected content of that block. Internal mathematical environments are allowed; renderer-owned
+outer section/theorem/proof/definition wrappers are not. Write reasons in language code
 `{orchestrator.output_language}`.
 """
     return orchestrator._structured(
@@ -395,13 +442,15 @@ def apply_episode_validation(
             continue
         if item.confidence < threshold:
             notes.unresolved.append(
-                f"Неприменённая локальная правка (confidence={item.confidence:.2f}): {item.reason}"
+                "Неприменённая локальная правка "
+                f"(confidence={item.confidence:.2f}): {item.reason}"
             )
             continue
         block = notes.blocks[item.block_index]
         if not item.corrected_latex.strip():
             notes.unresolved.append(
-                f"Ignored empty episode-validation correction for block {item.block_index}: {item.reason}"
+                "Ignored empty episode-validation correction for block "
+                f"{item.block_index}: {item.reason}"
             )
             continue
         if block.latex.strip() == item.corrected_latex.strip():
