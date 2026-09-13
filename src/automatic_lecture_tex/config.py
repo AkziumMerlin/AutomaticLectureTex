@@ -93,7 +93,9 @@ class NotesConfig(BaseModel):
     @model_validator(mode="after")
     def validate_chunk_geometry(self) -> NotesConfig:
         if self.chunk_overlap_seconds >= self.chunk_target_seconds:
-            raise ValueError("notes.chunk_overlap_seconds must be smaller than chunk_target_seconds")
+            raise ValueError(
+                "notes.chunk_overlap_seconds must be smaller than chunk_target_seconds"
+            )
         return self
 
 
