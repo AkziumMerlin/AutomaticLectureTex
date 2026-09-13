@@ -62,9 +62,38 @@ def test_render_lecture_includes_correction_audit_comments():
     assert "confidence=0.90" in text
 
 
-def test_note_block_rejects_raw_latex_environment():
-    with pytest.raises(ValidationError):
-        NoteBlock(type=BlockType.PARAGRAPH, latex=r"\begin{cases}x=1\end{cases}")
+def test_note_block_allows_internal_math_environment():
+    block = NoteBlock(
+        type=BlockType.PARAGRAPH,
+        latex=r"Пусть $f(x)=\begin{cases}x,&x\ge0,\\-x,&x<0.\end{cases}$",
+    )
+
+    assert r"\begin{cases}" in block.latex
+
+
+def test_equation_block_allows_aligned_fragment():
+    block = NoteBlock(
+        type=BlockType.EQUATION,
+        latex=r"\begin{aligned}x&=y\\&=z\end{aligned}",
+    )
+
+    assert r"\begin{aligned}" in block.latex
+
+
+def test_note_block_rejects_renderer_owned_environment():
+    with pytest.raises(ValidationError, match="renderer owns document/block wrappers"):
+        NoteBlock(
+            type=BlockType.PARAGRAPH,
+            latex=r"\begin{theorem}T\end{theorem}",
+        )
+
+
+def test_equation_block_rejects_outer_display_environment():
+    with pytest.raises(ValidationError, match="equation note blocks"):
+        NoteBlock(
+            type=BlockType.EQUATION,
+            latex=r"\begin{equation}x=y\end{equation}",
+        )
 
 
 def test_note_block_requires_latex_in_structured_schema():
