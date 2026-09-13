@@ -4,6 +4,7 @@ import json
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from .generated_notes import GeneratedChunkNotes
 from .schemas import (
     ChunkNotes,
     ClaimStatus,
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from .schemas import Transcript
 
 HIERARCHY_CACHE_VERSION = 2
-EPISODE_SYNTHESIS_CACHE_VERSION = 1
+EPISODE_SYNTHESIS_CACHE_VERSION = 2
 
 
 def _merge_unique(left: list[str], right: Iterable[str]) -> list[str]:
@@ -349,17 +350,21 @@ Rules:
   insufficient, put the issue in `unresolved` instead of inventing content.
 - Every substantive block must cite only `source_claim_ids` and/or `source_evidence_ids` present in
   this evidence batch.
+- `latex` is the COMPLETE BODY of every returned block, including ordinary prose. It must never be
+  empty. If a block body cannot be reconstructed safely, omit that block and record the issue in
+  `unresolved` instead of returning an empty block.
 - Use formal block types only when the lecturer presents the material as such.
 - The deterministic renderer owns theorem/proof/definition/figure/section wrappers. Internal math
   environments such as aligned, cases, matrix, and split are allowed inside block LaTeX.
 - Write prose in language code `{orchestrator.output_language}` and mathematics in LaTeX.
 """
-    notes = orchestrator._structured(
+    generated = orchestrator._structured(
         prompt,
-        ChunkNotes,
+        GeneratedChunkNotes,
         operation="episode_write",
         max_tokens=4096,
     )
+    notes = generated.to_chunk_notes()
     batch = evidence["batch"]
     notes.chunk_id = f"{episode.id}_batch_{batch['index']:03d}"
     observations = evidence["observations"]
