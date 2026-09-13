@@ -76,8 +76,23 @@ class NotesConfig(BaseModel):
     knowledge_max_active_claims: int = Field(default=160, ge=20, le=1000)
     knowledge_recent_observations: int = Field(default=80, ge=10, le=1000)
     max_outline_sections: int = Field(default=40, ge=1, le=200)
+    # Legacy name retained for config compatibility. In the knowledge architecture this enables
+    # bounded episode-local validation; there is no full-lecture LLM validation pass anymore.
     global_validation: bool = True
     global_validation_apply_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    # Downstream-only budgets. They are deliberately excluded from evidence-window fingerprints so
+    # tuning synthesis does not invalidate ASR/visual/knowledge extraction caches.
+    hierarchy_batch_episodes: int = Field(default=24, ge=2, le=100)
+    episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
+    episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)
+    # Reserved for callers that explicitly inject a local transcript into an episode payload.
+    # Excluded from serialization so it cannot perturb existing cache fingerprints.
+    episode_transcript_context_seconds: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=120.0,
+        exclude=True,
+    )
     visual_rule_selector: bool = True
     visual_llm_selector: bool = False
     visual_dedupe_seconds: float = 8.0
@@ -86,7 +101,9 @@ class NotesConfig(BaseModel):
     @model_validator(mode="after")
     def validate_chunk_geometry(self) -> NotesConfig:
         if self.chunk_overlap_seconds >= self.chunk_target_seconds:
-            raise ValueError("notes.chunk_overlap_seconds must be smaller than chunk_target_seconds")
+            raise ValueError(
+                "notes.chunk_overlap_seconds must be smaller than chunk_target_seconds"
+            )
         return self
 
 
