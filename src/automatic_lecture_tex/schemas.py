@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TranscriptWord(BaseModel):
@@ -102,9 +102,16 @@ class BlockType(StrEnum):
 
 
 class NoteBlock(BaseModel):
+    """A renderable node in the final lecture IR.
+
+    Missing or ambiguous lecture content is represented by ``ChunkNotes.unresolved`` instead of an
+    empty placeholder block. This keeps the IR invariant explicit: every non-figure NoteBlock has
+    content that can actually be rendered.
+    """
+
     type: BlockType
     title: str | None = None
-    latex: str = ""
+    latex: str
     asset_path: str | None = None
     caption: str | None = None
     source_claim_ids: list[str] = Field(default_factory=list)
@@ -116,6 +123,19 @@ class NoteBlock(BaseModel):
         if r"\begin{" in value or r"\end{" in value:
             raise ValueError("note blocks must not contain raw LaTeX environments")
         return value
+
+    @model_validator(mode="after")
+    def require_renderable_content(self) -> NoteBlock:
+        if self.type == BlockType.FIGURE:
+            if not self.asset_path and not self.latex.strip():
+                raise ValueError("figure block must contain asset_path or latex")
+            return self
+        if not self.latex.strip():
+            raise ValueError(
+                "non-figure note block must contain non-empty latex; "
+                "use ChunkNotes.unresolved for unreconstructed content"
+            )
+        return self
 
 
 class NotationItem(BaseModel):
