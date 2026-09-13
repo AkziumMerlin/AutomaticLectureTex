@@ -1,7 +1,7 @@
 from automatic_lecture_tex.config import AppConfig
+from automatic_lecture_tex.generated_notes import GeneratedChunkNotes, GeneratedNoteBlock
 from automatic_lecture_tex.pipeline import Pipeline
 from automatic_lecture_tex.schemas import (
-    ChunkNotes,
     EpisodeBoundary,
     EpisodeHierarchyPlan,
     EpisodeKind,
@@ -10,7 +10,6 @@ from automatic_lecture_tex.schemas import (
     HierarchyLevel,
     LectureObservation,
     MathAudit,
-    NoteBlock,
     ObservationKind,
     Transcript,
     TranscriptSegment,
@@ -91,11 +90,11 @@ class FakeKnowledgeLLM:
                     )
                 ]
             )
-        if schema is ChunkNotes:
-            return ChunkNotes(
+        if schema is GeneratedChunkNotes:
+            return GeneratedChunkNotes(
                 section_title="ignored",
                 blocks=[
-                    NoteBlock(
+                    GeneratedNoteBlock(
                         type="paragraph",
                         latex="Определение функционала.",
                         source_claim_ids=["claim_obs_window_0000_000"],
