@@ -85,6 +85,7 @@ class NotesConfig(BaseModel):
     hierarchy_batch_episodes: int = Field(default=24, ge=2, le=100)
     episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
     episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)
+    episode_transcript_context_seconds: float = Field(default=20.0, ge=0.0, le=120.0)
     visual_rule_selector: bool = True
     visual_llm_selector: bool = False
     visual_dedupe_seconds: float = 8.0
