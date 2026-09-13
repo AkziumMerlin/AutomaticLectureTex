@@ -65,3 +65,29 @@ def test_render_lecture_includes_correction_audit_comments():
 def test_note_block_rejects_raw_latex_environment():
     with pytest.raises(ValidationError):
         NoteBlock(type=BlockType.PARAGRAPH, latex=r"\begin{cases}x=1\end{cases}")
+
+
+def test_note_block_requires_latex_in_structured_schema():
+    schema = NoteBlock.model_json_schema()
+
+    assert "latex" in schema["required"]
+
+
+def test_note_block_rejects_empty_renderable_content():
+    with pytest.raises(ValidationError, match="non-figure note block"):
+        NoteBlock(type=BlockType.THEOREM, latex="   ")
+
+
+def test_figure_block_may_use_asset_instead_of_latex():
+    block = NoteBlock(
+        type=BlockType.FIGURE,
+        latex="",
+        asset_path="figures/lecture_01/board.png",
+    )
+
+    assert block.asset_path == "figures/lecture_01/board.png"
+
+
+def test_empty_figure_block_is_invalid():
+    with pytest.raises(ValidationError, match="figure block"):
+        NoteBlock(type=BlockType.FIGURE, latex="")
