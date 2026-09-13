@@ -6,10 +6,10 @@ from automatic_lecture_tex.schemas import (
     EpisodeHierarchyPlan,
     EpisodeKind,
     EpisodeTrackingUpdate,
-    GlobalValidation,
     HierarchyBoundary,
     HierarchyLevel,
     LectureObservation,
+    MathAudit,
     NoteBlock,
     ObservationKind,
     Transcript,
@@ -103,8 +103,8 @@ class FakeKnowledgeLLM:
                     )
                 ],
             )
-        if schema is GlobalValidation:
-            return GlobalValidation()
+        if schema is MathAudit:
+            return MathAudit()
         raise AssertionError(f"unexpected schema: {schema}")
 
 
@@ -146,13 +146,14 @@ def test_knowledge_pipeline_builds_episode_graph_outline_and_ir(tmp_path, monkey
     assert (work / "lecture_kb.json").exists()
     assert (work / "episode_hierarchy.json").exists()
     assert (work / "lecture_outline.json").exists()
-    assert (work / "global_validation.json").exists()
+    assert (work / "knowledge_episode_batches" / "episode_0000" / "batch_000.json").exists()
+    assert not (work / "global_validation.json").exists()
     assert ir.chunks[0].section_title == "Линейные функционалы"
     assert ir.chunks[0].blocks[0].latex == "Определение функционала."
     assert fake_llm.operations == [
         "knowledge_extract",
         "episode_track",
         "episode_hierarchy",
-        "section_write",
-        "global_validation",
+        "episode_write",
+        "episode_validation",
     ]
