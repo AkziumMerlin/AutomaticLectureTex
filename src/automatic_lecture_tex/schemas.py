@@ -101,12 +101,56 @@ class BlockType(StrEnum):
     EXERCISE = "exercise"
 
 
+_RENDERER_BLOCK_ENVIRONMENTS = frozenset(
+    {
+        "definition",
+        "theorem",
+        "lemma",
+        "proposition",
+        "corollary",
+        "proof",
+        "example",
+        "remark",
+        "exercise",
+        "figure",
+        "document",
+    }
+)
+_DISPLAY_MATH_ENVIRONMENTS = frozenset(
+    {
+        "equation",
+        "equation*",
+        "align",
+        "align*",
+        "gather",
+        "gather*",
+        "multline",
+        "multline*",
+        "displaymath",
+    }
+)
+
+
+def _reject_environments(value: str, environments: frozenset[str], *, context: str) -> str:
+    for environment in environments:
+        if f"\\begin{{{environment}}}" in value or f"\\end{{{environment}}}" in value:
+            raise ValueError(
+                f"{context} must not contain outer LaTeX environment {environment!r}; "
+                "the renderer owns document/block wrappers"
+            )
+    return value
+
+
 class NoteBlock(BaseModel):
     """A renderable node in the final lecture IR.
 
     Missing or ambiguous lecture content is represented by ``ChunkNotes.unresolved`` instead of an
     empty placeholder block. This keeps the IR invariant explicit: every non-figure NoteBlock has
     content that can actually be rendered.
+
+    Mathematical fragment environments such as ``aligned``, ``cases`` and matrix environments are
+    valid block contents. Only outer document/block wrappers owned by the deterministic renderer are
+    forbidden.
     """
 
     type: BlockType
@@ -119,10 +163,8 @@ class NoteBlock(BaseModel):
 
     @field_validator("latex")
     @classmethod
-    def reject_raw_environments(cls, value: str) -> str:
-        if r"\begin{" in value or r"\end{" in value:
-            raise ValueError("note blocks must not contain raw LaTeX environments")
-        return value
+    def reject_renderer_owned_environments(cls, value: str) -> str:
+        return _reject_environments(value, _RENDERER_BLOCK_ENVIRONMENTS, context="note blocks")
 
     @model_validator(mode="after")
     def require_renderable_content(self) -> NoteBlock:
@@ -134,6 +176,12 @@ class NoteBlock(BaseModel):
             raise ValueError(
                 "non-figure note block must contain non-empty latex; "
                 "use ChunkNotes.unresolved for unreconstructed content"
+            )
+        if self.type == BlockType.EQUATION:
+            _reject_environments(
+                self.latex,
+                _DISPLAY_MATH_ENVIRONMENTS,
+                context="equation note blocks",
             )
         return self
 
@@ -162,10 +210,8 @@ class MathAuditCorrection(BaseModel):
 
     @field_validator("corrected_latex")
     @classmethod
-    def reject_raw_environments(cls, value: str) -> str:
-        if r"\begin{" in value or r"\end{" in value:
-            raise ValueError("audit corrections must not contain raw LaTeX environments")
-        return value
+    def reject_renderer_owned_environments(cls, value: str) -> str:
+        return _reject_environments(value, _RENDERER_BLOCK_ENVIRONMENTS, context="audit corrections")
 
 
 class MathAudit(BaseModel):
@@ -402,10 +448,8 @@ class GlobalBlockCorrection(BaseModel):
 
     @field_validator("corrected_latex")
     @classmethod
-    def reject_raw_environments(cls, value: str) -> str:
-        if r"\begin{" in value or r"\end{" in value:
-            raise ValueError("global corrections must not contain raw LaTeX environments")
-        return value
+    def reject_renderer_owned_environments(cls, value: str) -> str:
+        return _reject_environments(value, _RENDERER_BLOCK_ENVIRONMENTS, context="global corrections")
 
 
 class GlobalValidation(BaseModel):
