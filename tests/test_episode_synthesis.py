@@ -18,8 +18,6 @@ from automatic_lecture_tex.schemas import (
     ObservationKind,
     OutlineSection,
     SemanticEpisode,
-    Transcript,
-    TranscriptSegment,
 )
 
 
@@ -95,19 +93,7 @@ def test_episode_evidence_batches_are_bounded():
         episode.end = observation.end
 
     config = NotesConfig(episode_synthesis_max_evidence_chars=4500)
-    transcript = Transcript(
-        lecture_id="lecture",
-        segments=[
-            TranscriptSegment(
-                id=f"s{index}",
-                start=float(index * 10),
-                end=float(index * 10 + 6),
-                text="raw " + "z" * 120,
-            )
-            for index in range(8)
-        ],
-    )
-    batches = episode_evidence_batches(kb, episode, config, transcript)
+    batches = episode_evidence_batches(kb, episode, config)
 
     assert len(batches) > 1
     for payload in batches:
