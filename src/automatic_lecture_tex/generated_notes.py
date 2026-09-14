@@ -14,6 +14,7 @@ from .schemas import (
     _RENDERER_BLOCK_ENVIRONMENTS,
     _reject_environments,
 )
+from .tex_safety import looks_like_math_fragment, normalize_math_unicode, strip_control_chars
 
 GeneratedBlockType = Literal[
     BlockType.PARAGRAPH,
@@ -31,12 +32,7 @@ GeneratedBlockType = Literal[
 
 
 class GeneratedNoteBlock(BaseModel):
-    """LLM-facing block schema.
-
-    A generated block is always substantive text/math. Asset-backed figures are host-owned and are
-    represented only in the final ``NoteBlock`` IR, so the generation schema can make non-empty
-    ``latex`` a JSON-Schema-level invariant instead of relying on a post-hoc model validator.
-    """
+    """Flat LLM-facing block schema with host-side equation classification."""
 
     type: GeneratedBlockType
     title: str | None = None
@@ -44,9 +40,15 @@ class GeneratedNoteBlock(BaseModel):
     source_claim_ids: list[str] = Field(default_factory=list)
     source_evidence_ids: list[str] = Field(default_factory=list)
 
+    @field_validator("title")
+    @classmethod
+    def sanitize_title(cls, value: str | None) -> str | None:
+        return strip_control_chars(value) if value is not None else None
+
     @field_validator("latex")
     @classmethod
-    def reject_blank_or_renderer_owned_latex(cls, value: str) -> str:
+    def sanitize_latex(cls, value: str) -> str:
+        value = strip_control_chars(value)
         if not value.strip():
             raise ValueError("generated note block latex must contain non-whitespace content")
         return _reject_environments(
@@ -56,13 +58,21 @@ class GeneratedNoteBlock(BaseModel):
         )
 
     @model_validator(mode="after")
-    def reject_outer_equation_environment(self) -> GeneratedNoteBlock:
-        if self.type == BlockType.EQUATION:
-            _reject_environments(
-                self.latex,
-                _DISPLAY_MATH_ENVIRONMENTS,
-                context="generated equation blocks",
-            )
+    def normalize_equation_type(self) -> GeneratedNoteBlock:
+        if self.type != BlockType.EQUATION:
+            return self
+        _reject_environments(
+            self.latex,
+            _DISPLAY_MATH_ENVIRONMENTS,
+            context="generated equation blocks",
+        )
+        normalized = normalize_math_unicode(self.latex)
+        if looks_like_math_fragment(normalized):
+            self.latex = normalized
+            return self
+        # A model occasionally labels prose containing inline math as an equation. Keep the content,
+        # but make its renderable type honest instead of wrapping prose in another display environment.
+        self.type = BlockType.PARAGRAPH
         return self
 
     def to_note_block(self) -> NoteBlock:
@@ -92,9 +102,9 @@ class GeneratedChunkNotes(BaseModel):
             chunk_id=self.chunk_id,
             start=self.start,
             end=self.end,
-            section_title=self.section_title,
+            section_title=strip_control_chars(self.section_title),
             blocks=[block.to_note_block() for block in self.blocks],
             notation=list(self.notation),
             corrections=list(self.corrections),
-            unresolved=list(self.unresolved),
+            unresolved=[strip_control_chars(item) for item in self.unresolved],
         )

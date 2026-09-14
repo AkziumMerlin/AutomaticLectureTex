@@ -156,7 +156,8 @@ def test_validation_failure_resynthesizes_smaller_children(monkeypatch) -> None:
     )
 
     assert write_calls == [2, 1, 1]
-    assert validation_calls == [2, 1, 1]
+    # The final 2-observation call is the bounded post-merge boundary audit.
+    assert validation_calls == [2, 1, 1, 2]
     assert [block.latex for block in notes.blocks] == ["fact 0", "fact 1"]
 
 
@@ -172,12 +173,30 @@ def test_indivisible_synthesis_failure_is_recorded_not_fatal(monkeypatch) -> Non
     assert "indivisible evidence" in notes.unresolved[0]
 
 
-def test_proactive_split_caps_observation_count(monkeypatch) -> None:
-    payload = _evidence(14)
-    monkeypatch.setattr(resilient, "_base_evidence_batches", lambda *args, **kwargs: [payload])
+def test_proactive_split_caps_every_actual_write_call(monkeypatch) -> None:
+    call_sizes = []
 
-    batches = resilient.episode_evidence_batches(None, None, None)
+    def fake_write(orchestrator, episode, evidence, previous_context):
+        call_sizes.append(len(evidence["observations"]))
+        return ChunkNotes(
+            chunk_id="leaf",
+            section_title="Episode",
+            blocks=[
+                NoteBlock(
+                    type="paragraph",
+                    latex=item["text"],
+                    source_evidence_ids=[item["id"]],
+                )
+                for item in evidence["observations"]
+            ],
+        )
 
-    assert len(batches) >= 3
-    assert max(len(batch["observations"]) for batch in batches) <= 6
-    assert [batch["batch"]["index"] for batch in batches] == list(range(len(batches)))
+    monkeypatch.setattr(resilient, "_write_once", fake_write)
+    resilient.reset_synthesis_stats()
+
+    notes = resilient.write_episode_batch(_orchestrator(), _episode(), _evidence(14), [])
+
+    assert call_sizes
+    assert max(call_sizes) <= resilient.MAX_OBSERVATIONS_PER_SYNTHESIS_CALL
+    assert len(notes.blocks) == 14
+    assert resilient.synthesis_stats_snapshot()["proactive_splits"] >= 3

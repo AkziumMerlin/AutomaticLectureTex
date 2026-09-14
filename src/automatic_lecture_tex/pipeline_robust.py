@@ -2,7 +2,10 @@
 
 from . import pipeline as _base_pipeline
 from .episode_synthesis_resilient import EPISODE_SYNTHESIS_CACHE_VERSION
-from .knowledge_pipeline_resilient import run_knowledge_pipeline as resilient_knowledge_pipeline
+from .knowledge_pipeline_resilient import (
+    KNOWLEDGE_CACHE_VERSION,
+    run_knowledge_pipeline as resilient_knowledge_pipeline,
+)
 from .llm_robust import LectureModelClient
 from .util import stable_hash
 
@@ -19,6 +22,7 @@ class Pipeline(_base_pipeline.Pipeline):
             {
                 "base": super()._ir_fingerprint(transcript, notation),
                 "resilient_episode_synthesis_version": EPISODE_SYNTHESIS_CACHE_VERSION,
+                "knowledge_integrity_cache_version": KNOWLEDGE_CACHE_VERSION,
             }
         )
 
