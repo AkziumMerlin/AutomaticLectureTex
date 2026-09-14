@@ -59,6 +59,7 @@ def run_knowledge_pipeline(*args, **kwargs):
     original_write = _base.write_episode_batch
     original_validate = _base.validate_episode_batch
     original_merge = _base.merge_episode_batches
+    original_assemble = _base.assemble_outline_sections
     original_synthesis_version = _base.EPISODE_SYNTHESIS_CACHE_VERSION
     original_knowledge_version = _base.KNOWLEDGE_CACHE_VERSION
 
@@ -74,12 +75,23 @@ def run_knowledge_pipeline(*args, **kwargs):
         del transcript_arg
         return episode_evidence_batches(kb, episode, config, transcript=transcript)
 
+    def assemble_with_math_titles(sections, episode_notes, *, outline_unresolved=None):
+        result = original_assemble(
+            sections,
+            episode_notes,
+            outline_unresolved=outline_unresolved,
+        )
+        for section, notes in zip(sections, result, strict=True):
+            notes.section_title = section.title
+        return result
+
     reset_synthesis_stats()
     _base.KnowledgeOrchestrator = orchestrator_factory
     _base.episode_evidence_batches = bounded_batches
     _base.write_episode_batch = write_episode_batch
     _base.validate_episode_batch = validate_episode_batch
     _base.merge_episode_batches = merge_episode_batches
+    _base.assemble_outline_sections = assemble_with_math_titles
     _base.EPISODE_SYNTHESIS_CACHE_VERSION = EPISODE_SYNTHESIS_CACHE_VERSION
     _base.KNOWLEDGE_CACHE_VERSION = KNOWLEDGE_CACHE_VERSION
     try:
@@ -92,5 +104,6 @@ def run_knowledge_pipeline(*args, **kwargs):
         _base.write_episode_batch = original_write
         _base.validate_episode_batch = original_validate
         _base.merge_episode_batches = original_merge
+        _base.assemble_outline_sections = original_assemble
         _base.EPISODE_SYNTHESIS_CACHE_VERSION = original_synthesis_version
         _base.KNOWLEDGE_CACHE_VERSION = original_knowledge_version
