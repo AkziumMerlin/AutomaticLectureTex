@@ -19,9 +19,7 @@ from .schemas import BlockType, ChunkNotes, MathAudit, SemanticEpisode
 
 logger = logging.getLogger(__name__)
 
-# Bump the downstream cache whenever split/merge, coverage, or stitching semantics change.
 EPISODE_SYNTHESIS_CACHE_VERSION = 5
-
 MAX_OBSERVATIONS_PER_SYNTHESIS_CALL = 6
 _STRUCTURED_ERRORS = (json.JSONDecodeError, ValidationError)
 _REQUIRED_COVERAGE_KINDS = {
@@ -227,29 +225,94 @@ def stitch_chunk_notes(notes: ChunkNotes) -> ChunkNotes:
     return notes
 
 
-def _post_merge_boundary_audit(orchestrator, evidence: dict[str, Any], notes: ChunkNotes) -> None:
-    """Validate a reconstructed split parent against its original <=6-observation evidence."""
+def _block_evidence_ids(block, claim_evidence: dict[str, list[str]]) -> list[str]:
+    ids = list(block.source_evidence_ids)
+    for claim_id in block.source_claim_ids:
+        ids = _merge_unique(ids, claim_evidence.get(str(claim_id), []))
+    return ids
 
-    if not orchestrator.config.global_validation or not notes.blocks:
+
+def _boundary_payload(
+    evidence: dict[str, Any],
+    left_block,
+    right_block,
+) -> dict[str, Any] | None:
+    observations = evidence.get("observations", [])
+    if not observations:
+        return None
+    order = {str(item["id"]): index for index, item in enumerate(observations)}
+    claim_evidence = {
+        str(claim["id"]): [str(item) for item in claim.get("evidence_ids", [])]
+        for claim in evidence.get("claims", [])
+    }
+    left_ids = [
+        item
+        for item in _block_evidence_ids(left_block, claim_evidence)
+        if item in order
+    ]
+    right_ids = [
+        item
+        for item in _block_evidence_ids(right_block, claim_evidence)
+        if item in order
+    ]
+    left_ids = sorted(set(left_ids), key=order.get)[-3:]
+    right_ids = sorted(set(right_ids), key=order.get)[:3]
+    selected_ids = _merge_unique(left_ids, right_ids)
+
+    if not selected_ids:
+        midpoint = len(observations) // 2
+        selected = observations[max(0, midpoint - 2) : min(len(observations), midpoint + 2)]
+    else:
+        selected_set = set(selected_ids)
+        selected = [item for item in observations if str(item["id"]) in selected_set]
+    if not selected:
+        return None
+    return _child_payload(evidence, selected, side=2)
+
+
+def _post_merge_boundary_audit(
+    orchestrator,
+    evidence: dict[str, Any],
+    parts: list[ChunkNotes],
+) -> None:
+    """Audit only the two blocks touching a recursive split boundary."""
+
+    if not orchestrator.config.global_validation or len(parts) < 2:
         return
+    left, right = parts[0], parts[1]
+    if not left.blocks or not right.blocks:
+        return
+    boundary_evidence = _boundary_payload(evidence, left.blocks[-1], right.blocks[0])
+    if boundary_evidence is None:
+        return
+
+    boundary_notes = ChunkNotes(
+        chunk_id="boundary",
+        section_title="boundary",
+        blocks=[left.blocks[-1].model_copy(deep=True), right.blocks[0].model_copy(deep=True)],
+    )
     started = time.perf_counter()
     _STATS["boundary_validation_calls"] = int(_STATS["boundary_validation_calls"]) + 1
     try:
-        audit = _validate_once(orchestrator, evidence, notes)
+        audit = _validate_once(orchestrator, boundary_evidence, boundary_notes)
     except _STRUCTURED_ERRORS as exc:
         _STATS["boundary_validation_failures"] = int(
             _STATS["boundary_validation_failures"]
         ) + 1
-        notes.unresolved.append(
-            "Bounded post-merge validation failed; child validations were kept: "
+        left.unresolved.append(
+            "Bounded split-boundary validation failed; child validations were kept: "
             f"{type(exc).__name__}: {exc}"
         )
     else:
         apply_episode_validation(
-            notes,
+            boundary_notes,
             audit,
             threshold=orchestrator.config.global_validation_apply_threshold,
         )
+        left.blocks[-1].latex = boundary_notes.blocks[0].latex
+        right.blocks[0].latex = boundary_notes.blocks[1].latex
+        left.corrections.extend(boundary_notes.corrections)
+        left.unresolved = _merge_unique(left.unresolved, boundary_notes.unresolved)
     finally:
         _STATS["validation_seconds"] = float(_STATS["validation_seconds"]) + (
             time.perf_counter() - started
@@ -262,6 +325,7 @@ def _merge_parts(
     evidence: dict[str, Any],
     parts: list[ChunkNotes],
 ) -> ChunkNotes:
+    _post_merge_boundary_audit(orchestrator, evidence, parts)
     observations = evidence.get("observations", [])
     batch = evidence.get("batch", {})
     result = ChunkNotes(
@@ -276,8 +340,6 @@ def _merge_parts(
         result.notation.extend(notes.notation)
         result.corrections.extend(notes.corrections)
         result.unresolved = _merge_unique(result.unresolved, notes.unresolved)
-
-    _post_merge_boundary_audit(orchestrator, evidence, result)
     return stitch_chunk_notes(result)
 
 
@@ -305,8 +367,6 @@ def _indivisible_failure(
 
 
 def _call_with_split_retry_policy(orchestrator, evidence: dict[str, Any], fn, *args):
-    """Let multi-atom failures reach the split tree after the first invalid response."""
-
     if len(evidence.get("observations", [])) < 2:
         return fn(*args)
 
@@ -346,9 +406,7 @@ def _covered_observation_ids(notes: ChunkNotes, evidence: dict[str, Any]) -> set
 
 
 def missing_coverage(notes: ChunkNotes, evidence: dict[str, Any]) -> list[str]:
-    required = _required_observation_ids(evidence)
-    covered = _covered_observation_ids(notes, evidence)
-    return sorted(required - covered)
+    return sorted(_required_observation_ids(evidence) - _covered_observation_ids(notes, evidence))
 
 
 def _split_for_failure(
@@ -518,6 +576,4 @@ def validate_episode_batch(orchestrator, evidence, notes) -> MathAudit:
 
 
 def merge_episode_batches(episode: SemanticEpisode, batches: list[ChunkNotes]) -> ChunkNotes:
-    """Merge independent hard-size parent batches and clean only their immediate boundaries."""
-
     return stitch_chunk_notes(_base_merge_episode_batches(episode, batches))
