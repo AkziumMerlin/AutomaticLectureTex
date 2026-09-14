@@ -31,7 +31,13 @@ def _evidence(count: int) -> dict:
         for index in range(count)
     ]
     return {
-        "episode": {"id": "episode_0001", "title": "Episode", "kind": "topic", "start": 0, "end": 20},
+        "episode": {
+            "id": "episode_0001",
+            "title": "Episode",
+            "kind": "topic",
+            "start": 0,
+            "end": 20,
+        },
         "observations": observations,
         "claims": [
             {
@@ -115,7 +121,12 @@ def test_validation_failure_resynthesizes_smaller_children(monkeypatch) -> None:
     monkeypatch.setattr(resilient, "_write_once", fake_write)
     monkeypatch.setattr(resilient, "_validate_once", fake_validate)
 
-    notes = resilient.write_episode_batch(_orchestrator(validate=True), _episode(), _evidence(2), [])
+    notes = resilient.write_episode_batch(
+        _orchestrator(validate=True),
+        _episode(),
+        _evidence(2),
+        [],
+    )
 
     assert write_calls == [2, 1, 1]
     assert validation_calls == [2, 1, 1]
