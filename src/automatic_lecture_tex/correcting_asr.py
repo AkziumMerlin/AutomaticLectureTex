@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import importlib.util
 import json
 import logging
 from pathlib import Path
@@ -83,6 +84,19 @@ class CorrectingASRBackend(ASRBackend):
         except ImportError:
             pass
 
+    def _effective_correction_config(self) -> TranscriptCorrectionConfig:
+        config = self.correction_config
+        fallback = config.fallback_asr
+        if not config.fallback_enabled or fallback is None:
+            return config
+        if fallback.backend == "qwen3" and importlib.util.find_spec("qwen_asr") is None:
+            logger.warning(
+                "qwen-asr is not installed; continuing transcript reconstruction without "
+                "selective fallback ASR"
+            )
+            return config.model_copy(update={"fallback_enabled": False}, deep=True)
+        return config
+
     def transcribe(self, lecture_id: str, audio_path: Path) -> Transcript:
         raw = self._load_reusable_raw(lecture_id)
         if raw is None:
@@ -97,7 +111,7 @@ class CorrectingASRBackend(ASRBackend):
         result = reconstruct_transcript(
             raw,
             llm=self.llm,
-            config=self.correction_config,
+            config=self._effective_correction_config(),
             runtime=self.runtime,
             course_title=self.course_title,
             language=self.language,
