@@ -14,9 +14,11 @@ class _Completions:
     def __init__(self, responses):
         self.responses = list(responses)
         self.max_tokens = []
+        self.response_formats = []
 
     def create(self, **kwargs):
         self.max_tokens.append(kwargs["max_tokens"])
+        self.response_formats.append(kwargs.get("response_format"))
         return self.responses.pop(0)
 
 
@@ -65,6 +67,8 @@ def test_structured_infers_truncation_from_unterminated_json_with_stop_reason() 
 
     assert result.value == "complete"
     assert completions.max_tokens == [2048, 4096]
+    assert completions.response_formats[0] is not None
+    assert completions.response_formats[1] is None
 
 
 def test_structured_infers_truncation_from_unclosed_object_with_stop_reason() -> None:
@@ -79,6 +83,7 @@ def test_structured_infers_truncation_from_unclosed_object_with_stop_reason() ->
 
     assert result.value == "complete"
     assert completions.max_tokens == [2048, 4096]
+    assert completions.response_formats == [completions.response_formats[0], None]
 
 
 def test_balanced_malformed_json_does_not_infer_truncation() -> None:
@@ -93,6 +98,7 @@ def test_balanced_malformed_json_does_not_infer_truncation() -> None:
 
     assert result.value == "complete"
     assert completions.max_tokens == [2048, 2048]
+    assert all(item is not None for item in completions.response_formats)
 
 
 def test_structurally_truncated_json_is_not_locally_completed() -> None:
@@ -109,7 +115,4 @@ def test_structurally_truncated_json_is_not_locally_completed() -> None:
 def test_cli_pipeline_uses_robust_llm_client() -> None:
     from automatic_lecture_tex.pipeline_robust import Pipeline
 
-    pipeline = Pipeline.__new__(Pipeline)
-    pipeline._llm = LectureModelClient.__new__(LectureModelClient)
-
-    assert isinstance(pipeline._llm, LectureModelClient)
+    assert Pipeline.llm.fget.__globals__["LectureModelClient"] is LectureModelClient
