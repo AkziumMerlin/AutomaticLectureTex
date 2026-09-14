@@ -116,9 +116,10 @@ contain only exact ids from this list. Never convert printed times into numbers 
 {json.dumps(segment_payload, ensure_ascii=False, separators=(",", ":"))}
 
 A segment with `safe_for_substantive_extraction=false` is explicitly ambiguous. Do NOT turn an
-incoherent phrase from such a segment into a definition/claim/equation/proof_step/example/notation
-unless the same content is independently forced by a neighboring safe segment or supplied visual
-evidence. Preserve unresolved ambiguity as `unresolved` instead of guessing a mathematical fact.
+incoherent phrase from such a segment into canonical lecture content unless the same content is
+independently forced by a neighboring safe segment or supplied visual evidence. This applies to
+remarks/corrections/transitions as well as definitions/claims/equations/proof steps/examples/notation.
+Preserve unresolved ambiguity in `unresolved` instead of guessing what was said.
 
 Visual evidence. `visual_evidence_ids` may contain exact request_id values from this list, but every
 observation must still cite at least one transcript segment id for temporal grounding:
@@ -192,14 +193,6 @@ Write descriptive strings in language code `{self.output_language}`.
         assert result is not None
         observations: list[LectureObservation] = []
         unresolved = list(result.unresolved)
-        substantive_kinds = {
-            ObservationKind.DEFINITION,
-            ObservationKind.CLAIM,
-            ObservationKind.EQUATION,
-            ObservationKind.PROOF_STEP,
-            ObservationKind.EXAMPLE,
-            ObservationKind.NOTATION,
-        }
         for index, item in enumerate(result.observations):
             valid_segment_ids = [ref for ref in item.source_segment_ids if ref in segment_map]
             if not valid_segment_ids:
@@ -211,9 +204,13 @@ Write descriptive strings in language code `{self.output_language}`.
             segments = [segment_map[ref] for ref in valid_segment_ids]
             valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
             has_safe_audio = any(segment["safe_for_substantive_extraction"] for segment in segments)
-            if item.kind in substantive_kinds and not has_safe_audio and not valid_visual_ids:
+            if (
+                item.kind != ObservationKind.UNRESOLVED
+                and not has_safe_audio
+                and not valid_visual_ids
+            ):
                 unresolved.append(
-                    "Host transcript-integrity gate suppressed substantive observation "
+                    "Host transcript-integrity gate suppressed canonical observation "
                     f"{item.id or index} from ambiguous-only transcript evidence: "
                     f"segments={valid_segment_ids}."
                 )
