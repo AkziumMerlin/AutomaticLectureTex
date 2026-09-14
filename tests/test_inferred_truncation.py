@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel
 
-from automatic_lecture_tex.llm import LectureModelClient
+from automatic_lecture_tex.llm_robust import LectureModelClient
 
 
 class Payload(BaseModel):
