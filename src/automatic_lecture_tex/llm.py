@@ -231,15 +231,11 @@ class LectureModelClient:
             schema_instruction = "\nJSON schema:\n" + json.dumps(
                 schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
             )
-        content: list[dict] = [
-            {
-                "type": "text",
-                "text": (
-                    f"{prompt}{schema_instruction}\n\n"
-                    "Return only the JSON object requested by the response schema."
-                ),
-            }
-        ]
+        base_instruction = (
+            f"{prompt}{schema_instruction}\n\n"
+            "Return only the JSON object requested by the response schema."
+        )
+        content: list[dict] = [{"type": "text", "text": base_instruction}]
         for image in images or []:
             mime = mimetypes.guess_type(image.name)[0] or "image/jpeg"
             encoded = base64.b64encode(image.read_bytes()).decode("ascii")
@@ -249,13 +245,30 @@ class LectureModelClient:
                     "image_url": {"url": f"data:{mime};base64,{encoded}"},
                 }
             )
+
+        current_max_tokens = max_tokens or self.config.max_tokens
+        # Retries are also the bounded growth budget. A call starting at 2048 with two retries can
+        # therefore grow to at most 8192; a 4096-token call can grow to at most 16384. We only grow
+        # when the backend explicitly reports output truncation, never for ordinary schema errors.
+        max_retry_tokens = current_max_tokens * (2**self.config.max_retries)
         parse_error: json.JSONDecodeError | ValidationError | None = None
+        previous_truncated = False
+
         for attempt in range(self.config.max_retries + 1):
             if attempt and parse_error is not None:
+                if previous_truncated:
+                    failure = (
+                        f"The previous response was truncated by the output-token limit. "
+                        f"The new output budget is {current_max_tokens} tokens."
+                    )
+                else:
+                    failure = f"The previous response was invalid ({parse_error})."
                 content[0]["text"] = (
-                    f"{prompt}\n\nThe previous response was invalid ({parse_error}). "
-                    "Return only a valid JSON object matching the response schema."
+                    f"{base_instruction}\n\n{failure} "
+                    "Regenerate the complete object from the beginning; do not continue the "
+                    "previous partial JSON."
                 )
+
             request_kwargs = {
                 "model": self.config.model,
                 "messages": [
@@ -263,20 +276,40 @@ class LectureModelClient:
                     {"role": "user", "content": content},
                 ],
                 "temperature": self.config.temperature,
-                "max_tokens": max_tokens or self.config.max_tokens,
+                "max_tokens": current_max_tokens,
                 "extra_body": self._extra_body(),
             }
             if guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)
-            response = self.client.chat.completions.create(
-                **request_kwargs,
-            )
+            response = self.client.chat.completions.create(**request_kwargs)
             self._record_usage(operation, response)
-            raw = response.choices[0].message.content or ""
+
+            choice = response.choices[0]
+            raw = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
+            usage = getattr(response, "usage", None)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            truncated = finish_reason == "length" or (
+                finish_reason is None
+                and current_max_tokens > 0
+                and completion_tokens >= current_max_tokens
+            )
+
             try:
                 return self._parse_json(raw, schema)
             except (json.JSONDecodeError, ValidationError) as exc:
                 parse_error = exc
+                previous_truncated = truncated
+                if truncated and current_max_tokens < max_retry_tokens:
+                    next_max_tokens = min(max_retry_tokens, current_max_tokens * 2)
+                    logger.warning(
+                        "[%s] structured output truncated at max_tokens=%d; retrying with %d",
+                        operation,
+                        current_max_tokens,
+                        next_max_tokens,
+                    )
+                    current_max_tokens = next_max_tokens
+
         assert parse_error is not None
         raise parse_error
 
