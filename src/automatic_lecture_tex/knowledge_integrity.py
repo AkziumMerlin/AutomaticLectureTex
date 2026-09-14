@@ -20,12 +20,7 @@ from .schemas import (
 
 
 class GeneratedLectureObservation(BaseModel):
-    """LLM-facing evidence event.
-
-    Time bounds are intentionally absent. The model may only identify exact ASR segment ids; the
-    host derives numeric timestamps from the transcript so malformed MM:SS conversions cannot enter
-    the canonical knowledge graph.
-    """
+    """LLM-facing evidence event with host-derived temporal provenance."""
 
     id: str = ""
     kind: ObservationKind
@@ -67,6 +62,7 @@ class GeneratedWindowObservations(BaseModel):
 @dataclass
 class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
     transcript: Transcript
+    ambiguous_transcript_confidence: float = 0.20
 
     def _segment_payload(self, chunk: LectureChunk) -> list[dict]:
         allowed = set(chunk.segment_ids)
@@ -77,6 +73,10 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
                 "end_seconds": segment.end,
                 "text": segment.text,
                 "confidence": segment.confidence,
+                "safe_for_substantive_extraction": (
+                    segment.confidence is None
+                    or segment.confidence > self.ambiguous_transcript_confidence
+                ),
             }
             for segment in self.transcript.segments
             if segment.id in allowed
@@ -110,12 +110,18 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
 university lecture. Do not write lecture notes and do not decide final document sections.
 
 Window id: {chunk.id}
-ASR segments. `source_segment_ids` MUST contain only exact ids from this list. Never convert the
-printed times into numbers yourself; the host derives all observation timestamps from these ids:
+Transcript segments below have already passed through an ASR-reconstruction layer. Treat their text
+as the best available local transcription, not as immutable literal ASR. `source_segment_ids` MUST
+contain only exact ids from this list. Never convert printed times into numbers yourself:
 {json.dumps(segment_payload, ensure_ascii=False, separators=(",", ":"))}
 
+A segment with `safe_for_substantive_extraction=false` is explicitly ambiguous. Do NOT turn an
+incoherent phrase from such a segment into a definition/claim/equation/proof_step/example/notation
+unless the same content is independently forced by a neighboring safe segment or supplied visual
+evidence. Preserve unresolved ambiguity as `unresolved` instead of guessing a mathematical fact.
+
 Visual evidence. `visual_evidence_ids` may contain exact request_id values from this list, but every
-observation must still cite at least one ASR segment id for temporal grounding:
+observation must still cite at least one transcript segment id for temporal grounding:
 {visual_json}
 
 Known symbol registry:
@@ -186,6 +192,14 @@ Write descriptive strings in language code `{self.output_language}`.
         assert result is not None
         observations: list[LectureObservation] = []
         unresolved = list(result.unresolved)
+        substantive_kinds = {
+            ObservationKind.DEFINITION,
+            ObservationKind.CLAIM,
+            ObservationKind.EQUATION,
+            ObservationKind.PROOF_STEP,
+            ObservationKind.EXAMPLE,
+            ObservationKind.NOTATION,
+        }
         for index, item in enumerate(result.observations):
             valid_segment_ids = [ref for ref in item.source_segment_ids if ref in segment_map]
             if not valid_segment_ids:
@@ -196,6 +210,15 @@ Write descriptive strings in language code `{self.output_language}`.
                 continue
             segments = [segment_map[ref] for ref in valid_segment_ids]
             valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
+            has_safe_audio = any(segment["safe_for_substantive_extraction"] for segment in segments)
+            if item.kind in substantive_kinds and not has_safe_audio and not valid_visual_ids:
+                unresolved.append(
+                    "Host transcript-integrity gate suppressed substantive observation "
+                    f"{item.id or index} from ambiguous-only transcript evidence: "
+                    f"segments={valid_segment_ids}."
+                )
+                continue
+
             observation_id = item.id or f"obs_{chunk.id}_{index:03d}"
             observations.append(
                 LectureObservation(
