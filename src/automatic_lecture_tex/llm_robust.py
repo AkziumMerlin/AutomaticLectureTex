@@ -159,8 +159,9 @@ class LectureModelClient(BaseLectureModelClient):
                 return self._parse_json(raw, schema)
             except (json.JSONDecodeError, ValidationError) as exc:
                 parse_error = exc
-                inferred_truncated = isinstance(exc, json.JSONDecodeError) and _looks_like_truncated_json(
-                    raw, exc
+                inferred_truncated = (
+                    isinstance(exc, json.JSONDecodeError)
+                    and _looks_like_truncated_json(raw, exc)
                 )
                 truncated = backend_truncated or inferred_truncated
                 previous_truncated = truncated
