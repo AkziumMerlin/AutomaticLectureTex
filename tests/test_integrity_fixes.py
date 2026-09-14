@@ -13,7 +13,6 @@ from automatic_lecture_tex.episode_synthesis_resilient import (
 )
 from automatic_lecture_tex.knowledge_integrity import (
     GeneratedLectureObservation,
-    GeneratedWindowObservations,
     IntegrityKnowledgeOrchestrator,
 )
 from automatic_lecture_tex.latex import render_block, render_lecture
@@ -108,7 +107,13 @@ def test_observation_times_are_derived_from_asr_segment_ids():
 
 def _episode_evidence(count: int) -> dict:
     return {
-        "episode": {"id": "episode_0001", "title": "Episode", "kind": "topic", "start": 0, "end": 20},
+        "episode": {
+            "id": "episode_0001",
+            "title": "Episode",
+            "kind": "topic",
+            "start": 0,
+            "end": 20,
+        },
         "observations": [
             {
                 "id": f"obs_{index}",
@@ -152,7 +157,6 @@ def test_missing_substantive_coverage_triggers_recursive_split(monkeypatch):
     def fake_write(orchestrator, episode, evidence, previous_context):
         ids = [item["id"] for item in evidence["observations"]]
         calls.append(ids)
-        # Deliberately lose the second proof step at the parent node.
         selected = evidence["observations"] if len(ids) == 1 else evidence["observations"][:1]
         return ChunkNotes(
             section_title="Episode",
