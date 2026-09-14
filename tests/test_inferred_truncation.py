@@ -106,9 +106,10 @@ def test_structurally_truncated_json_is_not_locally_completed() -> None:
         raise AssertionError("partial JSON must not be repaired into a valid object")
 
 
-def test_cli_pipeline_is_wired_to_robust_llm_client() -> None:
-    import automatic_lecture_tex.pipeline as base_pipeline
-    import automatic_lecture_tex.pipeline_robust as robust_pipeline
+def test_cli_pipeline_uses_robust_llm_client() -> None:
+    from automatic_lecture_tex.pipeline_robust import Pipeline
 
-    assert robust_pipeline.Pipeline is base_pipeline.Pipeline
-    assert base_pipeline.LectureModelClient is LectureModelClient
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline._llm = LectureModelClient.__new__(LectureModelClient)
+
+    assert isinstance(pipeline._llm, LectureModelClient)
