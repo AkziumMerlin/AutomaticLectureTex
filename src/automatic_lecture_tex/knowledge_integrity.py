@@ -151,7 +151,7 @@ Write descriptive strings in language code `{self.output_language}`.
         result = None
         invalid_refs: list[str] = []
         prompt = base_prompt
-        for attempt in range(2):
+        for _attempt in range(2):
             result = self._structured(
                 prompt,
                 GeneratedWindowObservations,
@@ -178,7 +178,8 @@ Write descriptive strings in language code `{self.output_language}`.
                 break
             prompt = (
                 base_prompt
-                + "\nYour previous response used unknown provenance ids. Regenerate the full object. "
+                + "\nYour previous response used unknown provenance ids. "
+                + "Regenerate the full object. "
                 + f"Unknown ASR ids: {invalid_refs}; unknown visual ids: {invalid_visuals}.\n"
             )
 
@@ -189,7 +190,8 @@ Write descriptive strings in language code `{self.output_language}`.
             valid_segment_ids = [ref for ref in item.source_segment_ids if ref in segment_map]
             if not valid_segment_ids:
                 unresolved.append(
-                    f"Dropped generated observation {item.id or index}: no valid source segment ids."
+                    "Dropped generated observation "
+                    f"{item.id or index}: no valid source segment ids."
                 )
                 continue
             segments = [segment_map[ref] for ref in valid_segment_ids]
