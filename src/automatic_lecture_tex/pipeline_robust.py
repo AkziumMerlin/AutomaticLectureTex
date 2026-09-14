@@ -1,9 +1,12 @@
-"""Compatibility layer that makes the production Pipeline use the robust LLM client."""
+"""Production pipeline variant with backend-independent structured-output recovery."""
 
-from . import pipeline as _pipeline
 from .llm_robust import LectureModelClient
+from .pipeline import Pipeline as BasePipeline
 
-_pipeline.LectureModelClient = LectureModelClient
-Pipeline = _pipeline.Pipeline
 
-__all__ = ["Pipeline"]
+class Pipeline(BasePipeline):
+    @property
+    def llm(self) -> LectureModelClient:
+        if self._llm is None:
+            self._llm = LectureModelClient(self.config.llm)
+        return self._llm
