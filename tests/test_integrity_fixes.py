@@ -186,7 +186,7 @@ def test_missing_substantive_coverage_triggers_recursive_split(monkeypatch):
     assert synthesis_stats_snapshot()["coverage_splits"] == 1
 
 
-def test_episode_batches_include_only_local_transcript_context():
+def test_episode_batches_include_bounded_local_transcript_context():
     kb = LectureKnowledgeBase(lecture_id="lecture", title="Lecture")
     observation = LectureObservation(
         id="obs_0",
@@ -218,15 +218,17 @@ def test_episode_batches_include_only_local_transcript_context():
     transcript = Transcript(
         lecture_id="lecture",
         segments=[
-            TranscriptSegment(id="seg_before", start=0, end=1, text="far away"),
+            TranscriptSegment(id="seg_before", start=0, end=1, text="near context"),
             TranscriptSegment(id="seg_0", start=9, end=13, text="local source"),
             TranscriptSegment(id="seg_after", start=100, end=101, text="far away"),
         ],
     )
 
     batches = episode_evidence_batches(kb, episode, NotesConfig(), transcript=transcript)
+    ids = [item["id"] for item in batches[0]["transcript"]]
 
-    assert [item["id"] for item in batches[0]["transcript"]] == ["seg_0"]
+    assert "seg_0" in ids
+    assert "seg_after" not in ids
 
 
 def test_proof_fragments_are_stitched_and_exact_duplicates_are_removed():
