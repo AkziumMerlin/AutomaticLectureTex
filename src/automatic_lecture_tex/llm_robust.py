@@ -72,11 +72,13 @@ def _looks_like_truncated_json(raw: str, exc: json.JSONDecodeError) -> bool:
 
 
 class LectureModelClient(BaseLectureModelClient):
-    """Lecture model client with backend-independent truncation recovery.
+    """Lecture model client with backend-independent structured-output recovery.
 
     Some OpenAI-compatible servers return ``finish_reason='stop'`` for an abruptly cut JSON object.
     Besides the backend signal, infer truncation from structurally unfinished JSON and regenerate the
-    whole object with a larger bounded output budget. Partial JSON is never locally completed.
+    whole object with a larger bounded output budget. If server-side guided decoding itself returns
+    incomplete JSON with ``stop``, retry using an explicit schema in the prompt and local validation.
+    Partial JSON is never locally completed.
     """
 
     def _structured(
@@ -89,16 +91,19 @@ class LectureModelClient(BaseLectureModelClient):
         guided_json: bool = True,
         operation: str = "structured",
     ) -> T:
-        schema_instruction = ""
-        if not guided_json:
-            schema_instruction = "\nJSON schema:\n" + json.dumps(
-                schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
-            )
-        base_instruction = (
-            f"{prompt}{schema_instruction}\n\n"
-            "Return only the JSON object requested by the response schema."
+        schema_instruction = "\nJSON schema:\n" + json.dumps(
+            schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
         )
-        content: list[dict] = [{"type": "text", "text": base_instruction}]
+
+        def build_instruction(use_guided_json: bool) -> str:
+            explicit_schema = "" if use_guided_json else schema_instruction
+            return (
+                f"{prompt}{explicit_schema}\n\n"
+                "Return only the JSON object requested by the response schema."
+            )
+
+        use_guided_json = guided_json
+        content: list[dict] = [{"type": "text", "text": build_instruction(use_guided_json)}]
         for image in images or []:
             mime = mimetypes.guess_type(image.name)[0] or "image/jpeg"
             encoded = base64.b64encode(image.read_bytes()).decode("ascii")
@@ -113,6 +118,7 @@ class LectureModelClient(BaseLectureModelClient):
         max_retry_tokens = current_max_tokens * (2**self.config.max_retries)
         parse_error: json.JSONDecodeError | ValidationError | None = None
         previous_truncated = False
+        previous_guided_failure = False
 
         for attempt in range(self.config.max_retries + 1):
             if attempt and parse_error is not None:
@@ -123,8 +129,10 @@ class LectureModelClient(BaseLectureModelClient):
                     )
                 else:
                     failure = f"The previous response was invalid ({parse_error})."
+                if previous_guided_failure:
+                    failure += " Server-side guided JSON was disabled for this retry."
                 content[0]["text"] = (
-                    f"{base_instruction}\n\n{failure} "
+                    f"{build_instruction(use_guided_json)}\n\n{failure} "
                     "Regenerate the complete object from the beginning; do not continue or repair "
                     "the previous partial JSON."
                 )
@@ -139,7 +147,7 @@ class LectureModelClient(BaseLectureModelClient):
                 "max_tokens": current_max_tokens,
                 "extra_body": self._extra_body(),
             }
-            if guided_json:
+            if use_guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)
             response = self.client.chat.completions.create(**request_kwargs)
             self._record_usage(operation, response)
@@ -165,17 +173,32 @@ class LectureModelClient(BaseLectureModelClient):
                 )
                 truncated = backend_truncated or inferred_truncated
                 previous_truncated = truncated
+                guided_failure = (
+                    use_guided_json
+                    and inferred_truncated
+                    and not backend_truncated
+                    and finish_reason == "stop"
+                )
+                previous_guided_failure = guided_failure
                 logger.warning(
                     "[%s] structured parse failed: finish_reason=%r completion_tokens=%d "
-                    "max_tokens=%d raw_chars=%d inferred_truncated=%s: %s",
+                    "max_tokens=%d raw_chars=%d inferred_truncated=%s guided_json=%s: %s",
                     operation,
                     finish_reason,
                     completion_tokens,
                     current_max_tokens,
                     len(raw),
                     inferred_truncated,
+                    use_guided_json,
                     exc,
                 )
+                if guided_failure:
+                    logger.warning(
+                        "[%s] guided JSON returned structurally incomplete output; "
+                        "falling back to prompt-schema JSON",
+                        operation,
+                    )
+                    use_guided_json = False
                 if truncated and current_max_tokens < max_retry_tokens:
                     next_max_tokens = min(max_retry_tokens, current_max_tokens * 2)
                     logger.warning(
