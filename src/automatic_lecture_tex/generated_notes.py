@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .schemas import (
     BlockType,
@@ -16,7 +16,7 @@ from .schemas import (
 )
 from .tex_safety import looks_like_math_fragment, normalize_math_unicode, strip_control_chars
 
-GeneratedTextBlockType = Literal[
+GeneratedBlockType = Literal[
     BlockType.PARAGRAPH,
     BlockType.DEFINITION,
     BlockType.THEOREM,
@@ -26,12 +26,17 @@ GeneratedTextBlockType = Literal[
     BlockType.PROOF,
     BlockType.EXAMPLE,
     BlockType.REMARK,
+    BlockType.EQUATION,
     BlockType.EXERCISE,
 ]
 
 
-class _GeneratedBlockBase(BaseModel):
+class GeneratedNoteBlock(BaseModel):
+    """Flat LLM-facing block schema with host-side equation classification."""
+
+    type: GeneratedBlockType
     title: str | None = None
+    latex: str = Field(min_length=1)
     source_claim_ids: list[str] = Field(default_factory=list)
     source_evidence_ids: list[str] = Field(default_factory=list)
 
@@ -40,16 +45,9 @@ class _GeneratedBlockBase(BaseModel):
     def sanitize_title(cls, value: str | None) -> str | None:
         return strip_control_chars(value) if value is not None else None
 
-
-class GeneratedTextNoteBlock(_GeneratedBlockBase):
-    """LLM-facing prose/theorem block. Math may appear inline inside the body."""
-
-    type: GeneratedTextBlockType
-    latex: str = Field(min_length=1)
-
     @field_validator("latex")
     @classmethod
-    def reject_blank_or_renderer_owned_latex(cls, value: str) -> str:
+    def sanitize_latex(cls, value: str) -> str:
         value = strip_control_chars(value)
         if not value.strip():
             raise ValueError("generated note block latex must contain non-whitespace content")
@@ -59,6 +57,24 @@ class GeneratedTextNoteBlock(_GeneratedBlockBase):
             context="generated note blocks",
         )
 
+    @model_validator(mode="after")
+    def normalize_equation_type(self) -> GeneratedNoteBlock:
+        if self.type != BlockType.EQUATION:
+            return self
+        _reject_environments(
+            self.latex,
+            _DISPLAY_MATH_ENVIRONMENTS,
+            context="generated equation blocks",
+        )
+        normalized = normalize_math_unicode(self.latex)
+        if looks_like_math_fragment(normalized):
+            self.latex = normalized
+            return self
+        # A model occasionally labels prose containing inline math as an equation. Keep the content,
+        # but make its renderable type honest instead of wrapping prose in another display environment.
+        self.type = BlockType.PARAGRAPH
+        return self
+
     def to_note_block(self) -> NoteBlock:
         return NoteBlock(
             type=self.type,
@@ -67,49 +83,6 @@ class GeneratedTextNoteBlock(_GeneratedBlockBase):
             source_claim_ids=list(self.source_claim_ids),
             source_evidence_ids=list(self.source_evidence_ids),
         )
-
-
-class GeneratedEquationNoteBlock(_GeneratedBlockBase):
-    """LLM-facing display equation.
-
-    The renderer owns display delimiters, so the model must return a bare mathematical fragment.
-    Prose belongs in a paragraph/theorem/proof block instead of an equation block.
-    """
-
-    type: Literal[BlockType.EQUATION]
-    latex: str = Field(min_length=1)
-
-    @field_validator("latex")
-    @classmethod
-    def require_bare_math_fragment(cls, value: str) -> str:
-        value = normalize_math_unicode(value)
-        if not value.strip():
-            raise ValueError("generated equation must contain non-whitespace mathematics")
-        _reject_environments(
-            value,
-            _RENDERER_BLOCK_ENVIRONMENTS | _DISPLAY_MATH_ENVIRONMENTS,
-            context="generated equation blocks",
-        )
-        if not looks_like_math_fragment(value):
-            raise ValueError(
-                "generated equation must be bare math without prose or $/\\[ display delimiters"
-            )
-        return value
-
-    def to_note_block(self) -> NoteBlock:
-        return NoteBlock(
-            type=BlockType.EQUATION,
-            title=self.title,
-            latex=self.latex,
-            source_claim_ids=list(self.source_claim_ids),
-            source_evidence_ids=list(self.source_evidence_ids),
-        )
-
-
-GeneratedNoteBlock = Annotated[
-    GeneratedTextNoteBlock | GeneratedEquationNoteBlock,
-    Field(discriminator="type"),
-]
 
 
 class GeneratedChunkNotes(BaseModel):
