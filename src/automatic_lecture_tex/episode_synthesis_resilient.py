@@ -20,13 +20,9 @@ from .schemas import BlockType, ChunkNotes, MathAudit, SemanticEpisode
 logger = logging.getLogger(__name__)
 
 # Bump the downstream cache whenever split/merge, coverage, or stitching semantics change.
-# Upstream knowledge-window caches have their own independent version.
-EPISODE_SYNTHESIS_CACHE_VERSION = 4
+EPISODE_SYNTHESIS_CACHE_VERSION = 5
 
-# Evidence character limits control input size, but do not bound output complexity. A second bound on
-# semantic atoms keeps ordinary calls small; failures are split recursively below this threshold too.
 MAX_OBSERVATIONS_PER_SYNTHESIS_CALL = 6
-
 _STRUCTURED_ERRORS = (json.JSONDecodeError, ValidationError)
 _REQUIRED_COVERAGE_KINDS = {
     "definition",
@@ -48,13 +44,16 @@ def reset_synthesis_stats() -> None:
         {
             "write_calls": 0,
             "validation_calls": 0,
+            "boundary_validation_calls": 0,
             "synthesis_seconds": 0.0,
             "validation_seconds": 0.0,
+            "proactive_splits": 0,
             "structured_splits": 0,
             "validation_splits": 0,
             "coverage_splits": 0,
             "indivisible_failures": 0,
             "coverage_unresolved": 0,
+            "boundary_validation_failures": 0,
             "proof_merges": 0,
             "deduped_blocks": 0,
         }
@@ -98,8 +97,6 @@ def _child_payload(
         child_claim["evidence_ids"] = evidence_ids
         claims.append(child_claim)
 
-    # Keep symbols introduced before this child as read-only context, plus symbols directly grounded
-    # in this child. Do not leak symbols introduced only by the future/right child into the left one.
     symbols: list[dict[str, Any]] = []
     for symbol in evidence.get("symbols", []):
         symbol_evidence = set(symbol.get("evidence_ids", []))
@@ -147,28 +144,10 @@ def split_evidence_payload(
     )
 
 
-def _split_until_small(evidence: dict[str, Any]) -> list[dict[str, Any]]:
-    if len(evidence.get("observations", [])) <= MAX_OBSERVATIONS_PER_SYNTHESIS_CALL:
-        return [evidence]
-    split = split_evidence_payload(evidence)
-    if split is None:
-        return [evidence]
-    left, right = split
-    return [*_split_until_small(left), *_split_until_small(right)]
-
-
 def episode_evidence_batches(kb, episode, config, transcript=None) -> list[dict[str, Any]]:
-    """Create bounded synthesis leaves using size, semantic-atom, and local-transcript bounds."""
+    """Create hard input-size bounded parent batches and attach only local transcript context."""
 
-    base_batches = _base_evidence_batches(kb, episode, config, transcript)
-    leaves: list[dict[str, Any]] = []
-    for payload in base_batches:
-        leaves.extend(_split_until_small(payload))
-
-    for index, payload in enumerate(leaves):
-        payload["batch"]["index"] = index
-        payload["batch"]["count"] = len(leaves)
-    return leaves
+    return _base_evidence_batches(kb, episode, config, transcript)
 
 
 def _context_after(previous_context: list[dict[str, Any]], notes: ChunkNotes) -> list[dict[str, Any]]:
@@ -186,7 +165,99 @@ def _context_after(previous_context: list[dict[str, Any]], notes: ChunkNotes) ->
     return [*previous_context, *generated][-2:]
 
 
+def _normalize_body(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _join_without_exact_overlap(left: str, right: str) -> str:
+    left = left.rstrip()
+    right = right.lstrip()
+    max_overlap = min(len(left), len(right), 1200)
+    for size in range(max_overlap, 39, -1):
+        if _normalize_body(left[-size:]) == _normalize_body(right[:size]):
+            return left + right[size:]
+    return left + "\n\n" + right
+
+
+def _merge_block_provenance(left, right) -> None:
+    left.source_claim_ids = _merge_unique(left.source_claim_ids, right.source_claim_ids)
+    left.source_evidence_ids = _merge_unique(left.source_evidence_ids, right.source_evidence_ids)
+
+
+def stitch_chunk_notes(notes: ChunkNotes) -> ChunkNotes:
+    """Deterministically clean split boundaries without introducing new mathematical content."""
+
+    stitched = []
+    for block in notes.blocks:
+        if not stitched:
+            stitched.append(block)
+            continue
+        previous = stitched[-1]
+        same_body = (
+            previous.type == block.type
+            and _normalize_body(previous.latex) == _normalize_body(block.latex)
+        )
+        if same_body:
+            _merge_block_provenance(previous, block)
+            _STATS["deduped_blocks"] = int(_STATS["deduped_blocks"]) + 1
+            continue
+
+        right_title = (block.title or "").lower()
+        proof_continuation = (
+            previous.type == BlockType.PROOF
+            and block.type == BlockType.PROOF
+            and (
+                not block.title
+                or not previous.title
+                or block.title == previous.title
+                or "продолж" in right_title
+                or right_title == "доказательство"
+            )
+        )
+        if proof_continuation:
+            previous.latex = _join_without_exact_overlap(previous.latex, block.latex)
+            _merge_block_provenance(previous, block)
+            if not previous.title and block.title:
+                previous.title = block.title
+            _STATS["proof_merges"] = int(_STATS["proof_merges"]) + 1
+            continue
+        stitched.append(block)
+
+    notes.blocks = stitched
+    return notes
+
+
+def _post_merge_boundary_audit(orchestrator, evidence: dict[str, Any], notes: ChunkNotes) -> None:
+    """Validate a reconstructed split parent against its original <=6-observation evidence."""
+
+    if not orchestrator.config.global_validation or not notes.blocks:
+        return
+    started = time.perf_counter()
+    _STATS["boundary_validation_calls"] = int(_STATS["boundary_validation_calls"]) + 1
+    try:
+        audit = _validate_once(orchestrator, evidence, notes)
+    except _STRUCTURED_ERRORS as exc:
+        _STATS["boundary_validation_failures"] = int(
+            _STATS["boundary_validation_failures"]
+        ) + 1
+        notes.unresolved.append(
+            "Bounded post-merge validation failed; child validations were kept: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    else:
+        apply_episode_validation(
+            notes,
+            audit,
+            threshold=orchestrator.config.global_validation_apply_threshold,
+        )
+    finally:
+        _STATS["validation_seconds"] = float(_STATS["validation_seconds"]) + (
+            time.perf_counter() - started
+        )
+
+
 def _merge_parts(
+    orchestrator,
     episode: SemanticEpisode,
     evidence: dict[str, Any],
     parts: list[ChunkNotes],
@@ -205,7 +276,9 @@ def _merge_parts(
         result.notation.extend(notes.notation)
         result.corrections.extend(notes.corrections)
         result.unresolved = _merge_unique(result.unresolved, notes.unresolved)
-    return result
+
+    _post_merge_boundary_audit(orchestrator, evidence, result)
+    return stitch_chunk_notes(result)
 
 
 def _indivisible_failure(
@@ -301,7 +374,7 @@ def _split_for_failure(
     left_notes = _synthesize_tree(orchestrator, episode, left_evidence, previous_context)
     right_context = _context_after(previous_context, left_notes)
     right_notes = _synthesize_tree(orchestrator, episode, right_evidence, right_context)
-    return _merge_parts(episode, evidence, [left_notes, right_notes])
+    return _merge_parts(orchestrator, episode, evidence, [left_notes, right_notes])
 
 
 def _synthesize_tree(
@@ -310,6 +383,19 @@ def _synthesize_tree(
     evidence: dict[str, Any],
     previous_context: list[dict[str, Any]],
 ) -> ChunkNotes:
+    observations = evidence.get("observations", [])
+    if len(observations) > MAX_OBSERVATIONS_PER_SYNTHESIS_CALL:
+        _STATS["proactive_splits"] = int(_STATS["proactive_splits"]) + 1
+        split_notes = _split_for_failure(
+            orchestrator,
+            episode,
+            evidence,
+            previous_context,
+            reason="proactive semantic-atom cap",
+        )
+        if split_notes is not None:
+            return split_notes
+
     started = time.perf_counter()
     _STATS["write_calls"] = int(_STATS["write_calls"]) + 1
     try:
@@ -422,78 +508,16 @@ def write_episode_batch(
     evidence: dict[str, Any],
     previous_context: list[dict[str, Any]],
 ) -> ChunkNotes:
-    """Synthesize one batch as a recursive split-and-merge tree."""
-
     return _synthesize_tree(orchestrator, episode, evidence, previous_context)
 
 
 def validate_episode_batch(orchestrator, evidence, notes) -> MathAudit:
-    """Outer pipeline validation is a no-op because each synthesis leaf is validated in-tree."""
+    """Outer pipeline validation is a no-op because validation is performed inside the tree."""
 
     return MathAudit()
 
 
-def _normalize_body(value: str) -> str:
-    return " ".join(value.split())
-
-
-def _join_without_exact_overlap(left: str, right: str) -> str:
-    left = left.rstrip()
-    right = right.lstrip()
-    max_overlap = min(len(left), len(right), 1200)
-    for size in range(max_overlap, 39, -1):
-        if _normalize_body(left[-size:]) == _normalize_body(right[:size]):
-            return left + right[size:]
-    return left + "\n\n" + right
-
-
-def _merge_block_provenance(left, right) -> None:
-    left.source_claim_ids = _merge_unique(left.source_claim_ids, right.source_claim_ids)
-    left.source_evidence_ids = _merge_unique(left.source_evidence_ids, right.source_evidence_ids)
-
-
-def stitch_chunk_notes(notes: ChunkNotes) -> ChunkNotes:
-    """Deterministically clean split boundaries without introducing new mathematical content."""
-
-    stitched = []
-    for block in notes.blocks:
-        if not stitched:
-            stitched.append(block)
-            continue
-        previous = stitched[-1]
-        same_body = (
-            previous.type == block.type
-            and _normalize_body(previous.latex) == _normalize_body(block.latex)
-        )
-        if same_body:
-            _merge_block_provenance(previous, block)
-            _STATS["deduped_blocks"] = int(_STATS["deduped_blocks"]) + 1
-            continue
-
-        right_title = (block.title or "").lower()
-        proof_continuation = (
-            previous.type == BlockType.PROOF
-            and block.type == BlockType.PROOF
-            and (
-                not block.title
-                or not previous.title
-                or block.title == previous.title
-                or "продолж" in right_title
-                or right_title == "доказательство"
-            )
-        )
-        if proof_continuation:
-            previous.latex = _join_without_exact_overlap(previous.latex, block.latex)
-            _merge_block_provenance(previous, block)
-            if not previous.title and block.title:
-                previous.title = block.title
-            _STATS["proof_merges"] = int(_STATS["proof_merges"]) + 1
-            continue
-        stitched.append(block)
-
-    notes.blocks = stitched
-    return notes
-
-
 def merge_episode_batches(episode: SemanticEpisode, batches: list[ChunkNotes]) -> ChunkNotes:
+    """Merge independent hard-size parent batches and clean only their immediate boundaries."""
+
     return stitch_chunk_notes(_base_merge_episode_batches(episode, batches))
