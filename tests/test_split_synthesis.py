@@ -59,13 +59,16 @@ def _evidence(count: int) -> dict:
     }
 
 
-def _orchestrator(*, validate: bool = False):
-    return SimpleNamespace(
-        config=SimpleNamespace(
+def _orchestrator(*, validate: bool = False, retries: int | None = None):
+    kwargs = {
+        "config": SimpleNamespace(
             global_validation=validate,
             global_validation_apply_threshold=0.85,
         )
-    )
+    }
+    if retries is not None:
+        kwargs["llm"] = SimpleNamespace(config=SimpleNamespace(max_retries=retries))
+    return SimpleNamespace(**kwargs)
 
 
 def test_episode_write_failure_recursively_splits_and_merges(monkeypatch) -> None:
@@ -94,6 +97,30 @@ def test_episode_write_failure_recursively_splits_and_merges(monkeypatch) -> Non
 
     assert calls == [["obs_0", "obs_1"], ["obs_0"], ["obs_1"]]
     assert [block.latex for block in notes.blocks] == ["fact 0", "fact 1"]
+
+
+def test_multi_atom_call_disables_internal_retries_and_restores_them(monkeypatch) -> None:
+    orchestrator = _orchestrator(retries=2)
+    seen_retries = []
+
+    def fake_write(orchestrator, episode, evidence, previous_context):
+        seen_retries.append(orchestrator.llm.config.max_retries)
+        blocks = [
+            NoteBlock(
+                type="paragraph",
+                latex=item["text"],
+                source_evidence_ids=[item["id"]],
+            )
+            for item in evidence["observations"]
+        ]
+        return ChunkNotes(chunk_id="leaf", section_title="Episode", blocks=blocks)
+
+    monkeypatch.setattr(resilient, "_write_once", fake_write)
+
+    resilient.write_episode_batch(orchestrator, _episode(), _evidence(2), [])
+
+    assert seen_retries == [0]
+    assert orchestrator.llm.config.max_retries == 2
 
 
 def test_validation_failure_resynthesizes_smaller_children(monkeypatch) -> None:
