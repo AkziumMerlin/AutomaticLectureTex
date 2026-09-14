@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
+from . import episode_synthesis_resilient as _resilient
 from . import knowledge_pipeline as _base
+from .conservative_validation import validate_episode_batch_conservative
 from .episode_synthesis_resilient import (
     EPISODE_SYNTHESIS_CACHE_VERSION,
     episode_evidence_batches,
@@ -15,7 +17,7 @@ from .episode_synthesis_resilient import (
 from .knowledge_integrity import IntegrityKnowledgeOrchestrator
 from .util import atomic_json_dump
 
-KNOWLEDGE_CACHE_VERSION = 3
+KNOWLEDGE_CACHE_VERSION = 4
 
 
 def _patch_run_metrics(work) -> None:
@@ -45,12 +47,22 @@ def _patch_run_metrics(work) -> None:
     payload["episode_deduped_blocks"] = int(stats["deduped_blocks"])
     payload["knowledge_cache_version"] = KNOWLEDGE_CACHE_VERSION
     payload["episode_synthesis_cache_version"] = EPISODE_SYNTHESIS_CACHE_VERSION
+
+    reconstruction_path = work / "transcript_reconstruction.json"
+    if reconstruction_path.exists():
+        try:
+            reconstruction = json.loads(reconstruction_path.read_text(encoding="utf-8"))
+            for key, value in reconstruction.get("metrics", {}).items():
+                payload[f"transcript_reconstruction_{key}"] = value
+        except json.JSONDecodeError:
+            pass
     atomic_json_dump(path, payload)
 
 
 def run_knowledge_pipeline(*args, **kwargs):
     """Run the knowledge pipeline with provenance, coverage, and split/merge integrity hooks."""
 
+    pipeline = args[0]
     transcript = kwargs["transcript"]
     work = kwargs["work"]
 
@@ -62,6 +74,7 @@ def run_knowledge_pipeline(*args, **kwargs):
     original_assemble = _base.assemble_outline_sections
     original_synthesis_version = _base.EPISODE_SYNTHESIS_CACHE_VERSION
     original_knowledge_version = _base.KNOWLEDGE_CACHE_VERSION
+    original_leaf_validator = _resilient._validate_once
 
     def orchestrator_factory(llm, config, output_language):
         return IntegrityKnowledgeOrchestrator(
@@ -69,6 +82,9 @@ def run_knowledge_pipeline(*args, **kwargs):
             config,
             output_language,
             transcript=transcript,
+            ambiguous_transcript_confidence=(
+                pipeline.config.transcript_correction.ambiguous_segment_confidence
+            ),
         )
 
     def bounded_batches(kb, episode, config, transcript_arg=None):
@@ -94,6 +110,7 @@ def run_knowledge_pipeline(*args, **kwargs):
     _base.assemble_outline_sections = assemble_with_math_titles
     _base.EPISODE_SYNTHESIS_CACHE_VERSION = EPISODE_SYNTHESIS_CACHE_VERSION
     _base.KNOWLEDGE_CACHE_VERSION = KNOWLEDGE_CACHE_VERSION
+    _resilient._validate_once = validate_episode_batch_conservative
     try:
         result = _base.run_knowledge_pipeline(*args, **kwargs)
         _patch_run_metrics(work)
@@ -107,3 +124,4 @@ def run_knowledge_pipeline(*args, **kwargs):
         _base.assemble_outline_sections = original_assemble
         _base.EPISODE_SYNTHESIS_CACHE_VERSION = original_synthesis_version
         _base.KNOWLEDGE_CACHE_VERSION = original_knowledge_version
+        _resilient._validate_once = original_leaf_validator

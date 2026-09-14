@@ -19,6 +19,9 @@ jobs:
       - name: Ruff
         run: |
           ruff check --ignore E501,I001 \
+            src/automatic_lecture_tex/config.py \
+            src/automatic_lecture_tex/conservative_validation.py \
+            src/automatic_lecture_tex/correcting_asr.py \
             src/automatic_lecture_tex/episode_synthesis_resilient.py \
             src/automatic_lecture_tex/generated_notes.py \
             src/automatic_lecture_tex/knowledge_integrity.py \
@@ -26,8 +29,11 @@ jobs:
             src/automatic_lecture_tex/latex.py \
             src/automatic_lecture_tex/pipeline_robust.py \
             src/automatic_lecture_tex/tex_safety.py \
+            src/automatic_lecture_tex/transcript_correction.py \
             tests/test_generated_notes.py \
             tests/test_integrity_fixes.py \
-            tests/test_split_synthesis.py
+            tests/test_split_synthesis.py \
+            tests/test_transcript_ambiguity_gate.py \
+            tests/test_transcript_correction.py
       - name: Pytest
         run: pytest -q

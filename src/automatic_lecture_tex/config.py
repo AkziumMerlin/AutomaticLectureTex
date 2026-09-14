@@ -54,6 +54,29 @@ class ASRConfig(BaseModel):
     hallucination_silence_threshold: float | None = Field(default=2.0, gt=0)
 
 
+class TranscriptCorrectionConfig(BaseModel):
+    """Bounded semantic cleanup between raw ASR and knowledge extraction."""
+
+    enabled: bool = False
+    window_seconds: float = Field(default=90.0, gt=10.0, le=600.0)
+    context_seconds: float = Field(default=25.0, ge=0.0, le=180.0)
+    max_segments_per_batch: int = Field(default=14, ge=1, le=64)
+    suspicious_asr_confidence: float = Field(default=0.72, ge=0.0, le=1.0)
+    reconstruction_confidence_threshold: float = Field(default=0.72, ge=0.0, le=1.0)
+    ambiguous_segment_confidence: float = Field(default=0.20, ge=0.0, le=1.0)
+    glossary: list[str] = Field(default_factory=list)
+    fallback_enabled: bool = False
+    fallback_context_seconds: float = Field(default=8.0, ge=0.0, le=60.0)
+    fallback_max_group_seconds: float = Field(default=75.0, gt=5.0, le=300.0)
+    fallback_asr: ASRConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_fallback(self) -> TranscriptCorrectionConfig:
+        if self.fallback_enabled and self.fallback_asr is None:
+            raise ValueError("transcript_correction.fallback_enabled requires fallback_asr")
+        return self
+
+
 class LLMConfig(BaseModel):
     base_url: str = "http://127.0.0.1:8000/v1"
     api_key: str = "EMPTY"
@@ -137,6 +160,7 @@ class RuntimeConfig(BaseModel):
 class AppConfig(BaseModel):
     course: CourseConfig
     asr: ASRConfig = Field(default_factory=ASRConfig)
+    transcript_correction: TranscriptCorrectionConfig = Field(default_factory=TranscriptCorrectionConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     notes: NotesConfig = Field(default_factory=NotesConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
