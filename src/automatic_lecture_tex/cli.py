@@ -6,7 +6,7 @@ import shutil
 import sys
 
 from .config import load_config
-from .pipeline import Pipeline
+from .pipeline_robust import Pipeline
 
 
 def _parser() -> argparse.ArgumentParser:
