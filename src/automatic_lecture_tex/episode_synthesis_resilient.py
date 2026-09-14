@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from copy import deepcopy
 from typing import Any
 
@@ -10,22 +11,63 @@ from pydantic import ValidationError
 from .episode_synthesis import (
     apply_episode_validation,
     episode_evidence_batches as _base_evidence_batches,
+    merge_episode_batches as _base_merge_episode_batches,
     validate_episode_batch as _validate_once,
     write_episode_batch as _write_once,
 )
-from .schemas import ChunkNotes, MathAudit, SemanticEpisode
+from .schemas import BlockType, ChunkNotes, MathAudit, SemanticEpisode
 
 logger = logging.getLogger(__name__)
 
-# Bump the downstream cache whenever split/merge semantics change. Upstream knowledge-window caches
-# are intentionally unaffected by this version.
-EPISODE_SYNTHESIS_CACHE_VERSION = 3
+# Bump the downstream cache whenever split/merge, coverage, or stitching semantics change.
+# Upstream knowledge-window caches have their own independent version.
+EPISODE_SYNTHESIS_CACHE_VERSION = 4
 
 # Evidence character limits control input size, but do not bound output complexity. A second bound on
 # semantic atoms keeps ordinary calls small; failures are split recursively below this threshold too.
 MAX_OBSERVATIONS_PER_SYNTHESIS_CALL = 6
 
 _STRUCTURED_ERRORS = (json.JSONDecodeError, ValidationError)
+_REQUIRED_COVERAGE_KINDS = {
+    "definition",
+    "claim",
+    "equation",
+    "proof_step",
+    "example",
+    "notation",
+    "correction",
+    "retraction",
+}
+
+_STATS: dict[str, float | int] = {}
+
+
+def reset_synthesis_stats() -> None:
+    _STATS.clear()
+    _STATS.update(
+        {
+            "write_calls": 0,
+            "validation_calls": 0,
+            "synthesis_seconds": 0.0,
+            "validation_seconds": 0.0,
+            "structured_splits": 0,
+            "validation_splits": 0,
+            "coverage_splits": 0,
+            "indivisible_failures": 0,
+            "coverage_unresolved": 0,
+            "proof_merges": 0,
+            "deduped_blocks": 0,
+        }
+    )
+
+
+def synthesis_stats_snapshot() -> dict[str, float | int]:
+    if not _STATS:
+        reset_synthesis_stats()
+    return dict(_STATS)
+
+
+reset_synthesis_stats()
 
 
 def _merge_unique(left: list[str], right: list[str]) -> list[str]:
@@ -116,7 +158,7 @@ def _split_until_small(evidence: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def episode_evidence_batches(kb, episode, config, transcript=None) -> list[dict[str, Any]]:
-    """Create bounded synthesis leaves using both input-size and semantic-atom limits."""
+    """Create bounded synthesis leaves using size, semantic-atom, and local-transcript bounds."""
 
     base_batches = _base_evidence_batches(kb, episode, config, transcript)
     leaves: list[dict[str, Any]] = []
@@ -175,6 +217,7 @@ def _indivisible_failure(
     observations = evidence.get("observations", [])
     observation_ids = [item.get("id", "?") for item in observations]
     batch = evidence.get("batch", {})
+    _STATS["indivisible_failures"] = int(_STATS["indivisible_failures"]) + 1
     return ChunkNotes(
         chunk_id=f"{episode.id}_batch_{int(batch.get('index', 0)):03d}",
         start=observations[0]["start"] if observations else episode.start,
@@ -189,12 +232,7 @@ def _indivisible_failure(
 
 
 def _call_with_split_retry_policy(orchestrator, evidence: dict[str, Any], fn, *args):
-    """Let multi-atom failures reach the split tree after the first invalid response.
-
-    A leaf containing one observation keeps the configured LLM retry policy because it cannot be
-    subdivided further. Synthesis runs after visual/extraction work, so this temporary setting is not
-    shared with concurrent LLM calls in the current pipeline.
-    """
+    """Let multi-atom failures reach the split tree after the first invalid response."""
 
     if len(evidence.get("observations", [])) < 2:
         return fn(*args)
@@ -212,12 +250,68 @@ def _call_with_split_retry_policy(orchestrator, evidence: dict[str, Any], fn, *a
         config.max_retries = retries
 
 
+def _required_observation_ids(evidence: dict[str, Any]) -> set[str]:
+    return {
+        str(item["id"])
+        for item in evidence.get("observations", [])
+        if str(item.get("kind", "")) in _REQUIRED_COVERAGE_KINDS
+        and (str(item.get("text", "")).strip() or str(item.get("latex") or "").strip())
+    }
+
+
+def _covered_observation_ids(notes: ChunkNotes, evidence: dict[str, Any]) -> set[str]:
+    claim_evidence = {
+        str(claim["id"]): {str(item) for item in claim.get("evidence_ids", [])}
+        for claim in evidence.get("claims", [])
+    }
+    covered: set[str] = set()
+    for block in notes.blocks:
+        covered.update(str(item) for item in block.source_evidence_ids)
+        for claim_id in block.source_claim_ids:
+            covered.update(claim_evidence.get(str(claim_id), set()))
+    return covered
+
+
+def missing_coverage(notes: ChunkNotes, evidence: dict[str, Any]) -> list[str]:
+    required = _required_observation_ids(evidence)
+    covered = _covered_observation_ids(notes, evidence)
+    return sorted(required - covered)
+
+
+def _split_for_failure(
+    orchestrator,
+    episode: SemanticEpisode,
+    evidence: dict[str, Any],
+    previous_context: list[dict[str, Any]],
+    *,
+    reason: str,
+) -> ChunkNotes | None:
+    split = split_evidence_payload(evidence)
+    if split is None:
+        return None
+    left_evidence, right_evidence = split
+    logger.warning(
+        "[%s] %s for %d observations; splitting into %d + %d",
+        episode.id,
+        reason,
+        len(evidence.get("observations", [])),
+        len(left_evidence["observations"]),
+        len(right_evidence["observations"]),
+    )
+    left_notes = _synthesize_tree(orchestrator, episode, left_evidence, previous_context)
+    right_context = _context_after(previous_context, left_notes)
+    right_notes = _synthesize_tree(orchestrator, episode, right_evidence, right_context)
+    return _merge_parts(episode, evidence, [left_notes, right_notes])
+
+
 def _synthesize_tree(
     orchestrator,
     episode: SemanticEpisode,
     evidence: dict[str, Any],
     previous_context: list[dict[str, Any]],
 ) -> ChunkNotes:
+    started = time.perf_counter()
+    _STATS["write_calls"] = int(_STATS["write_calls"]) + 1
     try:
         notes = _call_with_split_retry_policy(
             orchestrator,
@@ -229,31 +323,53 @@ def _synthesize_tree(
             previous_context,
         )
     except _STRUCTURED_ERRORS as exc:
-        split = split_evidence_payload(evidence)
-        if split is None:
-            logger.error(
-                "[%s] episode synthesis failed for one evidence atom; recording unresolved: %s",
-                episode.id,
-                exc,
-            )
-            return _indivisible_failure(episode, evidence, "Episode synthesis", exc)
-
-        left_evidence, right_evidence = split
-        logger.warning(
-            "[%s] episode_write failed for %d observations; splitting into %d + %d",
-            episode.id,
-            len(evidence.get("observations", [])),
-            len(left_evidence["observations"]),
-            len(right_evidence["observations"]),
+        _STATS["synthesis_seconds"] = float(_STATS["synthesis_seconds"]) + (
+            time.perf_counter() - started
         )
-        left_notes = _synthesize_tree(orchestrator, episode, left_evidence, previous_context)
-        right_context = _context_after(previous_context, left_notes)
-        right_notes = _synthesize_tree(orchestrator, episode, right_evidence, right_context)
-        return _merge_parts(episode, evidence, [left_notes, right_notes])
+        split_notes = _split_for_failure(
+            orchestrator,
+            episode,
+            evidence,
+            previous_context,
+            reason="episode_write structured failure",
+        )
+        if split_notes is not None:
+            _STATS["structured_splits"] = int(_STATS["structured_splits"]) + 1
+            return split_notes
+        logger.error(
+            "[%s] episode synthesis failed for one evidence atom; recording unresolved: %s",
+            episode.id,
+            exc,
+        )
+        return _indivisible_failure(episode, evidence, "Episode synthesis", exc)
+    else:
+        _STATS["synthesis_seconds"] = float(_STATS["synthesis_seconds"]) + (
+            time.perf_counter() - started
+        )
+
+    missing = missing_coverage(notes, evidence)
+    if missing:
+        split_notes = _split_for_failure(
+            orchestrator,
+            episode,
+            evidence,
+            previous_context,
+            reason=f"coverage failure missing={missing}",
+        )
+        if split_notes is not None:
+            _STATS["coverage_splits"] = int(_STATS["coverage_splits"]) + 1
+            return split_notes
+        _STATS["coverage_unresolved"] = int(_STATS["coverage_unresolved"]) + len(missing)
+        notes.unresolved.append(
+            "Host coverage invariant: substantive evidence was not represented by any generated "
+            f"block: {missing}."
+        )
 
     if not orchestrator.config.global_validation or not notes.blocks:
         return notes
 
+    started = time.perf_counter()
+    _STATS["validation_calls"] = int(_STATS["validation_calls"]) + 1
     try:
         audit = _call_with_split_retry_policy(
             orchestrator,
@@ -264,31 +380,33 @@ def _synthesize_tree(
             notes,
         )
     except _STRUCTURED_ERRORS as exc:
-        split = split_evidence_payload(evidence)
-        if split is None:
-            notes.unresolved.append(
-                "Episode validation failed for indivisible evidence; synthesized notes were kept "
-                f"without automatic validation: {type(exc).__name__}: {exc}"
-            )
-            logger.warning(
-                "[%s] validation failed for one evidence atom; keeping synthesis: %s",
-                episode.id,
-                exc,
-            )
-            return notes
-
-        left_evidence, right_evidence = split
-        logger.warning(
-            "[%s] episode_validation failed for %d observations; re-synthesizing as %d + %d",
-            episode.id,
-            len(evidence.get("observations", [])),
-            len(left_evidence["observations"]),
-            len(right_evidence["observations"]),
+        _STATS["validation_seconds"] = float(_STATS["validation_seconds"]) + (
+            time.perf_counter() - started
         )
-        left_notes = _synthesize_tree(orchestrator, episode, left_evidence, previous_context)
-        right_context = _context_after(previous_context, left_notes)
-        right_notes = _synthesize_tree(orchestrator, episode, right_evidence, right_context)
-        return _merge_parts(episode, evidence, [left_notes, right_notes])
+        split_notes = _split_for_failure(
+            orchestrator,
+            episode,
+            evidence,
+            previous_context,
+            reason="episode_validation structured failure",
+        )
+        if split_notes is not None:
+            _STATS["validation_splits"] = int(_STATS["validation_splits"]) + 1
+            return split_notes
+        notes.unresolved.append(
+            "Episode validation failed for indivisible evidence; synthesized notes were kept "
+            f"without automatic validation: {type(exc).__name__}: {exc}"
+        )
+        logger.warning(
+            "[%s] validation failed for one evidence atom; keeping synthesis: %s",
+            episode.id,
+            exc,
+        )
+        return notes
+    else:
+        _STATS["validation_seconds"] = float(_STATS["validation_seconds"]) + (
+            time.perf_counter() - started
+        )
 
     apply_episode_validation(
         notes,
@@ -304,11 +422,7 @@ def write_episode_batch(
     evidence: dict[str, Any],
     previous_context: list[dict[str, Any]],
 ) -> ChunkNotes:
-    """Synthesize one batch as a recursive split-and-merge tree.
-
-    The LLM is never asked to repair or continue partial JSON. A failed multi-observation node is
-    replaced by two smaller synthesis nodes and the host deterministically concatenates the results.
-    """
+    """Synthesize one batch as a recursive split-and-merge tree."""
 
     return _synthesize_tree(orchestrator, episode, evidence, previous_context)
 
@@ -317,3 +431,69 @@ def validate_episode_batch(orchestrator, evidence, notes) -> MathAudit:
     """Outer pipeline validation is a no-op because each synthesis leaf is validated in-tree."""
 
     return MathAudit()
+
+
+def _normalize_body(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _join_without_exact_overlap(left: str, right: str) -> str:
+    left = left.rstrip()
+    right = right.lstrip()
+    max_overlap = min(len(left), len(right), 1200)
+    for size in range(max_overlap, 39, -1):
+        if _normalize_body(left[-size:]) == _normalize_body(right[:size]):
+            return left + right[size:]
+    return left + "\n\n" + right
+
+
+def _merge_block_provenance(left, right) -> None:
+    left.source_claim_ids = _merge_unique(left.source_claim_ids, right.source_claim_ids)
+    left.source_evidence_ids = _merge_unique(left.source_evidence_ids, right.source_evidence_ids)
+
+
+def stitch_chunk_notes(notes: ChunkNotes) -> ChunkNotes:
+    """Deterministically clean split boundaries without introducing new mathematical content."""
+
+    stitched = []
+    for block in notes.blocks:
+        if not stitched:
+            stitched.append(block)
+            continue
+        previous = stitched[-1]
+        same_body = (
+            previous.type == block.type
+            and _normalize_body(previous.latex) == _normalize_body(block.latex)
+        )
+        if same_body:
+            _merge_block_provenance(previous, block)
+            _STATS["deduped_blocks"] = int(_STATS["deduped_blocks"]) + 1
+            continue
+
+        right_title = (block.title or "").lower()
+        proof_continuation = (
+            previous.type == BlockType.PROOF
+            and block.type == BlockType.PROOF
+            and (
+                not block.title
+                or not previous.title
+                or block.title == previous.title
+                or "продолж" in right_title
+                or right_title == "доказательство"
+            )
+        )
+        if proof_continuation:
+            previous.latex = _join_without_exact_overlap(previous.latex, block.latex)
+            _merge_block_provenance(previous, block)
+            if not previous.title and block.title:
+                previous.title = block.title
+            _STATS["proof_merges"] = int(_STATS["proof_merges"]) + 1
+            continue
+        stitched.append(block)
+
+    notes.blocks = stitched
+    return notes
+
+
+def merge_episode_batches(episode: SemanticEpisode, batches: list[ChunkNotes]) -> ChunkNotes:
+    return stitch_chunk_notes(_base_merge_episode_batches(episode, batches))
