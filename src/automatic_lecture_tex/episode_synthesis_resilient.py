@@ -188,6 +188,30 @@ def _indivisible_failure(
     )
 
 
+def _call_with_split_retry_policy(orchestrator, evidence: dict[str, Any], fn, *args):
+    """Let multi-atom failures reach the split tree after the first invalid response.
+
+    A leaf containing one observation keeps the configured LLM retry policy because it cannot be
+    subdivided further. Synthesis runs after visual/extraction work, so this temporary setting is not
+    shared with concurrent LLM calls in the current pipeline.
+    """
+
+    if len(evidence.get("observations", [])) < 2:
+        return fn(*args)
+
+    llm = getattr(orchestrator, "llm", None)
+    config = getattr(llm, "config", None)
+    if config is None or not hasattr(config, "max_retries"):
+        return fn(*args)
+
+    retries = config.max_retries
+    config.max_retries = 0
+    try:
+        return fn(*args)
+    finally:
+        config.max_retries = retries
+
+
 def _synthesize_tree(
     orchestrator,
     episode: SemanticEpisode,
@@ -195,7 +219,15 @@ def _synthesize_tree(
     previous_context: list[dict[str, Any]],
 ) -> ChunkNotes:
     try:
-        notes = _write_once(orchestrator, episode, evidence, previous_context)
+        notes = _call_with_split_retry_policy(
+            orchestrator,
+            evidence,
+            _write_once,
+            orchestrator,
+            episode,
+            evidence,
+            previous_context,
+        )
     except _STRUCTURED_ERRORS as exc:
         split = split_evidence_payload(evidence)
         if split is None:
@@ -223,7 +255,14 @@ def _synthesize_tree(
         return notes
 
     try:
-        audit = _validate_once(orchestrator, evidence, notes)
+        audit = _call_with_split_retry_policy(
+            orchestrator,
+            evidence,
+            _validate_once,
+            orchestrator,
+            evidence,
+            notes,
+        )
     except _STRUCTURED_ERRORS as exc:
         split = split_evidence_payload(evidence)
         if split is None:
