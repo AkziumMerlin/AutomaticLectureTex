@@ -31,10 +31,15 @@ def _patch_run_metrics(work) -> None:
     payload["episode_validation_seconds"] = round(float(stats["validation_seconds"]), 3)
     payload["episode_write_calls"] = int(stats["write_calls"])
     payload["episode_validation_calls"] = int(stats["validation_calls"])
+    payload["episode_boundary_validation_calls"] = int(stats["boundary_validation_calls"])
+    payload["episode_proactive_splits"] = int(stats["proactive_splits"])
     payload["episode_structured_splits"] = int(stats["structured_splits"])
     payload["episode_validation_splits"] = int(stats["validation_splits"])
     payload["episode_coverage_splits"] = int(stats["coverage_splits"])
     payload["episode_coverage_unresolved"] = int(stats["coverage_unresolved"])
+    payload["episode_boundary_validation_failures"] = int(
+        stats["boundary_validation_failures"]
+    )
     payload["episode_indivisible_failures"] = int(stats["indivisible_failures"])
     payload["episode_proof_merges"] = int(stats["proof_merges"])
     payload["episode_deduped_blocks"] = int(stats["deduped_blocks"])
