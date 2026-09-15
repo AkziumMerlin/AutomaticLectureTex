@@ -20,7 +20,7 @@ from .schemas import (
 
 
 class GeneratedLectureObservation(BaseModel):
-    """LLM-facing evidence event with host-derived temporal provenance."""
+    """LLM-facing semantic event with host-derived temporal provenance."""
 
     id: str = ""
     kind: ObservationKind
@@ -62,7 +62,6 @@ class GeneratedWindowObservations(BaseModel):
 @dataclass
 class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
     transcript: Transcript
-    ambiguous_transcript_confidence: float = 0.20
 
     def _segment_payload(self, chunk: LectureChunk) -> list[dict]:
         allowed = set(chunk.segment_ids)
@@ -71,12 +70,8 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
                 "id": segment.id,
                 "start_seconds": segment.start,
                 "end_seconds": segment.end,
-                "text": segment.text,
-                "confidence": segment.confidence,
-                "safe_for_substantive_extraction": (
-                    segment.confidence is None
-                    or segment.confidence > self.ambiguous_transcript_confidence
-                ),
+                "raw_asr": segment.text,
+                "asr_confidence": segment.confidence,
             }
             for segment in self.transcript.segments
             if segment.id in allowed
@@ -97,8 +92,9 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
             separators=(",", ":"),
         )
         symbols = [item.model_dump(mode="json") for item in kb.symbols if item.active]
+        recent_limit = min(30, self.config.knowledge_recent_observations)
         recent_observations = [
-            item.model_dump(mode="json") for item in kb.observations[-20:]
+            item.model_dump(mode="json") for item in kb.observations[-recent_limit:]
         ]
         open_episodes = [
             item.model_dump(mode="json")
@@ -106,53 +102,63 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
             if item.status == EpisodeStatus.OPEN
         ]
 
-        base_prompt = f"""Extract evidence events from one OVERLAPPING technical window of a
-university lecture. Do not write lecture notes and do not decide final document sections.
+        base_prompt = f"""Reconstruct the CANONICAL MATHEMATICAL EVENTS in one bounded overlapping
+window of a university lecture. This is semantic reconstruction from noisy evidence, not literal
+ASR cleanup and not lecture-note writing.
 
 Window id: {chunk.id}
-Transcript segments below have already passed through an ASR-reconstruction layer. Treat their text
-as the best available local transcription, not as immutable literal ASR. `source_segment_ids` MUST
-contain only exact ids from this list. Never convert printed times into numbers yourself:
+Raw timestamped ASR segments:
 {json.dumps(segment_payload, ensure_ascii=False, separators=(",", ":"))}
 
-A segment with `safe_for_substantive_extraction=false` is explicitly ambiguous. Do NOT turn an
-incoherent phrase from such a segment into canonical lecture content unless the same content is
-independently forced by a neighboring safe segment or supplied visual evidence. This applies to
-remarks/corrections/transitions as well as definitions/claims/equations/proof steps/examples/notation.
-Preserve unresolved ambiguity in `unresolved` instead of guessing what was said.
-
-Visual evidence. `visual_evidence_ids` may contain exact request_id values from this list, but every
-observation must still cite at least one transcript segment id for temporal grounding:
+Visual/board evidence aligned with this window:
 {visual_json}
 
-Known symbol registry:
+Known notation established earlier in the lecture:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
-Recent canonical observations from the previous overlap/context:
+Recent canonical mathematical events from the preceding context:
 {json.dumps(recent_observations, ensure_ascii=False, separators=(",", ":"))}
 
 Currently open semantic episodes:
 {json.dumps(open_episodes, ensure_ascii=False, separators=(",", ":"))}
 
-Return observations in temporal order. Use only these event meanings:
-- definition/claim/equation/proof_step/example/notation/remark: something actually asserted or
-  written in this window;
-- correction: the lecturer explicitly corrects a previous statement, sign, symbol, derivation, or
-  board entry. If it targets a recent canonical observation shown above, use that exact id in
-  target_observation_id; if the target is earlier in THIS window, use the local observation id;
-- retraction: the lecturer explicitly withdraws a statement, with target_observation_id when known;
-- transition: a real topic/proof/example transition, not a technical window edge;
-- unresolved: evidence is too ambiguous to reconstruct safely.
+Your task is to recover what mathematical content was actually communicated in this window.
+The ASR is noisy and may contain phonetic nonsense, broken technical terms, lost punctuation,
+misheard variable names, or malformed formulas. You MAY repair those errors using ALL LOCAL evidence:
+neighboring utterances, mathematical consistency, already-established notation, and board/visual
+evidence. For example, if a formula or technical term is acoustically corrupted but its intended
+reading is strongly determined by the surrounding derivation, reconstruct the intended reading.
 
-The lecturer may make mistakes and then fix them. Preserve both the mistaken event and the later
-correction as evidence. Do not replace either with textbook knowledge. Technical window overlap is
-not semantic structure: repeated material is expected and will be reconciled by the host.
+However, mathematical knowledge is a disambiguation tool, not a license to complete the lecture.
+Do NOT add a theorem, hypothesis, proof step, definition, formula, or conclusion merely because it
+would be standard textbook material. Do NOT silently fix a genuine mistake made by the lecturer.
+If the lecturer makes an error and later corrects it, preserve the erroneous event and the explicit
+correction/retraction as separate evidence events. If two materially different interpretations are
+plausible from the local evidence, return an `unresolved` event rather than guessing.
 
-Every observation MUST contain non-empty prose in `text`, even when it is primarily a formula.
-Put the exact formula additionally in `latex`. `source_status=observed` means directly supported by
-audio/visible board. Use `reconstructed` only for a local reconstruction strongly forced by the
-evidence; use `inferred` sparingly and never for new mathematical content. `confidence` is required.
-Write descriptive strings in language code `{self.output_language}`.
+`source_segment_ids` MUST contain only exact ids from the raw ASR list above. The host derives all
+numeric timestamps from those ids; never invent timestamps. `visual_evidence_ids` may contain only
+exact request ids from the supplied visual evidence. Every event needs transcript provenance even
+when the board is decisive.
+
+Use event kinds as follows:
+- definition/claim/equation/proof_step/example/notation/remark: mathematical content actually
+  communicated in this window;
+- correction: an explicit correction of an earlier statement/sign/symbol/derivation;
+- retraction: an explicit withdrawal of earlier content;
+- transition: a genuine semantic transition in the lecture;
+- unresolved: locally ambiguous content that cannot be reconstructed safely.
+
+`text` must be clean, coherent prose expressing the reconstructed mathematical event, NOT a quote of
+broken ASR. For equations also put the canonical formula in `latex`. Use
+`source_status=observed` when the mathematical content is directly clear from speech/board and
+`source_status=reconstructed` when you had to repair ASR using local context. Use `inferred` only
+for a weak local inference and never for new mathematical content. `confidence` is confidence that
+THIS semantic reconstruction matches the lecture, not ASR token confidence and not confidence that
+the mathematical statement is true.
+
+Return events in temporal order. Write descriptive strings in language code
+`{self.output_language}`.
 """
 
         result = None
@@ -185,9 +191,8 @@ Write descriptive strings in language code `{self.output_language}`.
                 break
             prompt = (
                 base_prompt
-                + "\nYour previous response used unknown provenance ids. "
-                + "Regenerate the full object. "
-                + f"Unknown ASR ids: {invalid_refs}; unknown visual ids: {invalid_visuals}.\n"
+                + "\nYour previous response used unknown provenance ids. Regenerate the complete "
+                + f"object. Unknown ASR ids: {invalid_refs}; unknown visual ids: {invalid_visuals}.\n"
             )
 
         assert result is not None
@@ -201,21 +206,14 @@ Write descriptive strings in language code `{self.output_language}`.
                     f"{item.id or index}: no valid source segment ids."
                 )
                 continue
-            segments = [segment_map[ref] for ref in valid_segment_ids]
             valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
-            has_safe_audio = any(segment["safe_for_substantive_extraction"] for segment in segments)
-            if (
-                item.kind != ObservationKind.UNRESOLVED
-                and not has_safe_audio
-                and not valid_visual_ids
-            ):
+            if item.kind == ObservationKind.UNRESOLVED:
                 unresolved.append(
-                    "Host transcript-integrity gate suppressed canonical observation "
-                    f"{item.id or index} from ambiguous-only transcript evidence: "
-                    f"segments={valid_segment_ids}."
+                    f"{item.text} [segments={','.join(valid_segment_ids)}]"
                 )
                 continue
 
+            segments = [segment_map[ref] for ref in valid_segment_ids]
             observation_id = item.id or f"obs_{chunk.id}_{index:03d}"
             observations.append(
                 LectureObservation(
