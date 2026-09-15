@@ -25,7 +25,9 @@ jobs:
             src/automatic_lecture_tex/config.py \
             src/automatic_lecture_tex/conservative_validation.py \
             src/automatic_lecture_tex/episode_synthesis_resilient.py \
+            src/automatic_lecture_tex/frame_selection.py \
             src/automatic_lecture_tex/generated_notes.py \
+            src/automatic_lecture_tex/gigaam_vad.py \
             src/automatic_lecture_tex/knowledge_integrity.py \
             src/automatic_lecture_tex/knowledge_pipeline_resilient.py \
             src/automatic_lecture_tex/latex.py \
@@ -35,6 +37,8 @@ jobs:
             src/automatic_lecture_tex/schemas.py \
             src/automatic_lecture_tex/sensory_evidence.py \
             src/automatic_lecture_tex/tex_safety.py \
+            src/automatic_lecture_tex/visual_formula_gate.py \
+            tests/test_evidence_preservation.py \
             tests/test_generated_notes.py \
             tests/test_integrity_fixes.py \
             tests/test_remote_frame_fallback.py \
