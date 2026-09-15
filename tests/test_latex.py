@@ -34,7 +34,7 @@ def test_render_lecture_uses_deterministic_environments():
     assert r"\langle x,y\rangle=0" in text
 
 
-def test_render_lecture_includes_correction_audit_comments():
+def test_render_lecture_keeps_correction_audit_out_of_tex():
     ir = LectureIR(
         lecture_id="l1",
         title="Lecture",
@@ -57,9 +57,9 @@ def test_render_lecture_includes_correction_audit_comments():
 
     text = render_lecture(ir)
 
-    assert "% Reconstruction corrections:" in text
-    assert "икс це" in text
-    assert "confidence=0.90" in text
+    assert "% Reconstruction corrections:" not in text
+    assert "икс це" not in text
+    assert "confidence=0.90" not in text
 
 
 def test_note_block_allows_internal_math_environment():
