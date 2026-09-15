@@ -17,6 +17,7 @@ from .schemas import (
     VisualEvidence,
     WindowObservations,
 )
+from .visual_formula_gate import find_formula_gate_violations
 
 
 class GeneratedLectureObservation(BaseModel):
@@ -131,14 +132,17 @@ reading is strongly determined by the surrounding derivation, reconstruct the in
 
 Visual evidence can contain both VLM OCR (`raw_latex`/`latex`) and independent
 `math_ocr_candidates`. These are FALLIBLE SENSOR HYPOTHESES, not ground truth. The first attached
-board image may be a temporal-median composite built from nearby frames: it is useful for recovering
-writing hidden by a moving lecturer, but it can combine content that existed at slightly different
-moments. Do not infer temporal order from the composite itself. Never copy a specialized OCR
-candidate merely because it is more explicit than the speech. Compare OCR channels against the raw
-visible transcription, established notation, neighboring equations, and local mathematical
-consistency. If exact signs/variables remain materially inconsistent across sensors, report the
-content as unresolved instead of choosing the most convenient formula. A formula is not
-`source_status=observed` merely because one OCR backend proposed it.
+image is a selected low-occlusion raw frame; a temporal-median composite may follow as secondary
+context and can combine writing from slightly different moments. Do not infer temporal order from
+the composite itself. Compare OCR channels against established notation, neighboring equations, and
+local mathematical consistency. If exact signs/variables remain materially inconsistent across
+sensors, report the content as unresolved instead of choosing the most convenient formula.
+
+When you cite high-confidence visual evidence for a formula, preserve its literal variable names,
+operators, signs, roots, subscripts, and constants unless another supplied local source explicitly
+contradicts it. Do not silently turn `v` into `u`, `\\sqrt{{2}}` into `2`, or `\\varepsilon_i` into
+`f_i`. If an event materially states a formula/relation, put that relation in `latex` even when the
+event kind is claim or proof_step; this lets the host verify symbol preservation.
 
 However, mathematical knowledge is a disambiguation tool, not a license to complete the lecture.
 Do NOT add a theorem, hypothesis, proof step, definition, formula, or conclusion merely because it
@@ -174,8 +178,10 @@ Return events in temporal order. Write descriptive strings in language code
 
         result = None
         invalid_refs: list[str] = []
+        invalid_visuals: list[str] = []
+        violations = []
         prompt = base_prompt
-        for _attempt in range(2):
+        for attempt in range(2):
             result = self._structured(
                 prompt,
                 GeneratedWindowObservations,
@@ -198,15 +204,27 @@ Return events in temporal order. Write descriptive strings in language code
                     if ref not in visual_ids
                 }
             )
-            if not invalid_refs and not invalid_visuals:
+            violations = find_formula_gate_violations(result.observations, evidence)
+            if not invalid_refs and not invalid_visuals and not violations:
                 break
-            prompt = (
-                base_prompt
-                + "\nYour previous response used unknown provenance ids. Regenerate the complete "
-                + f"object. Unknown ASR ids: {invalid_refs}; unknown visual ids: {invalid_visuals}.\n"
-            )
+            if attempt == 0:
+                feedback = []
+                if invalid_refs or invalid_visuals:
+                    feedback.append(
+                        f"Unknown ASR ids: {invalid_refs}; unknown visual ids: {invalid_visuals}."
+                    )
+                for violation in violations:
+                    feedback.append(
+                        "Host formula-preservation check rejected observation "
+                        f"{violation.observation_index} using {violation.evidence_id}: "
+                        f"visual={violation.visual_formula!r}, generated={violation.generated_formula!r}; "
+                        f"{violation.reason}. Preserve the visible formula literally or mark the "
+                        "event unresolved if local evidence conflicts."
+                    )
+                prompt = base_prompt + "\n\nHOST VALIDATION FEEDBACK:\n" + "\n".join(feedback)
 
         assert result is not None
+        blocked_indices = {item.observation_index for item in violations}
         observations: list[LectureObservation] = []
         unresolved = list(result.unresolved)
         for index, item in enumerate(result.observations):
@@ -215,6 +233,17 @@ Return events in temporal order. Write descriptive strings in language code
                 unresolved.append(
                     "Dropped generated observation "
                     f"{item.id or index}: no valid source segment ids."
+                )
+                continue
+            if index in blocked_indices:
+                matching = [v for v in violations if v.observation_index == index]
+                details = "; ".join(
+                    f"{v.evidence_id}: {v.visual_formula!r} -> {v.generated_formula!r}"
+                    for v in matching
+                )
+                unresolved.append(
+                    "Host visual-formula gate suppressed observation "
+                    f"{item.id or index} after retry: {details}"
                 )
                 continue
             valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
