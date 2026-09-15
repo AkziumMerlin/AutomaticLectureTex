@@ -58,7 +58,8 @@ def collect_visual_evidence(
 
     The VLM sees a robust temporal-median board image first, followed by the original sparse frames.
     An optional specialized OCR backend reads the same composite independently; its output is stored
-    as a hypothesis rather than replacing literal VLM evidence.
+    as a hypothesis rather than replacing literal VLM evidence. Visual acquisition is intentionally
+    non-fatal: one broken remote video range must not abort reconstruction of an entire lecture.
     """
 
     requests = []
@@ -81,6 +82,7 @@ def collect_visual_evidence(
 
     started = time.perf_counter()
     ocr_backend = _math_ocr_backend(pipeline)
+    evidence: list[VisualEvidence] = []
     prepared_visuals: list[
         tuple[Any, list[ExtractedFrame], list[MathOCRCandidate]]
     ] = []
@@ -120,7 +122,26 @@ def collect_visual_evidence(
                 raw_indices.append(existing)
 
         frame_dir = work / "frames" / request.id
-        frames = source.extract_frames(all_times, frame_dir)
+        try:
+            frames = source.extract_frames(all_times, frame_dir)
+        except Exception as exc:
+            logger.warning(
+                "[%s] frame extraction failed for %s; continuing without this visual evidence: %s",
+                lecture.id,
+                request.id,
+                exc,
+            )
+            evidence.append(
+                VisualEvidence(
+                    request_id=request.id,
+                    description=(
+                        "Visual frame extraction unavailable; semantic reconstruction must rely on "
+                        f"other evidence. {type(exc).__name__}: {exc}"
+                    ),
+                )
+            )
+            continue
+
         display_frames: list[ExtractedFrame] = []
         ocr_image: Path | None = None
 
@@ -170,7 +191,6 @@ def collect_visual_evidence(
 
         prepared_visuals.append((request, display_frames, candidates))
 
-    evidence: list[VisualEvidence] = []
     if prepared_visuals:
         workers = min(pipeline.config.vision.max_workers, len(prepared_visuals))
         futures: list[Future[VisualEvidence]] = []
