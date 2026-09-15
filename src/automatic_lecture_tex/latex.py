@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from .schemas import BlockType, LectureIR, NoteBlock
 from .tex_safety import (
+    canonicalize_math_fragment,
     looks_like_math_fragment,
+    normalize_heading_math,
     normalize_math_spans,
-    normalize_math_unicode,
     strip_control_chars,
 )
 from .util import run_checked
@@ -32,14 +34,14 @@ def escape_tex(text: str) -> str:
 
 
 def escape_tex_mixed(text: str) -> str:
-    """Escape prose while preserving balanced `$...$` math in headings/captions."""
+    """Escape prose while preserving or inserting safe `$...$` math in headings/captions."""
 
-    clean = strip_control_chars(text)
+    clean = normalize_heading_math(strip_control_chars(text))
     if clean.count("$") % 2:
         return escape_tex(clean)
     parts = _INLINE_DOLLAR_MATH.split(clean)
     return "".join(
-        normalize_math_unicode(part) if _INLINE_DOLLAR_MATH.fullmatch(part or "") else escape_tex(part)
+        canonicalize_math_fragment(part) if _INLINE_DOLLAR_MATH.fullmatch(part or "") else escape_tex(part)
         for part in parts
     )
 
@@ -58,11 +60,11 @@ def render_block(block: NoteBlock) -> str:
     if block.type == BlockType.PARAGRAPH:
         return body + "\n"
     if block.type == BlockType.EQUATION:
-        math = normalize_math_unicode(strip_control_chars(block.latex)).strip()
+        math = canonicalize_math_fragment(strip_control_chars(block.latex)).strip()
         if looks_like_math_fragment(math):
             return "\\[\n" + math + "\n\\]\n"
         # Defensive compatibility path for stale/bad IR. Never wrap prose or already-delimited math
-        # in another display environment; render it as ordinary TeX instead.
+        # in another display environment; normalize delimiters and render it as ordinary TeX.
         return normalize_math_spans(strip_control_chars(block.latex)).strip() + "\n"
     if block.type == BlockType.FIGURE:
         if not block.asset_path:
@@ -89,10 +91,6 @@ def render_block(block: NoteBlock) -> str:
     return _environment(block, environment_map[block.type])
 
 
-def _comment_text(value: str) -> str:
-    return " ".join(strip_control_chars(value).replace("\r", " ").replace("\n", " ").split())
-
-
 def render_lecture(ir: LectureIR) -> str:
     lines = [f"\\chapter{{{escape_tex_mixed(ir.title)}}}", ""]
     previous_section = None
@@ -103,22 +101,26 @@ def render_lecture(ir: LectureIR) -> str:
             previous_section = section
         for block in chunk.blocks:
             lines.append(render_block(block))
-        if chunk.corrections:
-            lines.append("% Reconstruction corrections:")
-            lines.extend(
-                "% - "
-                + _comment_text(
-                    f"[{item.basis}, confidence={item.confidence:.2f}] "
-                    f"{item.original!r} -> {item.corrected!r}: {item.reason}"
-                )
-                for item in chunk.corrections
-            )
-            lines.append("")
-        if chunk.unresolved:
-            lines.append("% Unresolved reconstruction issues:")
-            lines.extend(f"% - {_comment_text(item)}" for item in chunk.unresolved)
-            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _audit_payload(ir: LectureIR) -> dict:
+    return {
+        "lecture_id": ir.lecture_id,
+        "title": ir.title,
+        "chunks": [
+            {
+                "chunk_id": chunk.chunk_id,
+                "start": chunk.start,
+                "end": chunk.end,
+                "section_title": chunk.section_title,
+                "corrections": [item.model_dump(mode="json") for item in chunk.corrections],
+                "unresolved": list(chunk.unresolved),
+            }
+            for chunk in ir.chunks
+            if chunk.corrections or chunk.unresolved
+        ],
+    }
 
 
 PREAMBLE = r"""\documentclass[12pt,a4paper]{book}
@@ -147,12 +149,19 @@ PREAMBLE = r"""\documentclass[12pt,a4paper]{book}
 
 def write_course_tex(course_title: str, lectures: list[LectureIR], output_dir: Path) -> Path:
     lectures_dir = output_dir / "lectures"
+    audit_dir = output_dir / "audit"
     lectures_dir.mkdir(parents=True, exist_ok=True)
+    audit_dir.mkdir(parents=True, exist_ok=True)
     includes: list[str] = []
     for ir in lectures:
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", ir.lecture_id)
         path = lectures_dir / f"{safe}.tex"
         path.write_text(render_lecture(ir), encoding="utf-8")
+        audit_path = audit_dir / f"{safe}.json"
+        audit_path.write_text(
+            json.dumps(_audit_payload(ir), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         includes.append(f"\\input{{lectures/{safe}.tex}}")
 
     main = output_dir / "main.tex"
