@@ -88,6 +88,37 @@ def _segments_from_aligned_items(
     return segments
 
 
+def _extract_audio_chunk(
+    runtime: RuntimeConfig,
+    audio_path: Path,
+    start: float,
+    duration: float,
+    output: Path,
+) -> None:
+    run_checked(
+        [
+            runtime.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ]
+    )
+
+
 class Qwen3ASRBackend(ASRBackend):
     def __init__(self, config: ASRConfig, runtime: RuntimeConfig) -> None:
         super().__init__(config, runtime)
@@ -185,28 +216,7 @@ class LegacyQwen3HFBackend(ASRBackend):
             return cls.from_pretrained(model_id, **kwargs)
 
     def _extract_chunk(self, audio_path: Path, start: float, duration: float, output: Path) -> None:
-        run_checked(
-            [
-                self.runtime.ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-ss",
-                f"{start:.3f}",
-                "-t",
-                f"{duration:.3f}",
-                "-i",
-                str(audio_path),
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-c:a",
-                "pcm_s16le",
-                str(output),
-            ]
-        )
+        _extract_audio_chunk(self.runtime, audio_path, start, duration, output)
 
     def _transcribe_chunk(self, path: Path) -> tuple[str, str | None]:
         prompt = None
@@ -351,9 +361,88 @@ class FasterWhisperBackend(ASRBackend):
         return Transcript(lecture_id=lecture_id, language=info.language, segments=segments)
 
 
+class GigaAMBackend(ASRBackend):
+    """Russian ASR using GigaAM-v3 without external long-form VAD dependencies.
+
+    GigaAM's native ``transcribe`` API accepts audio up to 25 seconds. The pipeline already has a
+    normalized 16 kHz mono WAV, so we chunk it deterministically with ffmpeg and shift the returned
+    word timestamps back to lecture time. This keeps the backend self-contained and avoids requiring
+    pyannote/HF credentials merely to transcribe a lecture.
+    """
+
+    _MAX_SHORTFORM_SECONDS = 24.0
+
+    def __init__(self, config: ASRConfig, runtime: RuntimeConfig) -> None:
+        super().__init__(config, runtime)
+        try:
+            import gigaam
+        except ImportError as exc:
+            raise RuntimeError(
+                "GigaAM backend requires the current upstream toolkit. Install it with: "
+                "pip install 'git+https://github.com/salute-developers/GigaAM.git'"
+            ) from exc
+        self.model = gigaam.load_model(
+            config.model,
+            fp16_encoder=config.gigaam_fp16_encoder,
+            use_flash=config.gigaam_use_flash,
+            device=config.device,
+        )
+
+    @staticmethod
+    def _shift_words(words: Any, shift: float) -> list[TranscriptWord]:
+        return [
+            TranscriptWord(
+                text=str(word.text),
+                start=shift + float(word.start),
+                end=shift + float(word.end),
+            )
+            for word in (words or [])
+        ]
+
+    def transcribe(self, lecture_id: str, audio_path: Path) -> Transcript:
+        duration = probe_duration(audio_path, self.runtime)
+        chunk_seconds = min(float(self.config.chunk_seconds), self._MAX_SHORTFORM_SECONDS)
+        if chunk_seconds <= 0:
+            raise ValueError("ASR chunk_seconds must be positive")
+        segments: list[TranscriptSegment] = []
+
+        with tempfile.TemporaryDirectory(prefix="automatic-lecture-tex-gigaam-") as tmp_name:
+            tmp = Path(tmp_name)
+            count = math.ceil(duration / chunk_seconds)
+            for index in range(count):
+                start = index * chunk_seconds
+                length = min(chunk_seconds, duration - start)
+                chunk_path = tmp / f"chunk_{index:05d}.wav"
+                _extract_audio_chunk(self.runtime, audio_path, start, length, chunk_path)
+                result = self.model.transcribe(str(chunk_path), word_timestamps=True)
+                text = str(result.text).strip()
+                if not text:
+                    continue
+                words = self._shift_words(getattr(result, "words", None), start)
+                seg_start = words[0].start if words else start
+                seg_end = words[-1].end if words else start + length
+                segments.append(
+                    TranscriptSegment(
+                        id=f"seg_{len(segments):05d}",
+                        start=seg_start,
+                        end=seg_end,
+                        text=text,
+                        words=words,
+                    )
+                )
+
+        return Transcript(
+            lecture_id=lecture_id,
+            language=self.config.language or "ru",
+            segments=segments,
+        )
+
+
 def make_asr_backend(config: ASRConfig, runtime: RuntimeConfig) -> ASRBackend:
     if config.backend == "qwen3":
         return Qwen3ASRBackend(config, runtime)
     if config.backend == "qwen3_hf":
         return LegacyQwen3HFBackend(config, runtime)
+    if config.backend == "gigaam":
+        return GigaAMBackend(config, runtime)
     return FasterWhisperBackend(config, runtime)
