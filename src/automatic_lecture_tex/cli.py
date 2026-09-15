@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.util
 import logging
 import os
@@ -53,11 +54,18 @@ def _doctor(cfg) -> int:
     package = package_by_asr.get(cfg.asr.backend)
     if package is not None and importlib.util.find_spec(package[0]) is None:
         problems.append(f"Missing Python package {package[0]!r}; install with: {package[1]}")
-    if cfg.asr.backend == "gigaam" and importlib.util.find_spec("torchaudio") is None:
-        problems.append(
-            "GigaAM requires torchaudio matching the installed torch/CUDA build. "
-            "Install the torchaudio version from the same PyTorch CUDA index as torch."
-        )
+
+    if cfg.asr.backend == "gigaam":
+        if importlib.util.find_spec("torchaudio") is None:
+            problems.append(
+                "GigaAM requires torchaudio matching the installed torch/CUDA build. "
+                "Install torchaudio from the same PyTorch CUDA index as torch."
+            )
+        elif importlib.util.find_spec("gigaam") is not None:
+            try:
+                importlib.import_module("gigaam")
+            except (ImportError, OSError) as exc:
+                problems.append(f"GigaAM is installed but cannot be imported: {exc}")
 
     math_ocr = cfg.vision.math_ocr
     if math_ocr.backend == "mathpix":
