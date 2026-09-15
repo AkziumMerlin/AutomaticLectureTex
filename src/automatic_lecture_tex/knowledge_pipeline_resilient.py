@@ -17,7 +17,7 @@ from .episode_synthesis_resilient import (
 from .knowledge_integrity import IntegrityKnowledgeOrchestrator
 from .util import atomic_json_dump
 
-KNOWLEDGE_CACHE_VERSION = 4
+KNOWLEDGE_CACHE_VERSION = 5
 
 
 def _patch_run_metrics(work) -> None:
@@ -47,22 +47,13 @@ def _patch_run_metrics(work) -> None:
     payload["episode_deduped_blocks"] = int(stats["deduped_blocks"])
     payload["knowledge_cache_version"] = KNOWLEDGE_CACHE_VERSION
     payload["episode_synthesis_cache_version"] = EPISODE_SYNTHESIS_CACHE_VERSION
-
-    reconstruction_path = work / "transcript_reconstruction.json"
-    if reconstruction_path.exists():
-        try:
-            reconstruction = json.loads(reconstruction_path.read_text(encoding="utf-8"))
-            for key, value in reconstruction.get("metrics", {}).items():
-                payload[f"transcript_reconstruction_{key}"] = value
-        except json.JSONDecodeError:
-            pass
+    payload["semantic_reconstruction"] = "raw_asr_to_canonical_events"
     atomic_json_dump(path, payload)
 
 
 def run_knowledge_pipeline(*args, **kwargs):
-    """Run the knowledge pipeline with provenance, coverage, and split/merge integrity hooks."""
+    """Run bounded semantic reconstruction followed by provenance-safe synthesis."""
 
-    pipeline = args[0]
     transcript = kwargs["transcript"]
     work = kwargs["work"]
 
@@ -82,14 +73,13 @@ def run_knowledge_pipeline(*args, **kwargs):
             config,
             output_language,
             transcript=transcript,
-            ambiguous_transcript_confidence=(
-                pipeline.config.transcript_correction.ambiguous_segment_confidence
-            ),
         )
 
-    def bounded_batches(kb, episode, config, transcript_arg=None):
+    def canonical_batches(kb, episode, config, transcript_arg=None):
         del transcript_arg
-        return episode_evidence_batches(kb, episode, config, transcript=transcript)
+        # Note synthesis consumes canonical events/claims/symbols only. Raw ASR is evidence for the
+        # semantic reconstruction pass, not a second source that can re-introduce transcription noise.
+        return episode_evidence_batches(kb, episode, config, transcript=None)
 
     def assemble_with_math_titles(sections, episode_notes, *, outline_unresolved=None):
         result = original_assemble(
@@ -103,7 +93,7 @@ def run_knowledge_pipeline(*args, **kwargs):
 
     reset_synthesis_stats()
     _base.KnowledgeOrchestrator = orchestrator_factory
-    _base.episode_evidence_batches = bounded_batches
+    _base.episode_evidence_batches = canonical_batches
     _base.write_episode_batch = write_episode_batch
     _base.validate_episode_batch = validate_episode_batch
     _base.merge_episode_batches = merge_episode_batches

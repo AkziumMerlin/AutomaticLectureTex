@@ -44,53 +44,6 @@ asr:
     - спектр
     - резольвента
 
-# Raw ASR remains immutable in raw_transcript.json. The LLM reconstructs only locally supported
-# wording before knowledge extraction. Suspicious spans get a second, independent Qwen3-ASR pass.
-transcript_correction:
-  enabled: true
-  window_seconds: 90
-  context_seconds: 30
-  max_segments_per_batch: 14
-  suspicious_asr_confidence: 0.72
-  reconstruction_confidence_threshold: 0.72
-  ambiguous_segment_confidence: 0.20
-  glossary:
-    - комплексный линейный функционал
-    - вещественная часть
-    - мнимая часть
-    - теорема Хана — Банаха
-    - теорема Хана-Банаха
-    - полунорма
-    - сопряжённое пространство
-    - слабая топология
-    - слабая-* топология
-    - слабая звёздная топология
-    - каноническое вложение
-    - рефлексивное пространство
-    - теорема Риса
-    - ортогональное дополнение
-  fallback_enabled: true
-  fallback_context_seconds: 8
-  fallback_max_group_seconds: 75
-  fallback_asr:
-    backend: qwen3
-    model: Qwen/Qwen3-ASR-1.7B
-    aligner_model: Qwen/Qwen3-ForcedAligner-0.6B
-    language: ru
-    max_new_tokens: 2048
-    batch_size: 2
-    segment_target_seconds: 20
-    dtype: bfloat16
-    device: cuda
-    hotwords:
-      - функциональный анализ
-      - линейный функционал
-      - теорема Хана-Банаха
-      - полунорма
-      - сопряжённое пространство
-      - слабая топология
-      - теорема Риса
-
 llm:
   base_url: http://127.0.0.1:8000/v1
   api_key: EMPTY
@@ -105,16 +58,16 @@ llm:
 
 notes:
   architecture: knowledge
-  # These are evidence windows, not output sections. The overlap prevents a proof/correction
-  # from being cut at an arbitrary technical boundary; semantic sections are planned later.
-  chunk_target_seconds: 480
-  chunk_overlap_seconds: 120
-  boundary_context_seconds: 120
+  # Raw ASR is reconstructed semantically inside bounded evidence windows. These are not output
+  # sections; overlap gives the reconstructor enough local context across proof/formula boundaries.
+  chunk_target_seconds: 240
+  chunk_overlap_seconds: 60
+  boundary_context_seconds: 90
   knowledge_max_active_claims: 160
   knowledge_recent_observations: 80
   max_outline_sections: 40
   global_validation: true
-  global_validation_apply_threshold: 0.85
+  global_validation_apply_threshold: 0.90
   visual_rule_selector: true
   visual_llm_selector: false
   visual_dedupe_seconds: 8
