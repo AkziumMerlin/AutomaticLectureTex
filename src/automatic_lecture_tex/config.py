@@ -35,7 +35,7 @@ class CourseConfig(BaseModel):
 
 
 class ASRConfig(BaseModel):
-    backend: Literal["qwen3", "qwen3_hf", "faster_whisper"] = "qwen3"
+    backend: Literal["qwen3", "qwen3_hf", "faster_whisper", "gigaam"] = "qwen3"
     model: str = "Qwen/Qwen3-ASR-1.7B"
     aligner_model: str | None = "Qwen/Qwen3-ForcedAligner-0.6B"
     language: str | None = "ru"
@@ -52,6 +52,8 @@ class ASRConfig(BaseModel):
     vad_min_silence_ms: int = Field(default=500, ge=0)
     condition_on_previous_text: bool = True
     hallucination_silence_threshold: float | None = Field(default=2.0, gt=0)
+    gigaam_fp16_encoder: bool = True
+    gigaam_use_flash: bool = False
 
 
 class LLMConfig(BaseModel):
@@ -101,11 +103,24 @@ class NotesConfig(BaseModel):
         return self
 
 
+class MathOCRConfig(BaseModel):
+    backend: Literal["none", "mathpix", "unimernet"] = "none"
+    min_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
+    mathpix_app_id_env: str = "MATHPIX_APP_ID"
+    mathpix_app_key_env: str = "MATHPIX_APP_KEY"
+    unimernet_config_path: Path | None = None
+
+
 class VisionConfig(BaseModel):
     frame_offsets_seconds: list[float] = Field(default_factory=lambda: [-3.0, 2.0, 7.0])
     youtube_video_format: str = "bestvideo[height<=1080]/best[height<=1080]"
     max_requests_per_chunk: int = 4
     max_workers: int = Field(default=3, ge=1, le=8)
+    temporal_composite_enabled: bool = False
+    temporal_window_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    temporal_sample_period_seconds: float = Field(default=2.0, ge=0.25, le=10.0)
+    temporal_max_frames: int = Field(default=11, ge=3, le=61)
+    math_ocr: MathOCRConfig = Field(default_factory=MathOCRConfig)
 
 
 class LiteratureConfig(BaseModel):
@@ -154,4 +169,7 @@ def load_config(path: str | Path) -> AppConfig:
         cfg.latex.output_dir = (base / cfg.latex.output_dir).resolve()
     if not cfg.literature.directory.is_absolute():
         cfg.literature.directory = (base / cfg.literature.directory).resolve()
+    unimernet_config = cfg.vision.math_ocr.unimernet_config_path
+    if unimernet_config is not None and not unimernet_config.is_absolute():
+        cfg.vision.math_ocr.unimernet_config_path = (base / unimernet_config).resolve()
     return cfg
