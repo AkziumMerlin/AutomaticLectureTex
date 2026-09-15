@@ -88,37 +88,6 @@ def _segments_from_aligned_items(
     return segments
 
 
-def _extract_audio_chunk(
-    runtime: RuntimeConfig,
-    audio_path: Path,
-    start: float,
-    duration: float,
-    output: Path,
-) -> None:
-    run_checked(
-        [
-            runtime.ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-ss",
-            f"{start:.3f}",
-            "-t",
-            f"{duration:.3f}",
-            "-i",
-            str(audio_path),
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            str(output),
-        ]
-    )
-
-
 class Qwen3ASRBackend(ASRBackend):
     def __init__(self, config: ASRConfig, runtime: RuntimeConfig) -> None:
         super().__init__(config, runtime)
@@ -216,7 +185,28 @@ class LegacyQwen3HFBackend(ASRBackend):
             return cls.from_pretrained(model_id, **kwargs)
 
     def _extract_chunk(self, audio_path: Path, start: float, duration: float, output: Path) -> None:
-        _extract_audio_chunk(self.runtime, audio_path, start, duration, output)
+        run_checked(
+            [
+                self.runtime.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{duration:.3f}",
+                "-i",
+                str(audio_path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(output),
+            ]
+        )
 
     def _transcribe_chunk(self, path: Path) -> tuple[str, str | None]:
         prompt = None
@@ -361,6 +351,37 @@ class FasterWhisperBackend(ASRBackend):
         return Transcript(lecture_id=lecture_id, language=info.language, segments=segments)
 
 
+def _extract_audio_chunk(
+    runtime: RuntimeConfig,
+    audio_path: Path,
+    start: float,
+    duration: float,
+    output: Path,
+) -> None:
+    run_checked(
+        [
+            runtime.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ]
+    )
+
+
 class GigaAMBackend(ASRBackend):
     """Russian ASR using GigaAM-v3 without external long-form VAD dependencies.
 
@@ -376,11 +397,18 @@ class GigaAMBackend(ASRBackend):
         super().__init__(config, runtime)
         try:
             import gigaam
-        except ImportError as exc:
+        except ModuleNotFoundError as exc:
+            if exc.name == "torchaudio":
+                raise RuntimeError(
+                    "GigaAM is installed, but torchaudio is missing. Install a torchaudio build "
+                    "matching the installed torch/CUDA version (for example, torch +cu129 needs "
+                    "the matching torchaudio +cu129 wheel)."
+                ) from exc
             raise RuntimeError(
-                "GigaAM backend requires the current upstream toolkit. Install it with: "
-                "pip install 'git+https://github.com/salute-developers/GigaAM.git'"
+                f"GigaAM cannot be imported because dependency {exc.name!r} is missing."
             ) from exc
+        except ImportError as exc:
+            raise RuntimeError(f"GigaAM is installed but cannot be imported: {exc}") from exc
         self.model = gigaam.load_model(
             config.model,
             fp16_encoder=config.gigaam_fp16_encoder,
