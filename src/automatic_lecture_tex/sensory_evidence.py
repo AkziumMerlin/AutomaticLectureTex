@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .board import build_temporal_board_composite, temporal_sample_offsets
+from .frame_selection import select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
 from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence
@@ -44,6 +45,11 @@ def _math_ocr_backend(pipeline: Pipeline):
     return pipeline._math_ocr_backend
 
 
+def _append_unique(frames: list[ExtractedFrame], frame: ExtractedFrame) -> None:
+    if all(frame.path != existing.path for existing in frames):
+        frames.append(frame)
+
+
 def collect_visual_evidence(
     pipeline: Pipeline,
     lecture: LectureConfig,
@@ -54,12 +60,12 @@ def collect_visual_evidence(
     figures_root: Path,
     notation: dict[str, str],
 ) -> tuple[list, list[VisualEvidence], float]:
-    """Collect visual evidence with temporal board reconstruction before VLM OCR.
+    """Collect visual evidence with temporal board support and a real raw primary frame.
 
-    The VLM sees a robust temporal-median board image first, followed by the original sparse frames.
-    An optional specialized OCR backend reads the same composite independently; its output is stored
-    as a hypothesis rather than replacing literal VLM evidence. Visual acquisition is intentionally
-    non-fatal: one broken remote video range must not abort reconstruction of an entire lecture.
+    Temporal sampling is used to estimate occlusion and build a secondary median composite. The VLM
+    sees the least transiently occluded *raw* frame first, then the composite, then at most two nearby
+    raw frames. Specialized OCR reads the same primary raw frame. A broken remote video range remains
+    non-fatal for the lecture pipeline.
     """
 
     requests = []
@@ -152,23 +158,35 @@ def collect_visual_evidence(
                     temporal_frames,
                     frame_dir / "board_composite.jpg",
                 )
-                composite = ExtractedFrame(timestamp=request.timestamp, path=composite_path)
-                display_frames.append(composite)
-                ocr_image = composite_path
+                primary = select_least_occluded_frame(
+                    temporal_frames,
+                    composite_path,
+                    target_timestamp=request.timestamp,
+                )
+                _append_unique(display_frames, primary)
+                _append_unique(
+                    display_frames,
+                    ExtractedFrame(timestamp=request.timestamp, path=composite_path),
+                )
+                ocr_image = primary.path
             except Exception as exc:
                 logger.warning(
-                    "[%s] temporal board reconstruction failed for %s: %s",
+                    "[%s] temporal board reconstruction/selection failed for %s: %s",
                     lecture.id,
                     request.id,
                     exc,
                 )
 
-        for index in raw_indices:
-            frame = frames[index]
-            if all(frame.path != existing.path for existing in display_frames):
-                display_frames.append(frame)
+        raw_frames = [frames[index] for index in raw_indices]
+        raw_frames.sort(key=lambda frame: abs(frame.timestamp - request.timestamp))
+        for frame in raw_frames:
+            if len(display_frames) >= 4:
+                break
+            _append_unique(display_frames, frame)
+
         if not display_frames:
-            display_frames = frames
+            fallback_frames = sorted(frames, key=lambda frame: abs(frame.timestamp - request.timestamp))
+            display_frames = fallback_frames[:4]
         if ocr_image is None and display_frames:
             ocr_image = display_frames[0].path
 
