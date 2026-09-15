@@ -12,37 +12,17 @@ course:
         url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
 
 asr:
-  backend: faster_whisper
-  model: large-v3
+  # GigaAM-v3 is used as the single Russian ASR channel. The pipeline chunks the normalized WAV
+  # itself, so this does not require pyannote or a Hugging Face VAD token.
+  backend: gigaam
+  model: v3_e2e_rnnt
   aligner_model: null
   language: ru
-  chunk_seconds: 60
-  max_new_tokens: 2048
-  dtype: bfloat16
+  chunk_seconds: 24
+  dtype: float16
   device: cuda
-  whisper_compute_type: float16
-  whisper_beam_size: 5
-  vad_filter: true
-  vad_min_silence_ms: 500
-  condition_on_previous_text: true
-  hallucination_silence_threshold: 2.0
-  hotwords:
-    - функциональный анализ
-    - нормированное пространство
-    - банахово пространство
-    - гильбертово пространство
-    - линейный оператор
-    - ограниченный оператор
-    - непрерывный оператор
-    - линейный функционал
-    - сопряжённый оператор
-    - скалярное произведение
-    - норма
-    - слабая сходимость
-    - сильная сходимость
-    - компактность
-    - спектр
-    - резольвента
+  gigaam_fp16_encoder: true
+  gigaam_use_flash: false
 
 llm:
   base_url: http://127.0.0.1:8000/v1
@@ -69,14 +49,27 @@ notes:
   global_validation: true
   global_validation_apply_threshold: 0.90
   visual_rule_selector: true
-  visual_llm_selector: false
+  # GigaAM does not expose Whisper-style probabilities. Let the bounded selector request frames for
+  # exact notation/ASR ambiguity from the transcript instead of relying only on confidence rules.
+  visual_llm_selector: true
   visual_dedupe_seconds: 8
 
 vision:
+  # VLM receives a temporal-median board reconstruction first, plus these original frames. The
+  # median suppresses a moving lecturer while the originals preserve short-lived writing/erasures.
   frame_offsets_seconds: [-3, 2, 7]
+  temporal_composite_enabled: true
+  temporal_window_seconds: 10
+  temporal_sample_period_seconds: 2
+  temporal_max_frames: 11
   youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
   max_requests_per_chunk: 4
   max_workers: 3
+  # Optional independent formula OCR. `mathpix` uses MATHPIX_APP_ID/MATHPIX_APP_KEY; `unimernet`
+  # requires a local UniMERNet inference config. Keep disabled until an OCR baseline is selected.
+  math_ocr:
+    backend: none
+    min_confidence: 0.45
 
 literature:
   enabled: false
