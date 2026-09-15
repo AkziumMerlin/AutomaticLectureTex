@@ -13,7 +13,12 @@ _MATH_UNICODE = {
     "≠": r"\neq ",
     "≤": r"\le ",
     "≥": r"\ge ",
+    "⊂": r"\subset ",
+    "⊆": r"\subseteq ",
+    "∪": r"\cup ",
+    "∩": r"\cap ",
     "→": r"\to ",
+    "↦": r"\mapsto ",
     "⇒": r"\Rightarrow ",
     "⇔": r"\Leftrightarrow ",
     "∞": r"\infty ",
@@ -36,15 +41,33 @@ _MATH_UNICODE = {
     "φ": r"\varphi ",
     "ϕ": r"\phi ",
     "τ": r"\tau ",
+    "Γ": r"\Gamma ",
+    "Δ": r"\Delta ",
+    "Φ": r"\Phi ",
+    "Ψ": r"\Psi ",
+    "Ω": r"\Omega ",
     "ℂ": r"\mathbb{C}",
     "ℝ": r"\mathbb{R}",
     "ℕ": r"\mathbb{N}",
     "ℤ": r"\mathbb{Z}",
 }
+_MATH_ONLY_UNICODE = {"Ф": r"\Phi "}
 
+_DOUBLE_DOLLAR_MATH = re.compile(r"\$\$([\s\S]*?)\$\$")
 _INLINE_MATH = re.compile(r"(\$[^$\n]*\$|\\\([^\n]*?\\\)|\\\[[\s\S]*?\\\])")
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _TEXT_COMMAND = re.compile(r"\\text\{[^{}]*\}")
+
+_COMMAND_NAMES = (
+    "alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|tau|"
+    "Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|subset|subseteq|cup|cap|"
+    "bigcup|bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt"
+)
+_BAD_TAB_COMMAND = re.compile(rf"\\t({_COMMAND_NAMES})\b")
+_BARE_COMMAND_WORD = re.compile(rf"(?<![\\A-Za-z])({_COMMAND_NAMES})\b")
+_BARE_MATH_COMMAND = re.compile(
+    rf"(\\(?:{_COMMAND_NAMES})(?:(?:\\?_\{{?[^\s,.;:)]+\}}?)|(?:\^\{{?[^\s,.;:)]+\}}?))*)"
+)
 
 
 def strip_control_chars(value: str) -> str:
@@ -60,15 +83,92 @@ def normalize_math_unicode(value: str) -> str:
     return result
 
 
+def canonicalize_math_fragment(value: str) -> str:
+    """Repair deterministic serialization/typography damage inside mathematical material."""
+
+    result = normalize_math_unicode(value)
+    for source, replacement in _MATH_ONLY_UNICODE.items():
+        result = result.replace(source, replacement)
+    result = _BAD_TAB_COMMAND.sub(lambda match: "\\" + match.group(1), result)
+    result = result.replace(r"\_", "_")
+    result = _BARE_COMMAND_WORD.sub(lambda match: "\\" + match.group(1), result)
+    return result
+
+
+def _normalize_delimited_math(value: str) -> str:
+    if value.startswith("$") and value.endswith("$"):
+        return "$" + canonicalize_math_fragment(value[1:-1]).strip() + "$"
+    if value.startswith(r"\(") and value.endswith(r"\)"):
+        return r"\(" + canonicalize_math_fragment(value[2:-2]).strip() + r"\)"
+    if value.startswith(r"\[") and value.endswith(r"\]"):
+        return r"\[" + canonicalize_math_fragment(value[2:-2]).strip() + r"\]"
+    return canonicalize_math_fragment(value)
+
+
+def _wrap_unicode_math_in_prose(value: str, *, dollars: bool) -> str:
+    pieces: list[str] = []
+    for char in value:
+        replacement = _MATH_UNICODE.get(char)
+        if replacement is None:
+            pieces.append(char)
+            continue
+        math = replacement.strip()
+        pieces.append(f"${math}$" if dollars else rf"\({math}\)")
+    return "".join(pieces)
+
+
+def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
+    def replace(match: re.Match[str]) -> str:
+        math = canonicalize_math_fragment(match.group(1)).strip()
+        return f"${math}$" if dollars else rf"\({math}\)"
+
+    return _BARE_MATH_COMMAND.sub(replace, value)
+
+
 def normalize_math_spans(value: str) -> str:
-    """Normalize Unicode math only inside explicit inline/display math spans."""
+    """Normalize math syntax in delimited spans and safely wrap raw math glyphs in prose."""
 
     clean = strip_control_chars(value)
-    parts = _INLINE_MATH.split(clean)
-    return "".join(
-        normalize_math_unicode(part) if _INLINE_MATH.fullmatch(part or "") else part
-        for part in parts
+    clean = _DOUBLE_DOLLAR_MATH.sub(
+        lambda match: r"\[" + canonicalize_math_fragment(match.group(1)).strip() + r"\]",
+        clean,
     )
+    parts = _INLINE_MATH.split(clean)
+    result: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _INLINE_MATH.fullmatch(part):
+            result.append(_normalize_delimited_math(part))
+        else:
+            prose = _wrap_unicode_math_in_prose(part, dollars=False)
+            prose = _wrap_bare_commands(prose, dollars=False)
+            result.append(prose)
+    return "".join(result)
+
+
+def normalize_heading_math(value: str) -> str:
+    """Make math commands in theorem/section titles safe for text-mode rendering."""
+
+    clean = strip_control_chars(value)
+    clean = _DOUBLE_DOLLAR_MATH.sub(
+        lambda match: "$" + canonicalize_math_fragment(match.group(1)).strip() + "$",
+        clean,
+    )
+    clean = clean.replace(r"\[", "$").replace(r"\]", "$")
+    clean = clean.replace(r"\(", "$").replace(r"\)", "$")
+    parts = _INLINE_MATH.split(clean)
+    result: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _INLINE_MATH.fullmatch(part):
+            result.append(_normalize_delimited_math(part))
+        else:
+            prose = _wrap_unicode_math_in_prose(part, dollars=True)
+            prose = _wrap_bare_commands(prose, dollars=True)
+            result.append(prose)
+    return "".join(result)
 
 
 def looks_like_math_fragment(value: str) -> bool:
