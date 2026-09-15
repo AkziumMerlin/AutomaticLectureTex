@@ -18,7 +18,7 @@ from .knowledge_integrity import IntegrityKnowledgeOrchestrator
 from .sensory_evidence import collect_visual_evidence
 from .util import atomic_json_dump
 
-KNOWLEDGE_CACHE_VERSION = 6
+KNOWLEDGE_CACHE_VERSION = 7
 
 
 def _patch_run_metrics(work) -> None:
@@ -49,7 +49,7 @@ def _patch_run_metrics(work) -> None:
     payload["knowledge_cache_version"] = KNOWLEDGE_CACHE_VERSION
     payload["episode_synthesis_cache_version"] = EPISODE_SYNTHESIS_CACHE_VERSION
     payload["semantic_reconstruction"] = "raw_asr_to_canonical_events"
-    payload["visual_evidence"] = "temporal_board_composite"
+    payload["visual_evidence"] = "least_occluded_raw_plus_temporal_composite"
     atomic_json_dump(path, payload)
 
 

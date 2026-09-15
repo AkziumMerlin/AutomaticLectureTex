@@ -3,7 +3,9 @@
 import json
 
 from . import pipeline as _base_pipeline
+from .asr import make_asr_backend
 from .episode_synthesis_resilient import EPISODE_SYNTHESIS_CACHE_VERSION
+from .gigaam_vad import VadGigaAMBackend
 from .knowledge_pipeline_resilient import (
     KNOWLEDGE_CACHE_VERSION,
     run_knowledge_pipeline as resilient_knowledge_pipeline,
@@ -15,6 +17,15 @@ from .util import atomic_json_dump, stable_hash
 
 
 class Pipeline(_base_pipeline.Pipeline):
+    @property
+    def asr(self):
+        if self._asr is None:
+            if self.config.asr.backend == "gigaam" and self.config.asr.gigaam_vad_enabled:
+                self._asr = VadGigaAMBackend(self.config.asr, self.config.runtime)
+            else:
+                self._asr = make_asr_backend(self.config.asr, self.config.runtime)
+        return self._asr
+
     @property
     def llm(self) -> LectureModelClient:
         if self._llm is None:

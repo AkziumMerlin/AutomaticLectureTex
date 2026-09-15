@@ -66,6 +66,11 @@ def _doctor(cfg) -> int:
                 importlib.import_module("gigaam")
             except (ImportError, OSError) as exc:
                 problems.append(f"GigaAM is installed but cannot be imported: {exc}")
+        if cfg.asr.gigaam_vad_enabled and importlib.util.find_spec("faster_whisper") is None:
+            problems.append(
+                "VAD-aware GigaAM uses faster-whisper only for standalone Silero VAD. "
+                "Install with: pip install -e '.[whisper]'"
+            )
 
     math_ocr = cfg.vision.math_ocr
     if math_ocr.backend == "mathpix":

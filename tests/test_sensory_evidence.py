@@ -124,14 +124,16 @@ class _FakeSource:
 class _FakeLLM:
     def __init__(self) -> None:
         self.first_image = None
+        self.image_names = []
 
     def resolve_visual_request(self, request, chunk, frame_paths, frame_timestamps):
         del request, chunk, frame_timestamps
         self.first_image = frame_paths[0]
+        self.image_names = [path.name for path in frame_paths]
         return VisualEvidence(kind="equation", raw_latex="x=1", latex="x=1", confidence=0.9)
 
 
-def test_visual_collector_sends_temporal_composite_before_raw_frames(tmp_path):
+def test_visual_collector_sends_raw_primary_then_temporal_composite(tmp_path):
     llm = _FakeLLM()
     vision = VisionConfig(
         frame_offsets_seconds=[-3, 2, 7],
@@ -188,5 +190,6 @@ def test_visual_collector_sends_temporal_composite_before_raw_frames(tmp_path):
     assert len(requests) == 1
     assert len(evidence) == 1
     assert llm.first_image is not None
-    assert llm.first_image.name == "board_composite.jpg"
+    assert llm.first_image.name != "board_composite.jpg"
+    assert llm.image_names[1] == "board_composite.jpg"
     assert llm.first_image.is_file()

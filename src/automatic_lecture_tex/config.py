@@ -54,6 +54,10 @@ class ASRConfig(BaseModel):
     hallucination_silence_threshold: float | None = Field(default=2.0, gt=0)
     gigaam_fp16_encoder: bool = True
     gigaam_use_flash: bool = False
+    gigaam_vad_enabled: bool = True
+    gigaam_vad_max_speech_seconds: float = Field(default=22.0, gt=1.0, le=24.0)
+    gigaam_vad_merge_gap_seconds: float = Field(default=0.35, ge=0.0, le=3.0)
+    gigaam_vad_pad_seconds: float = Field(default=0.15, ge=0.0, le=1.0)
 
 
 class LLMConfig(BaseModel):
