@@ -73,6 +73,12 @@ class CorrectionRecord(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class MathOCRCandidate(BaseModel):
+    backend: str
+    text: str
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class VisualEvidence(BaseModel):
     request_id: str = ""
     kind: VisualKind = VisualKind.NONE
@@ -81,6 +87,7 @@ class VisualEvidence(BaseModel):
     description: str | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     corrections: list[CorrectionRecord] = Field(default_factory=list)
+    math_ocr_candidates: list[MathOCRCandidate] = Field(default_factory=list)
     requires_figure_in_notes: bool = False
     best_frame_index: int | None = None
     asset_path: str | None = None
