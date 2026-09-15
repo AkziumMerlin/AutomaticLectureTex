@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "AutomaticLectureTex contributors"}]
 dependencies = [
+  "numpy>=1.26",
   "openai>=1.60",
+  "Pillow>=10.0",
   "pydantic>=2.9",
   "PyYAML>=6.0.2",
 ]
@@ -22,6 +24,7 @@ qwen-asr = [
 ]
 qwen-asr-hf = ["accelerate>=1.2", "torch>=2.6", "transformers>=5.13.0"]
 whisper = ["faster-whisper>=1.1.0"]
+unimernet = ["unimernet[full]"]
 review = ["pymupdf>=1.25"]
 dev = ["pytest>=8.3", "ruff>=0.9"]
 all = [

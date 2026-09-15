@@ -15,9 +15,10 @@ from .episode_synthesis_resilient import (
     write_episode_batch,
 )
 from .knowledge_integrity import IntegrityKnowledgeOrchestrator
+from .sensory_evidence import collect_visual_evidence
 from .util import atomic_json_dump
 
-KNOWLEDGE_CACHE_VERSION = 5
+KNOWLEDGE_CACHE_VERSION = 6
 
 
 def _patch_run_metrics(work) -> None:
@@ -48,6 +49,7 @@ def _patch_run_metrics(work) -> None:
     payload["knowledge_cache_version"] = KNOWLEDGE_CACHE_VERSION
     payload["episode_synthesis_cache_version"] = EPISODE_SYNTHESIS_CACHE_VERSION
     payload["semantic_reconstruction"] = "raw_asr_to_canonical_events"
+    payload["visual_evidence"] = "temporal_board_composite"
     atomic_json_dump(path, payload)
 
 
@@ -58,6 +60,7 @@ def run_knowledge_pipeline(*args, **kwargs):
     work = kwargs["work"]
 
     original_orchestrator = _base.KnowledgeOrchestrator
+    original_collect_visual = _base._collect_visual_evidence
     original_batches = _base.episode_evidence_batches
     original_write = _base.write_episode_batch
     original_validate = _base.validate_episode_batch
@@ -93,6 +96,7 @@ def run_knowledge_pipeline(*args, **kwargs):
 
     reset_synthesis_stats()
     _base.KnowledgeOrchestrator = orchestrator_factory
+    _base._collect_visual_evidence = collect_visual_evidence
     _base.episode_evidence_batches = canonical_batches
     _base.write_episode_batch = write_episode_batch
     _base.validate_episode_batch = validate_episode_batch
@@ -107,6 +111,7 @@ def run_knowledge_pipeline(*args, **kwargs):
         return result
     finally:
         _base.KnowledgeOrchestrator = original_orchestrator
+        _base._collect_visual_evidence = original_collect_visual
         _base.episode_evidence_batches = original_batches
         _base.write_episode_batch = original_write
         _base.validate_episode_batch = original_validate

@@ -129,6 +129,17 @@ neighboring utterances, mathematical consistency, already-established notation, 
 evidence. For example, if a formula or technical term is acoustically corrupted but its intended
 reading is strongly determined by the surrounding derivation, reconstruct the intended reading.
 
+Visual evidence can contain both VLM OCR (`raw_latex`/`latex`) and independent
+`math_ocr_candidates`. These are FALLIBLE SENSOR HYPOTHESES, not ground truth. The first attached
+board image may be a temporal-median composite built from nearby frames: it is useful for recovering
+writing hidden by a moving lecturer, but it can combine content that existed at slightly different
+moments. Do not infer temporal order from the composite itself. Never copy a specialized OCR
+candidate merely because it is more explicit than the speech. Compare OCR channels against the raw
+visible transcription, established notation, neighboring equations, and local mathematical
+consistency. If exact signs/variables remain materially inconsistent across sensors, report the
+content as unresolved instead of choosing the most convenient formula. A formula is not
+`source_status=observed` merely because one OCR backend proposed it.
+
 However, mathematical knowledge is a disambiguation tool, not a license to complete the lecture.
 Do NOT add a theorem, hypothesis, proof step, definition, formula, or conclusion merely because it
 would be standard textbook material. Do NOT silently fix a genuine mistake made by the lecturer.
@@ -152,10 +163,10 @@ Use event kinds as follows:
 `text` must be clean, coherent prose expressing the reconstructed mathematical event, NOT a quote of
 broken ASR. For equations also put the canonical formula in `latex`. Use
 `source_status=observed` when the mathematical content is directly clear from speech/board and
-`source_status=reconstructed` when you had to repair ASR using local context. Use `inferred` only
-for a weak local inference and never for new mathematical content. `confidence` is confidence that
-THIS semantic reconstruction matches the lecture, not ASR token confidence and not confidence that
-the mathematical statement is true.
+`source_status=reconstructed` when you had to repair ASR or reconcile sensors using local context.
+Use `inferred` only for a weak local inference and never for new mathematical content. `confidence`
+is confidence that THIS semantic reconstruction matches the lecture, not ASR token confidence and
+not confidence that the mathematical statement is true.
 
 Return events in temporal order. Write descriptive strings in language code
 `{self.output_language}`.
@@ -208,9 +219,7 @@ Return events in temporal order. Write descriptive strings in language code
                 continue
             valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
             if item.kind == ObservationKind.UNRESOLVED:
-                unresolved.append(
-                    f"{item.text} [segments={','.join(valid_segment_ids)}]"
-                )
+                unresolved.append(f"{item.text} [segments={','.join(valid_segment_ids)}]")
                 continue
 
             segments = [segment_map[ref] for ref in valid_segment_ids]
