@@ -12,6 +12,8 @@ from pathlib import Path
 from .config import MathOCRConfig
 from .schemas import MathOCRCandidate
 
+_MAX_OCR_TEXT_CHARS = 8000
+
 
 class MathOCRBackend(ABC):
     @abstractmethod
@@ -51,7 +53,7 @@ class MathpixBackend(MathOCRBackend):
         )
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
             result = json.loads(response.read().decode("utf-8"))
-        text = str(result.get("text") or "").strip()
+        text = str(result.get("text") or "").strip()[:_MAX_OCR_TEXT_CHARS]
         if not text:
             return None
         confidence = result.get("confidence")
@@ -103,7 +105,7 @@ class UniMERNetBackend(MathOCRBackend):
         image = self.processor(raw_image).unsqueeze(0).to(self.device)
         with self.torch.inference_mode():
             output = self.model.generate({"image": image})
-        text = str(output["pred_str"][0]).strip()
+        text = str(output["pred_str"][0]).strip()[:_MAX_OCR_TEXT_CHARS]
         if not text:
             return None
         return MathOCRCandidate(backend="unimernet", text=text)
