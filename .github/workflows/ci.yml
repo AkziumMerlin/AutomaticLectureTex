@@ -21,6 +21,7 @@ jobs:
           ruff check --ignore E501,I001 \
             src/automatic_lecture_tex/asr.py \
             src/automatic_lecture_tex/board.py \
+            src/automatic_lecture_tex/cli.py \
             src/automatic_lecture_tex/config.py \
             src/automatic_lecture_tex/conservative_validation.py \
             src/automatic_lecture_tex/episode_synthesis_resilient.py \
@@ -30,6 +31,7 @@ jobs:
             src/automatic_lecture_tex/latex.py \
             src/automatic_lecture_tex/math_ocr.py \
             src/automatic_lecture_tex/pipeline_robust.py \
+            src/automatic_lecture_tex/schemas.py \
             src/automatic_lecture_tex/sensory_evidence.py \
             src/automatic_lecture_tex/tex_safety.py \
             tests/test_generated_notes.py \
