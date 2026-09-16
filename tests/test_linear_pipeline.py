@@ -1,3 +1,5 @@
+import inspect
+
 from automatic_lecture_tex.linear_notes import (
     LinearPatch,
     block_id,
@@ -5,7 +7,11 @@ from automatic_lecture_tex.linear_notes import (
     provenance_claim_ids,
     scan_linear_corrections,
 )
-from automatic_lecture_tex.linear_pipeline import _apply_patch
+from automatic_lecture_tex.linear_pipeline import (
+    _apply_patch,
+    _stamp_chunk_provenance,
+    run_linear_pipeline,
+)
 from automatic_lecture_tex.schemas import (
     BlockType,
     ChunkNotes,
@@ -31,6 +37,31 @@ def test_linear_block_provenance_survives_note_block_schema():
     restored = NoteBlock.model_validate(dumped)
     assert block_id(restored) == "block_0000_000"
     assert block_segment_ids(restored) == ["seg_old"]
+
+
+def test_host_stamps_chunk_provenance_after_writer():
+    notes = ChunkNotes(
+        section_title="Section",
+        blocks=[
+            NoteBlock(type=BlockType.PARAGRAPH, latex="A"),
+            NoteBlock(type=BlockType.EQUATION, latex=r"a=2"),
+        ],
+    )
+
+    _stamp_chunk_provenance(notes, 3, ["seg_a", "seg_b"])
+
+    assert block_id(notes.blocks[0]) == "block_0003_000"
+    assert block_id(notes.blocks[1]) == "block_0003_001"
+    assert block_segment_ids(notes.blocks[0]) == ["seg_a", "seg_b"]
+    assert block_segment_ids(notes.blocks[1]) == ["seg_a", "seg_b"]
+
+
+def test_linear_pipeline_uses_existing_finalize_chunk_writer():
+    source = inspect.getsource(run_linear_pipeline)
+
+    assert "pipeline.llm.finalize_chunk(" in source
+    assert "draft_linear_chunk" not in source
+    assert "LinearChunkDraft" not in source
 
 
 def test_explicit_cross_chunk_patch_replaces_existing_block():
