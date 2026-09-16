@@ -32,6 +32,8 @@ jobs:
             src/automatic_lecture_tex/knowledge_pipeline_resilient.py \
             src/automatic_lecture_tex/knowledge_reconstruction_resilient.py \
             src/automatic_lecture_tex/latex.py \
+            src/automatic_lecture_tex/linear_notes.py \
+            src/automatic_lecture_tex/linear_pipeline.py \
             src/automatic_lecture_tex/math_ocr.py \
             src/automatic_lecture_tex/media.py \
             src/automatic_lecture_tex/pipeline_robust.py \
@@ -43,6 +45,8 @@ jobs:
             tests/test_generated_notes.py \
             tests/test_integrity_fixes.py \
             tests/test_knowledge_reconstruction_resilience.py \
+            tests/test_linear_config.py \
+            tests/test_linear_pipeline.py \
             tests/test_remote_frame_fallback.py \
             tests/test_semantic_reconstruction.py \
             tests/test_sensory_evidence.py \

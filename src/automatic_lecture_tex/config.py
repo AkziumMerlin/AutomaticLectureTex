@@ -75,7 +75,7 @@ class LLMConfig(BaseModel):
 
 
 class NotesConfig(BaseModel):
-    architecture: Literal["knowledge", "legacy"] = "knowledge"
+    architecture: Literal["linear", "knowledge", "legacy"] = "knowledge"
     chunk_target_seconds: float = Field(default=480.0, gt=0)
     chunk_overlap_seconds: float = Field(default=120.0, ge=0)
     boundary_context_seconds: float = Field(default=120.0, ge=0)
@@ -97,6 +97,11 @@ class NotesConfig(BaseModel):
     visual_llm_selector: bool = False
     visual_dedupe_seconds: float = 8.0
     max_low_confidence_visual_requests: int = Field(default=1, ge=0, le=10)
+    linear_recent_blocks: int = Field(default=8, ge=0, le=50)
+    linear_previous_transcript_segments: int = Field(default=8, ge=0, le=100)
+    linear_correction_scan_enabled: bool = True
+    linear_correction_catalog_chars: int = Field(default=320, ge=80, le=2000)
+    linear_patch_apply_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_chunk_geometry(self) -> NotesConfig:

@@ -1,4 +1,4 @@
-"""Production pipeline with robust structured output and bounded semantic reconstruction."""
+"""Production pipeline with robust structured output and selectable note architectures."""
 
 import json
 
@@ -10,6 +10,7 @@ from .knowledge_pipeline_resilient import (
     KNOWLEDGE_CACHE_VERSION,
     run_knowledge_pipeline as resilient_knowledge_pipeline,
 )
+from .linear_pipeline import LINEAR_PIPELINE_VERSION, run_linear_pipeline
 from .llm_robust import LectureModelClient
 from .media import media_source_from_config
 from .schemas import Transcript
@@ -33,13 +34,23 @@ class Pipeline(_base_pipeline.Pipeline):
         return self._llm
 
     def _ir_fingerprint(self, transcript, notation: dict[str, str]) -> str:
-        return stable_hash(
-            {
-                "base": super()._ir_fingerprint(transcript, notation),
-                "resilient_episode_synthesis_version": EPISODE_SYNTHESIS_CACHE_VERSION,
-                "knowledge_integrity_cache_version": KNOWLEDGE_CACHE_VERSION,
-            }
-        )
+        base = super()._ir_fingerprint(transcript, notation)
+        if getattr(self, "_linear_dispatch_active", False):
+            return stable_hash(
+                {
+                    "base": base,
+                    "linear_pipeline_version": LINEAR_PIPELINE_VERSION,
+                }
+            )
+        if self.config.notes.architecture == "knowledge":
+            return stable_hash(
+                {
+                    "base": base,
+                    "resilient_episode_synthesis_version": EPISODE_SYNTHESIS_CACHE_VERSION,
+                    "knowledge_integrity_cache_version": KNOWLEDGE_CACHE_VERSION,
+                }
+            )
+        return base
 
     def _restore_raw_asr_cache(self, lecture) -> None:
         """Reuse the raw transcript saved by the removed transcript-correction layer."""
@@ -87,11 +98,21 @@ class Pipeline(_base_pipeline.Pipeline):
             stale_audit.unlink()
 
     def run_lecture(self, lecture, *, force: bool = False):
-        original = _base_pipeline.run_knowledge_pipeline
+        original_runner = _base_pipeline.run_knowledge_pipeline
+        requested_architecture = self.config.notes.architecture
         if not force:
             self._restore_raw_asr_cache(lecture)
-        _base_pipeline.run_knowledge_pipeline = resilient_knowledge_pipeline
+
+        if requested_architecture == "linear":
+            self._linear_dispatch_active = True
+            self.config.notes.architecture = "knowledge"
+            _base_pipeline.run_knowledge_pipeline = run_linear_pipeline
+        elif requested_architecture == "knowledge":
+            _base_pipeline.run_knowledge_pipeline = resilient_knowledge_pipeline
+
         try:
             return super().run_lecture(lecture, force=force)
         finally:
-            _base_pipeline.run_knowledge_pipeline = original
+            _base_pipeline.run_knowledge_pipeline = original_runner
+            self.config.notes.architecture = requested_architecture
+            self._linear_dispatch_active = False
