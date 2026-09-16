@@ -8,6 +8,27 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from .schemas import BlockType, LectureChunk, NotationItem, NoteBlock, VisualEvidence
 from .tex_safety import strip_control_chars
 
+_BLOCK_ID_PREFIX = "block:"
+
+
+def block_id(block: NoteBlock) -> str:
+    for item in block.source_claim_ids:
+        if item.startswith(_BLOCK_ID_PREFIX):
+            return item[len(_BLOCK_ID_PREFIX) :]
+    return ""
+
+
+def block_segment_ids(block: NoteBlock) -> list[str]:
+    return [item for item in block.source_claim_ids if not item.startswith(_BLOCK_ID_PREFIX)]
+
+
+def block_visual_ids(block: NoteBlock) -> list[str]:
+    return list(block.source_evidence_ids)
+
+
+def provenance_claim_ids(stable_block_id: str, segment_ids: list[str]) -> list[str]:
+    return [f"{_BLOCK_ID_PREFIX}{stable_block_id}", *segment_ids]
+
 
 class GeneratedLinearBlock(BaseModel):
     type: BlockType
@@ -66,11 +87,11 @@ class LinearCorrectionScan(BaseModel):
 def _recent_payload(blocks: list[NoteBlock]) -> list[dict]:
     return [
         {
-            "id": block.id,
+            "id": block_id(block),
             "type": block.type,
             "title": block.title,
             "latex": block.latex,
-            "source_segment_ids": block.source_segment_ids,
+            "source_segment_ids": block_segment_ids(block),
         }
         for block in blocks
     ]
@@ -146,7 +167,7 @@ def compact_block_catalog(blocks: list[NoteBlock], max_chars: int) -> list[dict]
             text = text[:half] + " ... " + text[-half:]
         result.append(
             {
-                "id": block.id,
+                "id": block_id(block),
                 "type": block.type,
                 "title": block.title,
                 "latex_excerpt": text,
