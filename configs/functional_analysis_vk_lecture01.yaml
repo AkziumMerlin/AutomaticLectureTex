@@ -6,19 +6,18 @@ course:
     - id: lecture_01
       title: Лекция 1
       source:
-        # Direct VK Video URLs are passed through to yt-dlp unchanged.
-        # `youtube` is the current legacy name of the generic yt-dlp-backed source type.
         type: youtube
         url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
 
 asr:
-  # Restore the original connected-transcript baseline. GigaAM remains available as an optional
-  # backend, but its current VAD chunking is intentionally not part of the production lecture path.
+  # Pre-PR2 production baseline: connected Faster-Whisper transcript with course hotwords.
   backend: faster_whisper
   model: large-v3
   aligner_model: null
   language: ru
-  dtype: float16
+  chunk_seconds: 60
+  max_new_tokens: 2048
+  dtype: bfloat16
   device: cuda
   whisper_compute_type: float16
   whisper_beam_size: 5
@@ -26,6 +25,23 @@ asr:
   vad_min_silence_ms: 500
   condition_on_previous_text: true
   hallucination_silence_threshold: 2.0
+  hotwords:
+    - функциональный анализ
+    - нормированное пространство
+    - банахово пространство
+    - гильбертово пространство
+    - линейный оператор
+    - ограниченный оператор
+    - непрерывный оператор
+    - линейный функционал
+    - сопряжённый оператор
+    - скалярное произведение
+    - норма
+    - слабая сходимость
+    - сильная сходимость
+    - компактность
+    - спектр
+    - резольвента
 
 llm:
   base_url: http://127.0.0.1:8000/v1
@@ -36,35 +52,27 @@ llm:
   max_tokens: 4096
   timeout_seconds: 300
   thinking: false
-  # The linear pipeline does not run a mathematical rewrite validator. Cross-chunk lecturer
-  # corrections are handled by explicit provenance-safe patches instead.
-  math_audit: false
+  # This is the same local chunk audit that existed before the knowledge-pipeline refactor.
+  math_audit: true
+  math_audit_min_equals: 4
 
 notes:
   architecture: linear
-  # One chronological note-writing call per chunk. No observation graph, episode graph, hierarchy
-  # synthesis, formula gate or validation tree is used.
-  chunk_target_seconds: 240
+  # Literal pre-PR2 chunk geometry and visual-selection policy.
+  chunk_target_seconds: 180
   chunk_overlap_seconds: 0
   visual_rule_selector: true
-  visual_llm_selector: true
+  visual_llm_selector: false
   visual_dedupe_seconds: 8
   max_low_confidence_visual_requests: 1
 
-  # Mutable local tail: the current chunk can patch a recently written block only when the lecturer
-  # explicitly corrects it in CURRENT transcript evidence.
-  linear_recent_blocks: 8
-  linear_previous_transcript_segments: 8
-
-  # A narrow second pass scans later chunks only for explicit corrections/retractions of older
-  # blocks. It is not a mathematical audit and cannot patch from textbook priors alone.
+  # The only addition to the old writer: a separate post-pass for explicit lecturer corrections
+  # that can refer to material from an earlier technical chunk.
   linear_correction_scan_enabled: true
   linear_correction_catalog_chars: 320
   linear_patch_apply_threshold: 0.90
 
 vision:
-  # Return to the simple raw-frame setup. Robust remote extraction/fallbacks remain enabled in the
-  # media layer, but temporal board reconstruction is not required by the production path.
   frame_offsets_seconds: [-3, 2, 7]
   temporal_composite_enabled: false
   youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
