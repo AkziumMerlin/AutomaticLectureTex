@@ -14,11 +14,11 @@ from .episode_synthesis_resilient import (
     validate_episode_batch,
     write_episode_batch,
 )
-from .knowledge_integrity import IntegrityKnowledgeOrchestrator
+from .knowledge_reconstruction_resilient import ResilientIntegrityKnowledgeOrchestrator
 from .sensory_evidence import collect_visual_evidence
 from .util import atomic_json_dump
 
-KNOWLEDGE_CACHE_VERSION = 7
+KNOWLEDGE_CACHE_VERSION = 8
 
 
 def _patch_run_metrics(work) -> None:
@@ -48,7 +48,7 @@ def _patch_run_metrics(work) -> None:
     payload["episode_deduped_blocks"] = int(stats["deduped_blocks"])
     payload["knowledge_cache_version"] = KNOWLEDGE_CACHE_VERSION
     payload["episode_synthesis_cache_version"] = EPISODE_SYNTHESIS_CACHE_VERSION
-    payload["semantic_reconstruction"] = "raw_asr_to_canonical_events"
+    payload["semantic_reconstruction"] = "raw_asr_to_canonical_events_resilient_split"
     payload["visual_evidence"] = "least_occluded_raw_plus_temporal_composite"
     atomic_json_dump(path, payload)
 
@@ -71,7 +71,7 @@ def run_knowledge_pipeline(*args, **kwargs):
     original_leaf_validator = _resilient._validate_once
 
     def orchestrator_factory(llm, config, output_language):
-        return IntegrityKnowledgeOrchestrator(
+        return ResilientIntegrityKnowledgeOrchestrator(
             llm,
             config,
             output_language,
