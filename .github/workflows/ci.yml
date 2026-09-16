@@ -45,6 +45,7 @@ jobs:
             tests/test_generated_notes.py \
             tests/test_integrity_fixes.py \
             tests/test_knowledge_reconstruction_resilience.py \
+            tests/test_linear_config.py \
             tests/test_linear_pipeline.py \
             tests/test_remote_frame_fallback.py \
             tests/test_semantic_reconstruction.py \
