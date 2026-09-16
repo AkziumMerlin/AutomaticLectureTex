@@ -12,7 +12,9 @@ from .linear_notes import (
     LinearChunkDraft,
     LinearCorrectionScan,
     LinearPatch,
+    block_id,
     draft_linear_chunk,
+    provenance_claim_ids,
     scan_linear_corrections,
 )
 from .llm import LectureModelClient
@@ -54,13 +56,13 @@ def _recent_blocks(note_chunks: list[ChunkNotes], limit: int) -> list[NoteBlock]
 def _build_note_block(
     generated,
     *,
-    block_id: str,
+    stable_block_id: str,
     allowed_segment_ids: set[str],
     visual_by_id: dict[str, VisualEvidence],
 ) -> tuple[NoteBlock | None, str | None]:
     sources = [item for item in generated.source_segment_ids if item in allowed_segment_ids]
     if not sources:
-        return None, f"Dropped {block_id}: no valid CURRENT source_segment_ids."
+        return None, f"Dropped {stable_block_id}: no valid CURRENT source_segment_ids."
     visual_ids = [item for item in generated.visual_evidence_ids if item in visual_by_id]
     asset_path = generated.asset_path
     if asset_path is not None:
@@ -70,20 +72,21 @@ def _build_note_block(
             if item.asset_path is not None and item.request_id in visual_ids
         }
         if asset_path not in allowed_assets:
-            return None, f"Dropped {block_id}: figure asset_path is not backed by cited visual evidence."
+            return None, (
+                f"Dropped {stable_block_id}: figure asset_path is not backed by cited visual evidence."
+            )
     try:
         block = NoteBlock(
-            id=block_id,
             type=generated.type,
             title=generated.title,
             latex=generated.latex,
             asset_path=asset_path,
             caption=generated.caption,
-            source_segment_ids=sources,
-            visual_evidence_ids=visual_ids,
+            source_claim_ids=provenance_claim_ids(stable_block_id, sources),
+            source_evidence_ids=visual_ids,
         )
     except ValidationError as exc:
-        return None, f"Dropped {block_id}: invalid renderable block ({exc})."
+        return None, f"Dropped {stable_block_id}: invalid renderable block ({exc})."
     return block, None
 
 
@@ -115,7 +118,7 @@ def _apply_patch(
 
     original = block.latex
     if patch.action == "retract":
-        owner.blocks = [item for item in owner.blocks if item.id != patch.target_block_id]
+        owner.blocks = [item for item in owner.blocks if block_id(item) != patch.target_block_id]
         block_map.pop(patch.target_block_id, None)
         owner_map.pop(patch.target_block_id, None)
         owner.corrections.append(
@@ -134,14 +137,13 @@ def _apply_patch(
         return False, None
     try:
         checked = NoteBlock(
-            id=block.id,
             type=block.type,
             title=block.title,
             latex=replacement,
             asset_path=block.asset_path,
             caption=block.caption,
-            source_segment_ids=block.source_segment_ids,
-            visual_evidence_ids=block.visual_evidence_ids,
+            source_claim_ids=list(block.source_claim_ids),
+            source_evidence_ids=list(block.source_evidence_ids),
         )
     except ValidationError as exc:
         return False, f"Rejected correction for {patch.target_block_id}: invalid replacement ({exc})."
@@ -245,7 +247,9 @@ def run_linear_pipeline(
                 cached = None
 
         if cached is not None:
-            evidence = [VisualEvidence.model_validate(item) for item in cached.get("visual_evidence", [])]
+            evidence = [
+                VisualEvidence.model_validate(item) for item in cached.get("visual_evidence", [])
+            ]
             draft = LinearChunkDraft.model_validate(cached["draft"])
             chunk_cache_hits += 1
             logger.info("[%s] %s linear cache hit", lecture.id, chunk.id)
@@ -261,7 +265,7 @@ def run_linear_pipeline(
             )
             usage_before = pipeline.llm.usage_snapshot()
             visual_started = time.perf_counter()
-            _requests, evidence, _elapsed = collect_visual_evidence(
+            requests, evidence, _elapsed = collect_visual_evidence(
                 pipeline,
                 lecture,
                 chunk,
@@ -272,7 +276,7 @@ def run_linear_pipeline(
                 notation,
             )
             visual_seconds += time.perf_counter() - visual_started
-            visual_requests_processed += len(_requests)
+            visual_requests_processed += len(requests)
             visual_evidence_successful += sum(
                 item.kind != "none" and item.confidence >= 0.75 for item in evidence
             )
@@ -315,7 +319,7 @@ def run_linear_pipeline(
 
         evidence_by_chunk[chunk.id] = evidence
         current_unresolved = list(draft.unresolved)
-        recent_target_ids = {block.id for block in recent if block.id}
+        recent_target_ids = {block_id(block) for block in recent if block_id(block)}
         current_segment_ids = set(chunk.segment_ids)
         for patch in draft.recent_patches:
             applied, issue = _apply_patch(
@@ -341,11 +345,11 @@ def run_linear_pipeline(
             notation=list(draft.notation),
             unresolved=current_unresolved,
         )
-        for block_index, generated in enumerate(draft.blocks):
-            block_id = f"block_{chunk_index:04d}_{block_index:03d}"
+        for generated_index, generated in enumerate(draft.blocks):
+            stable_block_id = f"block_{chunk_index:04d}_{generated_index:03d}"
             block, issue = _build_note_block(
                 generated,
-                block_id=block_id,
+                stable_block_id=stable_block_id,
                 allowed_segment_ids=current_segment_ids,
                 visual_by_id=visual_by_id,
             )
@@ -354,15 +358,14 @@ def run_linear_pipeline(
                 continue
             assert block is not None
             notes.blocks.append(block)
-            block_map[block.id] = block
-            owner_map[block.id] = notes
+            block_map[stable_block_id] = block
+            owner_map[stable_block_id] = notes
 
         notes.unresolved = list(dict.fromkeys(notes.unresolved))
         note_chunks.append(notes)
         for item in notes.notation:
             notation.setdefault(item.latex, item.meaning)
 
-    # Narrow second pass: only explicit lecturer corrections/retractions can mutate earlier blocks.
     if config.linear_correction_scan_enabled:
         scan_dir = work / "linear_correction_scans"
         scan_dir.mkdir(parents=True, exist_ok=True)
@@ -403,7 +406,9 @@ def run_linear_pipeline(
                         catalog_chars=config.linear_correction_catalog_chars,
                     )
                 except (json.JSONDecodeError, ValidationError) as exc:
-                    logger.warning("[%s] correction scan failed for %s: %s", lecture.id, chunk.id, exc)
+                    logger.warning(
+                        "[%s] correction scan failed for %s: %s", lecture.id, chunk.id, exc
+                    )
                     scan = LinearCorrectionScan(
                         unresolved=[f"Correction scan failed for {chunk.id}: {type(exc).__name__}"]
                     )
@@ -415,7 +420,7 @@ def run_linear_pipeline(
                     {"fingerprint": scan_fingerprint, "scan": scan.model_dump(mode="json")},
                 )
             note_chunks[chunk_index].unresolved.extend(scan.unresolved)
-            allowed_targets = {block.id for block in earlier}
+            allowed_targets = {block_id(block) for block in earlier if block_id(block)}
             allowed_evidence = set(chunk.segment_ids)
             for patch in scan.patches:
                 applied, issue = _apply_patch(
