@@ -129,7 +129,40 @@ class VisionConfig(BaseModel):
     temporal_window_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     temporal_sample_period_seconds: float = Field(default=2.0, ge=0.25, le=10.0)
     temporal_max_frames: int = Field(default=11, ge=3, le=61)
+
+    # Host-side board ROI detection. The detector fails closed to ordinary raw frames. ``board_crop_roi``
+    # is an optional normalized (left, top, right, bottom) override for whiteboards/unusual rooms.
+    board_auto_crop_enabled: bool = True
+    board_crop_roi: tuple[float, float, float, float] | None = None
+    board_crop_tiles: int = Field(default=3, ge=1, le=4)
+    board_crop_tile_overlap: float = Field(default=0.14, ge=0.0, le=0.45)
+    board_crop_padding_fraction: float = Field(default=0.025, ge=0.0, le=0.20)
+    board_crop_min_area_fraction: float = Field(default=0.16, ge=0.05, le=0.80)
+    board_crop_axis_density: float = Field(default=0.25, ge=0.05, le=0.90)
+    board_crop_color_distance: float = Field(default=0.22, ge=0.05, le=0.60)
+    board_crop_max_luminance: float = Field(default=0.78, ge=0.20, le=0.98)
+    board_crop_min_score: float = Field(default=0.35, ge=0.0, le=1.0)
+    board_crop_max_vlm_images: int = Field(default=5, ge=2, le=8)
+
+    # Fail-safe: if substantive mathematical content remains unresolved and readable visual evidence
+    # exists, insert the best board crop directly into the notes instead of inventing a reconstruction.
+    unresolved_board_snapshots_enabled: bool = True
+    unresolved_board_min_visual_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
+    unresolved_board_max_per_chunk: int = Field(default=1, ge=0, le=4)
+    unresolved_board_width_fraction: float = Field(default=0.88, ge=0.30, le=1.0)
+
     math_ocr: MathOCRConfig = Field(default_factory=MathOCRConfig)
+
+    @model_validator(mode="after")
+    def validate_board_roi(self) -> VisionConfig:
+        if self.board_crop_roi is None:
+            return self
+        left, top, right, bottom = self.board_crop_roi
+        if not all(0.0 <= value <= 1.0 for value in self.board_crop_roi):
+            raise ValueError("vision.board_crop_roi values must lie in [0, 1]")
+        if left >= right or top >= bottom:
+            raise ValueError("vision.board_crop_roi must satisfy left<right and top<bottom")
+        return self
 
 
 class LiteratureConfig(BaseModel):
