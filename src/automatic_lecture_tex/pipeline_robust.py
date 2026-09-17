@@ -10,11 +10,26 @@ from .knowledge_pipeline_resilient import (
     KNOWLEDGE_CACHE_VERSION,
     run_knowledge_pipeline as resilient_knowledge_pipeline,
 )
+from .linear_llm_policy import (
+    LINEAR_SOURCE_POLICY_VERSION,
+    LectureModelClient as LinearLectureModelClient,
+)
 from .linear_pipeline import LINEAR_PIPELINE_VERSION, run_linear_pipeline
-from .llm_robust import LectureModelClient
+from .llm_robust import LectureModelClient as RobustLectureModelClient
 from .media import media_source_from_config
 from .schemas import Transcript
 from .util import atomic_json_dump, stable_hash
+
+
+def _run_linear_pipeline_with_policy(*args, **kwargs):
+    """Inject policy version into chunk-cache identity without changing the media source itself."""
+
+    source_identity = kwargs.get("source_identity")
+    kwargs["source_identity"] = {
+        "media_source": source_identity,
+        "linear_source_policy_version": LINEAR_SOURCE_POLICY_VERSION,
+    }
+    return run_linear_pipeline(*args, **kwargs)
 
 
 class Pipeline(_base_pipeline.Pipeline):
@@ -28,9 +43,14 @@ class Pipeline(_base_pipeline.Pipeline):
         return self._asr
 
     @property
-    def llm(self) -> LectureModelClient:
-        if self._llm is None:
-            self._llm = LectureModelClient(self.config.llm)
+    def llm(self) -> RobustLectureModelClient:
+        desired_type = (
+            LinearLectureModelClient
+            if getattr(self, "_linear_dispatch_active", False)
+            else RobustLectureModelClient
+        )
+        if self._llm is None or type(self._llm) is not desired_type:
+            self._llm = desired_type(self.config.llm)
         return self._llm
 
     def _ir_fingerprint(self, transcript, notation: dict[str, str]) -> str:
@@ -40,6 +60,7 @@ class Pipeline(_base_pipeline.Pipeline):
                 {
                     "base": base,
                     "linear_pipeline_version": LINEAR_PIPELINE_VERSION,
+                    "linear_source_policy_version": LINEAR_SOURCE_POLICY_VERSION,
                 }
             )
         if self.config.notes.architecture == "knowledge":
@@ -106,7 +127,7 @@ class Pipeline(_base_pipeline.Pipeline):
         if requested_architecture == "linear":
             self._linear_dispatch_active = True
             self.config.notes.architecture = "knowledge"
-            _base_pipeline.run_knowledge_pipeline = run_linear_pipeline
+            _base_pipeline.run_knowledge_pipeline = _run_linear_pipeline_with_policy
         elif requested_architecture == "knowledge":
             _base_pipeline.run_knowledge_pipeline = resilient_knowledge_pipeline
 
