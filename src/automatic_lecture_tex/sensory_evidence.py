@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .board import build_temporal_board_composite, temporal_sample_offsets
+from .board_crop import generate_board_crops
 from .frame_selection import select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
@@ -50,6 +51,28 @@ def _append_unique(frames: list[ExtractedFrame], frame: ExtractedFrame) -> None:
         frames.append(frame)
 
 
+def _prefer_board_views(
+    raw_views: list[ExtractedFrame],
+    board_views: list[ExtractedFrame],
+    *,
+    limit: int,
+) -> list[ExtractedFrame]:
+    """Keep one full-context frame, then spend the image budget on readable board crops."""
+
+    selected: list[ExtractedFrame] = []
+    if raw_views:
+        _append_unique(selected, raw_views[0])
+    for frame in board_views:
+        if len(selected) >= limit:
+            break
+        _append_unique(selected, frame)
+    for frame in raw_views[1:]:
+        if len(selected) >= limit:
+            break
+        _append_unique(selected, frame)
+    return selected[:limit]
+
+
 def collect_visual_evidence(
     pipeline: Pipeline,
     lecture: LectureConfig,
@@ -60,12 +83,13 @@ def collect_visual_evidence(
     figures_root: Path,
     notation: dict[str, str],
 ) -> tuple[list, list[VisualEvidence], float]:
-    """Collect visual evidence with temporal board support and a real raw primary frame.
+    """Collect literal visual evidence, preferring high-resolution board crops when available.
 
-    Temporal sampling is used to estimate occlusion and build a secondary median composite. The VLM
-    sees the least transiently occluded *raw* frame first, then the composite, then at most two nearby
-    raw frames. Specialized OCR reads the same primary raw frame. A broken remote video range remains
-    non-fatal for the lecture pipeline.
+    The VLM always retains one uncropped frame for context. Host-side board detection then contributes
+    a full board ROI plus overlapping horizontal tiles, up to the configured image budget. If crop
+    detection fails, behavior falls back to the existing raw-frame path. The best crop is also copied
+    into the TeX figure tree so an unresolved mathematical fragment can be represented by source
+    evidence rather than an invented reconstruction.
     """
 
     requests = []
@@ -90,15 +114,12 @@ def collect_visual_evidence(
     ocr_backend = _math_ocr_backend(pipeline)
     evidence: list[VisualEvidence] = []
     prepared_visuals: list[
-        tuple[Any, list[ExtractedFrame], list[MathOCRCandidate]]
+        tuple[Any, list[ExtractedFrame], list[ExtractedFrame], list[MathOCRCandidate]]
     ] = []
 
     for request in requests:
         raw_times = _unique_times(
-            [
-                request.timestamp + offset
-                for offset in pipeline.config.vision.frame_offsets_seconds
-            ]
+            [request.timestamp + offset for offset in pipeline.config.vision.frame_offsets_seconds]
         )
         temporal_times: list[float] = []
         if pipeline.config.vision.temporal_composite_enabled:
@@ -148,7 +169,7 @@ def collect_visual_evidence(
             )
             continue
 
-        display_frames: list[ExtractedFrame] = []
+        raw_views: list[ExtractedFrame] = []
         ocr_image: Path | None = None
 
         if temporal_times and len(temporal_times) >= 3:
@@ -163,9 +184,9 @@ def collect_visual_evidence(
                     composite_path,
                     target_timestamp=request.timestamp,
                 )
-                _append_unique(display_frames, primary)
+                _append_unique(raw_views, primary)
                 _append_unique(
-                    display_frames,
+                    raw_views,
                     ExtractedFrame(timestamp=request.timestamp, path=composite_path),
                 )
                 ocr_image = primary.path
@@ -180,15 +201,41 @@ def collect_visual_evidence(
         raw_frames = [frames[index] for index in raw_indices]
         raw_frames.sort(key=lambda frame: abs(frame.timestamp - request.timestamp))
         for frame in raw_frames:
-            if len(display_frames) >= 4:
+            if len(raw_views) >= 4:
                 break
-            _append_unique(display_frames, frame)
+            _append_unique(raw_views, frame)
 
-        if not display_frames:
-            fallback_frames = sorted(frames, key=lambda frame: abs(frame.timestamp - request.timestamp))
-            display_frames = fallback_frames[:4]
-        if ocr_image is None and display_frames:
-            ocr_image = display_frames[0].path
+        if not raw_views:
+            raw_views = sorted(frames, key=lambda frame: abs(frame.timestamp - request.timestamp))[:4]
+        if ocr_image is None and raw_views:
+            ocr_image = raw_views[0].path
+
+        board_views: list[ExtractedFrame] = []
+        if raw_views and pipeline.config.vision.board_auto_crop_enabled:
+            try:
+                crop_result = generate_board_crops(
+                    raw_views[0],
+                    frame_dir / "board_crops",
+                    pipeline.config.vision,
+                )
+                if crop_result is not None:
+                    board_views = crop_result.frames
+                    # Specialized OCR benefits from the board-only full crop as well.
+                    if board_views:
+                        ocr_image = board_views[0].path
+            except Exception as exc:
+                logger.warning(
+                    "[%s] board auto-crop failed for %s; using raw frames: %s",
+                    lecture.id,
+                    request.id,
+                    exc,
+                )
+
+        display_frames = _prefer_board_views(
+            raw_views,
+            board_views,
+            limit=pipeline.config.vision.board_crop_max_vlm_images,
+        )
 
         candidates: list[MathOCRCandidate] = []
         if ocr_backend is not None and ocr_image is not None:
@@ -207,13 +254,13 @@ def collect_visual_evidence(
                     exc,
                 )
 
-        prepared_visuals.append((request, display_frames, candidates))
+        prepared_visuals.append((request, display_frames, board_views, candidates))
 
     if prepared_visuals:
         workers = min(pipeline.config.vision.max_workers, len(prepared_visuals))
         futures: list[Future[VisualEvidence]] = []
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            for request, frames, _candidates in prepared_visuals:
+            for request, frames, _board_views, _candidates in prepared_visuals:
                 futures.append(
                     executor.submit(
                         pipeline.llm.resolve_visual_request,
@@ -223,7 +270,7 @@ def collect_visual_evidence(
                         [frame.timestamp for frame in frames],
                     )
                 )
-            for (request, frames, candidates), future in zip(
+            for (request, frames, board_views, candidates), future in zip(
                 prepared_visuals, futures, strict=True
             ):
                 try:
@@ -237,19 +284,31 @@ def collect_visual_evidence(
                     )
                     visual = VisualEvidence(
                         request_id=request.id,
-                        description=(
-                            f"Visual OCR failed after retries: {type(exc).__name__}: {exc}"
-                        ),
+                        description=f"Visual OCR failed after retries: {type(exc).__name__}: {exc}",
                     )
                 visual.math_ocr_candidates = candidates
-                if visual.requires_figure_in_notes and frames:
+
+                # Preserve a readable board crop for both ordinary figure requests and unresolved
+                # fallbacks. Prefer the VLM-selected crop when it selected one; otherwise keep the
+                # full board ROI. Raw frames remain the fallback for non-board diagrams/slides.
+                asset_frame: ExtractedFrame | None = None
+                if board_views and visual.kind != "none":
+                    index = visual.best_frame_index if visual.best_frame_index is not None else 0
+                    index = max(0, min(index, len(frames) - 1)) if frames else 0
+                    selected = frames[index] if frames else None
+                    if selected is not None and any(selected.path == item.path for item in board_views):
+                        asset_frame = selected
+                    else:
+                        asset_frame = board_views[0]
+                elif visual.requires_figure_in_notes and frames:
                     index = visual.best_frame_index if visual.best_frame_index is not None else 0
                     index = max(0, min(index, len(frames) - 1))
-                    destination = figures_root / f"{request.id}.jpg"
-                    copy_asset(frames[index].path, destination)
-                    visual.asset_path = str(
-                        destination.relative_to(pipeline.config.latex.output_dir)
-                    )
+                    asset_frame = frames[index]
+
+                if asset_frame is not None:
+                    destination = figures_root / f"{request.id}_board.jpg"
+                    copy_asset(asset_frame.path, destination)
+                    visual.asset_path = str(destination.relative_to(pipeline.config.latex.output_dir))
                 evidence.append(visual)
 
     return requests, evidence, time.perf_counter() - started

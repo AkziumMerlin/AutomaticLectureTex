@@ -8,12 +8,18 @@ from pathlib import Path
 from pydantic_core import ValidationError
 
 from .chunking import chunk_transcript
+from .linear_llm_policy import has_explicit_correction_signal
 from .linear_notes import (
     LinearCorrectionScan,
     LinearPatch,
     block_id,
     provenance_claim_ids,
     scan_linear_corrections,
+)
+from .linear_visual_fallback import (
+    clean_stale_architecture_artifacts,
+    inject_unresolved_board_snapshots,
+    is_board_snapshot,
 )
 from .llm import LectureModelClient
 from .schemas import ChunkNotes, CorrectionRecord, LectureIR, NoteBlock, Transcript, VisualEvidence
@@ -22,9 +28,9 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-# Version 3 keeps the pre-PR2 writer isolated from host-owned provenance metadata.
-# chunk -> finalize_chunk(clean previous_notes) -> append -> explicit correction scan.
-LINEAR_PIPELINE_VERSION = 3
+# Version 4 adds host-side unresolved board snapshots and correction-cache pruning while preserving
+# the restored pre-PR2 chronological writer.
+LINEAR_PIPELINE_VERSION = 4
 
 
 def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
@@ -198,8 +204,9 @@ def run_linear_pipeline(
     run_started: float,
     force: bool,
 ) -> LectureIR:
-    """The original chronological writer plus a narrow cross-chunk correction pass."""
+    """The original chronological writer plus narrow evidence-preserving fail-safes."""
 
+    clean_stale_architecture_artifacts(work)
     pipeline.llm.reset_usage()
     notes_started = time.perf_counter()
     config = pipeline.config.notes
@@ -313,6 +320,12 @@ def run_linear_pipeline(
                     )
             finalize_seconds += time.perf_counter() - finalize_started
 
+            inject_unresolved_board_snapshots(
+                notes,
+                evidence,
+                pipeline.config.vision,
+                output_language=pipeline.config.llm.output_language,
+            )
             _stamp_chunk_provenance(notes, chunk_index, chunk.segment_ids)
 
             usage = LectureModelClient.usage_delta(pipeline.llm.usage_snapshot(), usage_before)
@@ -341,7 +354,18 @@ def run_linear_pipeline(
     if config.linear_correction_scan_enabled:
         scan_dir = work / "linear_correction_scans"
         scan_dir.mkdir(parents=True, exist_ok=True)
+        triggered_ids = {
+            chunk.id
+            for chunk in chunks
+            if has_explicit_correction_signal(chunk.timestamped_text or chunk.text)
+        }
+        for stale in scan_dir.glob("*.json"):
+            if stale.stem not in triggered_ids:
+                stale.unlink()
+
         for chunk_index, chunk in enumerate(chunks):
+            if chunk.id not in triggered_ids:
+                continue
             earlier = [block for notes in note_chunks[:chunk_index] for block in notes.blocks]
             if not earlier:
                 continue
@@ -441,6 +465,9 @@ def run_linear_pipeline(
             "chunks_processed": processed_chunks,
             "chunk_cache_hits": chunk_cache_hits,
             "blocks_total": sum(len(notes.blocks) for notes in note_chunks),
+            "board_snapshots_total": sum(
+                is_board_snapshot(block) for block in _all_blocks(note_chunks)
+            ),
             "correction_patches_applied": correction_patches_applied,
             "visual_requests_processed": visual_requests_processed,
             "visual_evidence_successful": visual_evidence_successful,

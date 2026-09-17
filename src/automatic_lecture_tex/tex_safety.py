@@ -125,10 +125,25 @@ def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
     return _BARE_MATH_COMMAND.sub(replace, value)
 
 
+def _repair_single_unmatched_display(value: str) -> str:
+    """Repair the common model failure `$$formula` (or `formula$$`) without guessing prose spans."""
+
+    if value.count("$$") != 1:
+        return value
+    marker = value.find("$$")
+    before = value[:marker].strip()
+    after = value[marker + 2 :].strip()
+    if not before and after:
+        return r"\[" + canonicalize_math_fragment(after).strip() + r"\]"
+    if before and not after:
+        return r"\[" + canonicalize_math_fragment(before).strip() + r"\]"
+    return value
+
+
 def normalize_math_spans(value: str) -> str:
     """Normalize math syntax in delimited spans and safely wrap raw math glyphs in prose."""
 
-    clean = strip_control_chars(value)
+    clean = _repair_single_unmatched_display(strip_control_chars(value))
     clean = _DOUBLE_DOLLAR_MATH.sub(
         lambda match: r"\[" + canonicalize_math_fragment(match.group(1)).strip() + r"\]",
         clean,
