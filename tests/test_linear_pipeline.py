@@ -10,6 +10,7 @@ from automatic_lecture_tex.linear_notes import (
 from automatic_lecture_tex.linear_pipeline import (
     _apply_patch,
     _stamp_chunk_provenance,
+    _writer_context_notes,
     run_linear_pipeline,
 )
 from automatic_lecture_tex.schemas import (
@@ -56,9 +57,27 @@ def test_host_stamps_chunk_provenance_after_writer():
     assert block_segment_ids(notes.blocks[1]) == ["seg_a", "seg_b"]
 
 
-def test_linear_pipeline_uses_existing_finalize_chunk_writer():
+def test_writer_context_strips_host_provenance_without_mutating_ir():
+    block = _block("block_0003_000", r"a=2", segment_id="seg_a")
+    block.source_evidence_ids = ["visual_1"]
+    notes = ChunkNotes(section_title="Section", blocks=[block], unresolved=["u"])
+
+    projected = _writer_context_notes(notes)
+
+    assert projected is not None
+    assert projected.section_title == "Section"
+    assert projected.unresolved == ["u"]
+    assert projected.blocks[0].latex == r"a=2"
+    assert projected.blocks[0].source_claim_ids == []
+    assert projected.blocks[0].source_evidence_ids == []
+    assert block_id(notes.blocks[0]) == "block_0003_000"
+    assert notes.blocks[0].source_evidence_ids == ["visual_1"]
+
+
+def test_linear_pipeline_uses_existing_finalize_chunk_writer_with_clean_context():
     source = inspect.getsource(run_linear_pipeline)
 
+    assert "writer_previous_notes = _writer_context_notes(previous_notes)" in source
     assert "pipeline.llm.finalize_chunk(" in source
     assert "draft_linear_chunk" not in source
     assert "LinearChunkDraft" not in source

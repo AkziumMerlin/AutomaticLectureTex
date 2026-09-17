@@ -22,10 +22,9 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-# Version 2 deliberately restores the pre-PR2 writer contract:
-# chunk -> finalize_chunk(previous_notes) -> append.  The only new semantic layer is the
-# post-hoc explicit lecturer-correction scan.
-LINEAR_PIPELINE_VERSION = 2
+# Version 3 keeps the pre-PR2 writer isolated from host-owned provenance metadata.
+# chunk -> finalize_chunk(clean previous_notes) -> append -> explicit correction scan.
+LINEAR_PIPELINE_VERSION = 3
 
 
 def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
@@ -33,16 +32,43 @@ def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
 
 
 def _stamp_chunk_provenance(notes: ChunkNotes, chunk_index: int, segment_ids: list[str]) -> None:
-    """Assign stable host-owned block ids without changing the writer schema/prompt.
-
-    The old writer never had to do bookkeeping.  Keep that invariant: every generated block is
-    attributed conservatively to the whole technical chunk, which is sufficient for later explicit
-    correction targeting and survives ordinary NoteBlock serialization.
-    """
+    """Assign stable host-owned block ids after note generation."""
 
     for block_index, block in enumerate(notes.blocks):
         stable_id = f"block_{chunk_index:04d}_{block_index:03d}"
         block.source_claim_ids = provenance_claim_ids(stable_id, list(segment_ids))
+
+
+def _writer_context_notes(notes: ChunkNotes | None) -> ChunkNotes | None:
+    """Return the pre-PR2 view of previous notes used by ``finalize_chunk``.
+
+    Stable ids and evidence provenance were added much later. Passing those arrays back through
+    ``previous_notes`` polluted the old writer context and encouraged the model to reproduce large
+    bookkeeping lists in structured output. Keep the stored IR rich, but expose only the fields the
+    old writer actually knew about.
+    """
+
+    if notes is None:
+        return None
+    return ChunkNotes(
+        chunk_id=notes.chunk_id,
+        start=notes.start,
+        end=notes.end,
+        section_title=notes.section_title,
+        blocks=[
+            NoteBlock(
+                type=block.type,
+                title=block.title,
+                latex=block.latex,
+                asset_path=block.asset_path,
+                caption=block.caption,
+            )
+            for block in notes.blocks
+        ],
+        notation=list(notes.notation),
+        corrections=list(notes.corrections),
+        unresolved=list(notes.unresolved),
+    )
 
 
 def _apply_patch(
@@ -128,7 +154,7 @@ def _chunk_cache_fingerprint(
     return stable_hash(
         {
             "version": LINEAR_PIPELINE_VERSION,
-            "writer": "pre_pr2_finalize_chunk",
+            "writer": "pre_pr2_finalize_chunk_clean_context",
             "chunk": chunk.model_dump(mode="json"),
             "previous_notes": (
                 previous_notes.model_dump(mode="json") if previous_notes is not None else None
@@ -172,12 +198,7 @@ def run_linear_pipeline(
     run_started: float,
     force: bool,
 ) -> LectureIR:
-    """The original chronological writer plus a narrow cross-chunk correction pass.
-
-    Main note generation is intentionally the pre-PR2 path: raw chronological chunk, local visual
-    evidence, previous ChunkNotes, ``LectureModelClient.finalize_chunk``, append.  There is no
-    observation graph, episode graph, hierarchy synthesis, formula gate, or replacement writer.
-    """
+    """The original chronological writer plus a narrow cross-chunk correction pass."""
 
     pipeline.llm.reset_usage()
     notes_started = time.perf_counter()
@@ -196,6 +217,8 @@ def run_linear_pipeline(
     visual_requests_processed = 0
     visual_evidence_successful = 0
     correction_patches_applied = 0
+    finalize_contextless_retries = 0
+    finalize_failures = 0
     llm_usages: list[dict] = []
 
     chunks_dir = work / "linear_chunks"
@@ -203,11 +226,12 @@ def run_linear_pipeline(
 
     for chunk_index, chunk in enumerate(chunks):
         previous_notes = note_chunks[-1] if note_chunks else None
+        writer_previous_notes = _writer_context_notes(previous_notes)
         artifact = chunks_dir / f"{chunk.id}.json"
         fingerprint = _chunk_cache_fingerprint(
             pipeline,
             chunk=chunk,
-            previous_notes=previous_notes,
+            previous_notes=writer_previous_notes,
             notation=notation,
             source_identity=source_identity,
         )
@@ -258,24 +282,37 @@ def run_linear_pipeline(
 
             finalize_started = time.perf_counter()
             try:
-                notes = pipeline.llm.finalize_chunk(chunk, evidence, notation, previous_notes)
-            except (json.JSONDecodeError, ValidationError) as exc:
-                logger.warning("[%s] %s finalize_chunk failed: %s", lecture.id, chunk.id, exc)
-                notes = ChunkNotes(
-                    chunk_id=chunk.id,
-                    start=chunk.start,
-                    end=chunk.end,
-                    section_title=(previous_notes.section_title if previous_notes else "Без названия"),
-                    blocks=[],
-                    unresolved=[
-                        f"Не удалось разобрать structured output для {chunk.id}; "
-                        "фрагмент сохранён только в transcript evidence."
-                    ],
+                notes = pipeline.llm.finalize_chunk(
+                    chunk, evidence, notation, writer_previous_notes
                 )
+            except (json.JSONDecodeError, ValidationError) as first_exc:
+                finalize_contextless_retries += 1
+                logger.warning(
+                    "[%s] %s finalize_chunk failed with previous context; retrying contextless: %s",
+                    lecture.id,
+                    chunk.id,
+                    first_exc,
+                )
+                try:
+                    notes = pipeline.llm.finalize_chunk(chunk, evidence, notation, None)
+                except (json.JSONDecodeError, ValidationError) as exc:
+                    finalize_failures += 1
+                    logger.warning("[%s] %s finalize_chunk failed: %s", lecture.id, chunk.id, exc)
+                    notes = ChunkNotes(
+                        chunk_id=chunk.id,
+                        start=chunk.start,
+                        end=chunk.end,
+                        section_title=(
+                            previous_notes.section_title if previous_notes else "Без названия"
+                        ),
+                        blocks=[],
+                        unresolved=[
+                            f"Не удалось разобрать structured output для {chunk.id}; "
+                            "фрагмент сохранён только в transcript evidence."
+                        ],
+                    )
             finalize_seconds += time.perf_counter() - finalize_started
 
-            # Provenance is deliberately host-owned so the original writer prompt/schema remains
-            # untouched.  This is coarse chunk-level provenance, not another semantic abstraction.
             _stamp_chunk_provenance(notes, chunk_index, chunk.segment_ids)
 
             usage = LectureModelClient.usage_delta(pipeline.llm.usage_snapshot(), usage_before)
@@ -292,8 +329,6 @@ def run_linear_pipeline(
                 },
             )
 
-        # Cached artifacts from this version are already stamped; this is idempotent and protects
-        # against manually edited caches that lost host provenance.
         if any(not block_id(block) for block in notes.blocks):
             _stamp_chunk_provenance(notes, chunk_index, chunk.segment_ids)
 
@@ -303,8 +338,6 @@ def run_linear_pipeline(
         for item in notes.notation:
             notation.setdefault(item.latex, item.meaning)
 
-    # Separate post-pass: only explicit lecturer corrections/retractions can mutate earlier blocks.
-    # It never participates in note writing and never patches merely from mathematical priors.
     if config.linear_correction_scan_enabled:
         scan_dir = work / "linear_correction_scans"
         scan_dir.mkdir(parents=True, exist_ok=True)
@@ -400,6 +433,8 @@ def run_linear_pipeline(
             "notes_seconds": round(time.perf_counter() - notes_started, 3),
             "vision_seconds": round(visual_seconds, 3),
             "finalize_and_math_audit_seconds": round(finalize_seconds, 3),
+            "finalize_contextless_retries": finalize_contextless_retries,
+            "finalize_failures": finalize_failures,
             "correction_scan_seconds": round(correction_seconds, 3),
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "chunks_total": len(chunks),
