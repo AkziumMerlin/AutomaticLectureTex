@@ -26,6 +26,7 @@ _TEX_ESCAPES = {
     "^": r"\textasciicircum{}",
 }
 _INLINE_DOLLAR_MATH = re.compile(r"(\$[^$\n]*\$)")
+_BOARD_SNAPSHOT_PREFIX = "board-snapshot:"
 
 
 def escape_tex(text: str) -> str:
@@ -41,7 +42,9 @@ def escape_tex_mixed(text: str) -> str:
         return escape_tex(clean)
     parts = _INLINE_DOLLAR_MATH.split(clean)
     return "".join(
-        canonicalize_math_fragment(part) if _INLINE_DOLLAR_MATH.fullmatch(part or "") else escape_tex(part)
+        canonicalize_math_fragment(part)
+        if _INLINE_DOLLAR_MATH.fullmatch(part or "")
+        else escape_tex(part)
         for part in parts
     )
 
@@ -53,6 +56,10 @@ def _body(block: NoteBlock) -> str:
 def _environment(block: NoteBlock, environment: str) -> str:
     title = f"[{escape_tex_mixed(block.title)}]" if block.title else ""
     return f"\\begin{{{environment}}}{title}\n{_body(block)}\n\\end{{{environment}}}\n"
+
+
+def _is_board_snapshot(block: NoteBlock) -> bool:
+    return any(item.startswith(_BOARD_SNAPSHOT_PREFIX) for item in block.source_evidence_ids)
 
 
 def render_block(block: NoteBlock) -> str:
@@ -70,6 +77,15 @@ def render_block(block: NoteBlock) -> str:
         if not block.asset_path:
             return body + "\n"
         caption = escape_tex_mixed(block.caption or block.title or "")
+        if _is_board_snapshot(block):
+            return (
+                "\\par\\medskip\n"
+                "\\begin{center}\n"
+                f"\\includegraphics[width=0.88\\textwidth]{{{block.asset_path}}}\n"
+                "\\end{center}\n"
+                + (f"\\noindent\\textit{{{caption}}}\\par\n" if caption else "")
+                + "\\medskip\n"
+            )
         return (
             "\\begin{figure}[ht]\n"
             "\\centering\n"
