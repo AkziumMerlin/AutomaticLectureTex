@@ -20,6 +20,10 @@ from .media import media_source_from_config
 from .schemas import Transcript
 from .util import atomic_json_dump, stable_hash
 
+# Backwards-compatible module alias used by existing tests and external imports. Knowledge/legacy
+# modes still use this robust client; linear mode selects the stricter subclass below.
+LectureModelClient = RobustLectureModelClient
+
 
 def _run_linear_pipeline_with_policy(*args, **kwargs):
     """Inject policy version into chunk-cache identity without changing the media source itself."""
