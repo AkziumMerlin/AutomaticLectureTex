@@ -81,7 +81,7 @@ def test_finalize_and_audit_prompts_receive_source_policy(monkeypatch):
     client._structured("writer", EmptyModel, operation="finalize_chunk")
     client._structured("audit", EmptyModel, operation="math_audit")
 
-    assert "Do NOT introduce a new sequence" in captured["finalize_chunk"]
+    assert "do NOT introduce a new sequence" in captured["finalize_chunk"]
     assert "Mathematical plausibility is not evidence" in captured["finalize_chunk"]
     assert "z_f versus y_f" in captured["math_audit"]
     assert "Never change a lecturer statement solely" in captured["math_audit"]
