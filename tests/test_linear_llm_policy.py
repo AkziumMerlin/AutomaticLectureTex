@@ -1,3 +1,5 @@
+from pydantic import BaseModel
+
 from automatic_lecture_tex.config import LLMConfig
 from automatic_lecture_tex.linear_llm_policy import (
     LINEAR_SOURCE_POLICY_VERSION,
@@ -5,9 +7,10 @@ from automatic_lecture_tex.linear_llm_policy import (
     _current_correction_transcript,
     has_explicit_correction_signal,
 )
+from automatic_lecture_tex.linear_notes import LinearCorrectionScan
 from automatic_lecture_tex.llm_robust import LectureModelClient as RobustLectureModelClient
 from automatic_lecture_tex.pipeline_robust import _run_linear_pipeline_with_policy
-from automatic_lecture_tex.schemas import BlockType, ChunkNotes, LinearCorrectionScan, NoteBlock
+from automatic_lecture_tex.schemas import BlockType, ChunkNotes, NoteBlock
 
 
 def test_correction_trigger_looks_only_at_current_transcript():
@@ -72,9 +75,8 @@ def test_finalize_and_audit_prompts_receive_source_policy(monkeypatch):
     monkeypatch.setattr(RobustLectureModelClient, "_structured", fake_structured)
     client = object.__new__(LectureModelClient)
 
-    class EmptyModel(ChunkNotes):
-        section_title: str = "x"
-        blocks: list[NoteBlock] = []
+    class EmptyModel(BaseModel):
+        pass
 
     client._structured("writer", EmptyModel, operation="finalize_chunk")
     client._structured("audit", EmptyModel, operation="math_audit")
