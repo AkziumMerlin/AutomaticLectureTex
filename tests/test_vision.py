@@ -3,6 +3,7 @@ from automatic_lecture_tex.vision import (
     dedupe_visual_requests,
     namespace_visual_requests,
     select_rule_based_visual_requests,
+    uniform_chunk_sample_times,
 )
 
 
@@ -61,3 +62,9 @@ def test_rule_selector_caps_low_confidence_frame_requests():
     requests = select_rule_based_visual_requests(chunk, transcript, max_low_confidence_requests=2)
 
     assert len(requests) == 2
+
+
+def test_uniform_chunk_sample_times_use_bin_midpoints():
+    chunk = LectureChunk(id="c", start=0, end=180, segment_ids=[], text="")
+
+    assert uniform_chunk_sample_times(chunk, 6) == [15.0, 45.0, 75.0, 105.0, 135.0, 165.0]
