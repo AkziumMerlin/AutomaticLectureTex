@@ -167,10 +167,12 @@ def test_source_backed_visual_audit_correction_is_applied(monkeypatch):
         assert schema is SourceGroundedMathAudit
         return schema.model_validate(
             {
-                "corrections": [
+                "verdicts": [
                     {
                         "block_index": 0,
-                        "corrected_latex": r"u(ix)=-v(x),\qquad v(ix)=u(x)",
+                        "action": "replace",
+                        "target_excerpt": r"v(ix)=-u(x)",
+                        "replacement_latex": r"u(ix)=-v(x),\qquad v(ix)=u(x)",
                         "reason": "Знаки и роли u,v должны следовать двум формулам на доске.",
                         "confidence": 0.97,
                         "evidence": [
@@ -178,8 +180,7 @@ def test_source_backed_visual_audit_correction_is_applied(monkeypatch):
                             {"source": "visual", "quote": r"if(x)=iu(x)-v(x)"},
                         ],
                     }
-                ],
-                "issues": [],
+                ]
             }
         )
 
@@ -209,18 +210,19 @@ def test_textbook_only_audit_correction_is_not_applied(monkeypatch):
     def fake_structured(self, prompt, schema, **kwargs):
         return schema.model_validate(
             {
-                "corrections": [
+                "verdicts": [
                     {
                         "block_index": 0,
-                        "corrected_latex": "Представляющий вектор y_f единственен.",
+                        "action": "replace",
+                        "target_excerpt": "y_f определён с точностью до скаляра",
+                        "replacement_latex": "Представляющий вектор y_f единственен.",
                         "reason": "Так утверждает стандартная теорема Рисса.",
                         "confidence": 0.99,
                         "evidence": [
                             {"source": "transcript", "quote": "стандартная теорема Рисса"}
                         ],
                     }
-                ],
-                "issues": [],
+                ]
             }
         )
 
@@ -234,7 +236,7 @@ def test_textbook_only_audit_correction_is_not_applied(monkeypatch):
 
     assert result.blocks[0].latex == original
     assert result.corrections == []
-    assert any("source support not verified" in item for item in result.unresolved)
+    assert result.unresolved == []
 
 
 def test_linear_audit_runs_on_prose_only_chunk(monkeypatch):
@@ -253,7 +255,18 @@ def test_linear_audit_runs_on_prose_only_chunk(monkeypatch):
 
     def fake_structured(self, prompt, schema, **kwargs):
         seen["called"] = True
-        return schema.model_validate({"corrections": [], "issues": []})
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "keep",
+                        "reason": "Блок соответствует текущему источнику.",
+                        "confidence": 0.99,
+                    }
+                ]
+            }
+        )
 
     monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
     result = client._audit_math(
@@ -311,11 +324,12 @@ def test_high_confidence_source_grounded_issue_marks_exact_block(monkeypatch):
     def fake_structured(self, prompt, schema, **kwargs):
         return schema.model_validate(
             {
-                "corrections": [],
-                "issues": [
+                "verdicts": [
                     {
                         "block_index": 0,
-                        "reason": "Блок неверно передаёт свойство y_f.",
+                        "action": "suppress",
+                        "target_excerpt": "y_f определяется с точностью до скаляра",
+                        "reason": "Блок приписывает y_f свойство, которого нет в текущем источнике.",
                         "confidence": 0.96,
                         "evidence": [
                             {
@@ -324,7 +338,7 @@ def test_high_confidence_source_grounded_issue_marks_exact_block(monkeypatch):
                             }
                         ],
                     }
-                ],
+                ]
             }
         )
 
@@ -337,7 +351,206 @@ def test_high_confidence_source_grounded_issue_marks_exact_block(monkeypatch):
     )
 
     assert any(
-        item.startswith("audit-issue:") for item in result.blocks[0].source_evidence_ids
+        item.startswith("audit-suppress:") for item in result.blocks[0].source_evidence_ids
     )
     assert "audit-visual:req_riesz" in result.blocks[0].source_evidence_ids
     assert any("Audit block 0" in item for item in result.unresolved)
+
+
+def test_strict_verdict_rejects_target_excerpt_from_another_block(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Рисс",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Вектор z_f определяется с точностью до скаляра.",
+            ),
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Вектор y_f определяется однозначно.",
+            ),
+        ],
+    )
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "keep",
+                        "reason": "Соответствует источнику.",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "block_index": 1,
+                        "action": "suppress",
+                        "target_excerpt": "z_f определяется с точностью до скаляра",
+                        "reason": "Ошибочно выбран индекс блока.",
+                        "confidence": 0.99,
+                        "evidence": [
+                            {
+                                "source": "transcript",
+                                "quote": "y_f определяется однозначно",
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=_chunk("z_f определяется с точностью до скаляра, y_f определяется однозначно."),
+        evidence_json="[]",
+        previous_context=None,
+    )
+
+    assert not any(
+        item.startswith("audit-suppress:") for item in result.blocks[1].source_evidence_ids
+    )
+    assert result.blocks[1].latex == "Вектор y_f определяется однозначно."
+
+
+def test_writer_added_phase_claim_can_be_suppressed_from_source_context(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Норма функционала",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex=(
+                    r"Выбираем $\varphi=\arg f(x)$. Тогда $xe^{-i\varphi}$ является "
+                    r"вещественным вектором и $f(xe^{-i\varphi})=|f(x)|$."
+                ),
+            )
+        ],
+    )
+    chunk = _chunk("Выберем фазу так, чтобы f(x e^{-i phi}) было равно |f(x)|.")
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "suppress",
+                        "target_excerpt": "является вещественным вектором",
+                        "reason": "Это дополнительное утверждение writer, которого источник не говорит.",
+                        "confidence": 0.95,
+                        "evidence": [
+                            {
+                                "source": "transcript",
+                                "quote": "f(x e^{-i phi}) было равно |f(x)|",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=chunk,
+        evidence_json="[]",
+        previous_context=None,
+    )
+
+    assert "audit-suppress:0.950" in result.blocks[0].source_evidence_ids
+
+
+def test_topology_type_drift_can_be_replaced_only_from_current_source(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Слабая-* топология",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex=r"На $\mathbb C^X$ рассматривается слабая топология.",
+            )
+        ],
+    )
+    chunk = _chunk("На C^X рассматривается декартова топология.")
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "replace",
+                        "target_excerpt": "слабая топология",
+                        "replacement_latex": r"На $\mathbb C^X$ рассматривается декартова топология.",
+                        "reason": "Draft подменил явно названный тип топологии.",
+                        "confidence": 0.98,
+                        "evidence": [
+                            {
+                                "source": "transcript",
+                                "quote": "рассматривается декартова топология",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=chunk,
+        evidence_json="[]",
+        previous_context=None,
+    )
+
+    assert "декартова топология" in result.blocks[0].latex
+    assert len(result.corrections) == 1
+
+
+def test_suppress_cannot_erase_literal_lecturer_statement(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    statement = "Лектор утверждает, что сфера слабо компактна."
+    notes = ChunkNotes(
+        section_title="Слабая компактность",
+        blocks=[NoteBlock(type=BlockType.PARAGRAPH, latex=statement)],
+    )
+    chunk = _chunk(statement)
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "suppress",
+                        "target_excerpt": "сфера слабо компактна",
+                        "reason": "Стандартный учебник говорит иначе.",
+                        "confidence": 0.99,
+                        "evidence": [
+                            {
+                                "source": "transcript",
+                                "quote": "сфера слабо компактна",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=chunk,
+        evidence_json="[]",
+        previous_context=None,
+    )
+
+    assert not any(
+        item.startswith("audit-suppress:") for item in result.blocks[0].source_evidence_ids
+    )
