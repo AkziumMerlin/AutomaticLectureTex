@@ -129,7 +129,7 @@ def test_audit_issue_replaces_exact_block_at_same_position() -> None:
         type=BlockType.PARAGRAPH,
         latex="Неподтверждённое утверждение.",
         source_claim_ids=["block:block_0001_000"],
-        source_evidence_ids=["audit-issue:0.950", "audit-visual:req"],
+        source_evidence_ids=["audit-suppress:0.950", "audit-visual:req"],
     )
     tail = NoteBlock(type=BlockType.PARAGRAPH, latex="Следующий корректный абзац.")
     notes = ChunkNotes(section_title="Рисс", blocks=[bad, tail])
@@ -160,7 +160,7 @@ def test_audit_issue_without_linked_board_is_suppressed_without_unrelated_photo(
             NoteBlock(
                 type=BlockType.PARAGRAPH,
                 latex="Неподтверждённое утверждение.",
-                source_evidence_ids=["audit-issue:0.980"],
+                source_evidence_ids=["audit-suppress:0.980"],
             )
         ],
     )
@@ -190,7 +190,7 @@ def test_existing_figure_prevents_duplicate_snapshot() -> None:
             NoteBlock(
                 type=BlockType.PARAGRAPH,
                 latex="Плохой блок.",
-                source_evidence_ids=["audit-issue:0.950", "audit-visual:req"],
+                source_evidence_ids=["audit-suppress:0.950", "audit-visual:req"],
             ),
         ],
     )
@@ -244,6 +244,12 @@ def test_single_unmatched_double_dollar_is_closed_deterministically() -> None:
 def test_orphan_sizing_command_before_non_delimiter_is_removed() -> None:
     assert normalize_math_spans(r"$\bigl\mathbb{C}$") == r"$\mathbb{C}$"
     assert normalize_math_spans(r"$\bigl(x\bigr)$") == r"$\bigl(x\bigr)$"
+
+
+def test_indexed_bare_cap_and_cup_become_big_operators() -> None:
+    assert normalize_math_spans(r"$cap_{i=1}^m V_i$") == r"$\bigcap_{i=1}^m V_i$"
+    assert normalize_math_spans(r"$cup_{i=1}^m V_i$") == r"$\bigcup_{i=1}^m V_i$"
+    assert normalize_math_spans(r"$bigcap_{i=1}^m V_i$") == r"$\bigcap_{i=1}^m V_i$"
 
 
 def test_linear_hygiene_removes_retired_architecture_artifacts(tmp_path: Path) -> None:
