@@ -93,6 +93,7 @@ class NotesConfig(BaseModel):
         le=120.0,
         exclude=True,
     )
+    visual_chunk_board_scan: bool = False
     visual_rule_selector: bool = True
     visual_llm_selector: bool = False
     visual_dedupe_seconds: float = 8.0
@@ -143,6 +144,7 @@ class VisionConfig(BaseModel):
     board_crop_max_luminance: float = Field(default=0.78, ge=0.20, le=0.98)
     board_crop_min_score: float = Field(default=0.35, ge=0.0, le=1.0)
     board_crop_max_vlm_images: int = Field(default=5, ge=2, le=8)
+    board_uniform_samples: int = Field(default=6, ge=2, le=12)
 
     # Fail-safe: if substantive mathematical content remains unresolved and readable visual evidence
     # exists, insert the best board crop directly into the notes instead of inventing a reconstruction.
