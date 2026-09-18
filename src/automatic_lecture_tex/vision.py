@@ -59,7 +59,8 @@ def make_chunk_board_scan_request(chunk: LectureChunk) -> VisualRequest:
         question=(
             "The attached frames are evenly sampled board states from this entire lecture chunk. "
             "Transcribe the mathematically relevant board content across them literally, preserving "
-            "symbols, signs, indices, and visible changes between states. Do not infer missing steps."
+            "symbols, signs, indices, and visible changes between states. In raw_latex and latex, "
+            "separate distinct states with Frame 0:, Frame 1:, etc. Do not infer missing steps."
         ),
         priority=5,
     )
@@ -111,6 +112,8 @@ def dedupe_visual_requests(
     within_seconds: float,
     limit: int,
 ) -> list[VisualRequest]:
+    if limit <= 0:
+        return []
     ordered = sorted(requests, key=lambda r: (-r.priority, r.timestamp, r.id))
     selected: list[VisualRequest] = []
     for request in ordered:
