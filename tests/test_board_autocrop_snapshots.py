@@ -19,6 +19,7 @@ from automatic_lecture_tex.schemas import (
     ExtractedFrame,
     LectureChunk,
     LectureIR,
+    NoteBlock,
     Transcript,
     TranscriptSegment,
     VisualEvidence,
