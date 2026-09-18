@@ -5,6 +5,8 @@ from collections.abc import Iterable
 
 from .schemas import LectureChunk, Transcript, VisualRequest
 
+CHUNK_BOARD_SCAN_REASON = "chunk_board_scan"
+
 _RULES: list[tuple[re.Pattern[str], str, str, int]] = [
     (
         re.compile(r"\b(как видно|на рисунк|на картинк|на слайд|на доске)\w*", re.I),
@@ -31,6 +33,37 @@ _RULES: list[tuple[re.Pattern[str], str, str, int]] = [
         5,
     ),
 ]
+
+
+def uniform_chunk_sample_times(chunk: LectureChunk, count: int) -> list[float]:
+    """Return evenly spaced interior timestamps for a whole-chunk board scan."""
+
+    if count <= 0:
+        return []
+    duration = max(0.0, chunk.end - chunk.start)
+    if duration == 0.0:
+        return [chunk.start]
+    return [
+        chunk.start + duration * (index + 0.5) / count
+        for index in range(count)
+    ]
+
+
+def make_chunk_board_scan_request(chunk: LectureChunk) -> VisualRequest:
+    """Create one multimodal request representing the board state across the whole chunk."""
+
+    return VisualRequest(
+        id="board_scan",
+        timestamp=(chunk.start + chunk.end) / 2,
+        reason=CHUNK_BOARD_SCAN_REASON,
+        question=(
+            "The attached frames are evenly sampled board states from this entire lecture chunk. "
+            "Transcribe the mathematically relevant board content across them literally, preserving "
+            "symbols, signs, indices, and visible changes between states. In raw_latex and latex, "
+            "separate distinct states with Frame 0:, Frame 1:, etc. Do not infer missing steps."
+        ),
+        priority=5,
+    )
 
 
 def select_rule_based_visual_requests(
@@ -79,6 +112,8 @@ def dedupe_visual_requests(
     within_seconds: float,
     limit: int,
 ) -> list[VisualRequest]:
+    if limit <= 0:
+        return []
     ordered = sorted(requests, key=lambda r: (-r.priority, r.timestamp, r.id))
     selected: list[VisualRequest] = []
     for request in ordered:

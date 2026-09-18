@@ -13,9 +13,12 @@ from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
 from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence
 from .vision import (
+    CHUNK_BOARD_SCAN_REASON,
     dedupe_visual_requests,
+    make_chunk_board_scan_request,
     namespace_visual_requests,
     select_rule_based_visual_requests,
+    uniform_chunk_sample_times,
 )
 
 if TYPE_CHECKING:
@@ -92,9 +95,16 @@ def collect_visual_evidence(
     evidence rather than an invented reconstruction.
     """
 
-    requests = []
+    scan_requests = []
+    if (
+        getattr(pipeline.config.notes, "visual_chunk_board_scan", False)
+        and pipeline.config.vision.max_requests_per_chunk > 0
+    ):
+        scan_requests.append(make_chunk_board_scan_request(chunk))
+
+    local_requests = []
     if pipeline.config.notes.visual_rule_selector:
-        requests.extend(
+        local_requests.extend(
             select_rule_based_visual_requests(
                 chunk,
                 transcript,
@@ -102,13 +112,14 @@ def collect_visual_evidence(
             )
         )
     if pipeline.config.notes.visual_llm_selector:
-        requests.extend(pipeline.llm.analyze_chunk(chunk, notation).visual_requests)
-    requests = dedupe_visual_requests(
-        requests,
+        local_requests.extend(pipeline.llm.analyze_chunk(chunk, notation).visual_requests)
+
+    local_requests = dedupe_visual_requests(
+        local_requests,
         within_seconds=pipeline.config.notes.visual_dedupe_seconds,
-        limit=pipeline.config.vision.max_requests_per_chunk,
+        limit=max(0, pipeline.config.vision.max_requests_per_chunk - len(scan_requests)),
     )
-    requests = namespace_visual_requests(chunk.id, requests)
+    requests = namespace_visual_requests(chunk.id, [*scan_requests, *local_requests])
 
     started = time.perf_counter()
     ocr_backend = _math_ocr_backend(pipeline)
@@ -118,11 +129,20 @@ def collect_visual_evidence(
     ] = []
 
     for request in requests:
-        raw_times = _unique_times(
-            [request.timestamp + offset for offset in pipeline.config.vision.frame_offsets_seconds]
-        )
+        is_chunk_board_scan = request.reason == CHUNK_BOARD_SCAN_REASON
+        if is_chunk_board_scan:
+            sample_count = min(
+                pipeline.config.vision.board_uniform_samples,
+                pipeline.config.vision.board_crop_max_vlm_images,
+            )
+            raw_times = uniform_chunk_sample_times(chunk, sample_count)
+        else:
+            raw_times = _unique_times(
+                [request.timestamp + offset for offset in pipeline.config.vision.frame_offsets_seconds]
+            )
+
         temporal_times: list[float] = []
-        if pipeline.config.vision.temporal_composite_enabled:
+        if pipeline.config.vision.temporal_composite_enabled and not is_chunk_board_scan:
             temporal_times = _unique_times(
                 [
                     request.timestamp + offset
@@ -199,43 +219,78 @@ def collect_visual_evidence(
                 )
 
         raw_frames = [frames[index] for index in raw_indices]
-        raw_frames.sort(key=lambda frame: abs(frame.timestamp - request.timestamp))
-        for frame in raw_frames:
-            if len(raw_views) >= 4:
-                break
-            _append_unique(raw_views, frame)
+        if is_chunk_board_scan:
+            raw_views = raw_frames[: pipeline.config.vision.board_crop_max_vlm_images]
+        else:
+            raw_frames.sort(key=lambda frame: abs(frame.timestamp - request.timestamp))
+            for frame in raw_frames:
+                if len(raw_views) >= 4:
+                    break
+                _append_unique(raw_views, frame)
 
         if not raw_views:
-            raw_views = sorted(frames, key=lambda frame: abs(frame.timestamp - request.timestamp))[:4]
+            if is_chunk_board_scan:
+                raw_views = frames[: pipeline.config.vision.board_crop_max_vlm_images]
+            else:
+                raw_views = sorted(
+                    frames, key=lambda frame: abs(frame.timestamp - request.timestamp)
+                )[:4]
         if ocr_image is None and raw_views:
             ocr_image = raw_views[0].path
 
         board_views: list[ExtractedFrame] = []
-        if raw_views and pipeline.config.vision.board_auto_crop_enabled:
-            try:
-                crop_result = generate_board_crops(
-                    raw_views[0],
-                    frame_dir / "board_crops",
-                    pipeline.config.vision,
-                )
-                if crop_result is not None:
-                    board_views = crop_result.frames
-                    # Specialized OCR benefits from the board-only full crop as well.
-                    if board_views:
-                        ocr_image = board_views[0].path
-            except Exception as exc:
-                logger.warning(
-                    "[%s] board auto-crop failed for %s; using raw frames: %s",
-                    lecture.id,
-                    request.id,
-                    exc,
-                )
+        if is_chunk_board_scan:
+            display_frames: list[ExtractedFrame] = []
+            for index, frame in enumerate(raw_views):
+                selected = frame
+                if pipeline.config.vision.board_auto_crop_enabled:
+                    try:
+                        crop_result = generate_board_crops(
+                            frame,
+                            frame_dir / "board_crops" / f"state_{index:02d}",
+                            pipeline.config.vision,
+                        )
+                        if crop_result is not None and crop_result.frames:
+                            selected = crop_result.frames[0]
+                            board_views.append(selected)
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] board auto-crop failed for %s state %d; using raw frame: %s",
+                            lecture.id,
+                            request.id,
+                            index,
+                            exc,
+                        )
+                display_frames.append(selected)
+            display_frames = display_frames[: pipeline.config.vision.board_crop_max_vlm_images]
+            if display_frames:
+                ocr_image = display_frames[0].path
+        else:
+            if raw_views and pipeline.config.vision.board_auto_crop_enabled:
+                try:
+                    crop_result = generate_board_crops(
+                        raw_views[0],
+                        frame_dir / "board_crops",
+                        pipeline.config.vision,
+                    )
+                    if crop_result is not None:
+                        board_views = crop_result.frames
+                        # Specialized OCR benefits from the board-only full crop as well.
+                        if board_views:
+                            ocr_image = board_views[0].path
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] board auto-crop failed for %s; using raw frames: %s",
+                        lecture.id,
+                        request.id,
+                        exc,
+                    )
 
-        display_frames = _prefer_board_views(
-            raw_views,
-            board_views,
-            limit=pipeline.config.vision.board_crop_max_vlm_images,
-        )
+            display_frames = _prefer_board_views(
+                raw_views,
+                board_views,
+                limit=pipeline.config.vision.board_crop_max_vlm_images,
+            )
 
         candidates: list[MathOCRCandidate] = []
         if ocr_backend is not None and ocr_image is not None:
@@ -292,7 +347,11 @@ def collect_visual_evidence(
                 # sensor inputs for recognition, but user-facing fallbacks need surrounding context
                 # and must not accidentally crop away the other side of a formula.
                 asset_frame: ExtractedFrame | None = None
-                if board_views and visual.kind != "none":
+                if request.reason == CHUNK_BOARD_SCAN_REASON and visual.kind != "none" and frames:
+                    index = visual.best_frame_index if visual.best_frame_index is not None else 0
+                    index = max(0, min(index, len(frames) - 1))
+                    asset_frame = frames[index]
+                elif board_views and visual.kind != "none":
                     asset_frame = board_views[0]
                 elif visual.requires_figure_in_notes and frames:
                     index = visual.best_frame_index if visual.best_frame_index is not None else 0

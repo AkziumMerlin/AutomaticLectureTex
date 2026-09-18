@@ -125,11 +125,19 @@ class _FakeLLM:
     def __init__(self) -> None:
         self.first_image = None
         self.image_names = []
+        self.calls = []
 
     def resolve_visual_request(self, request, chunk, frame_paths, frame_timestamps):
-        del request, chunk, frame_timestamps
+        del chunk
         self.first_image = frame_paths[0]
         self.image_names = [path.name for path in frame_paths]
+        self.calls.append(
+            {
+                "reason": request.reason,
+                "timestamps": list(frame_timestamps),
+                "paths": list(frame_paths),
+            }
+        )
         return VisualEvidence(kind="equation", raw_latex="x=1", latex="x=1", confidence=0.9)
 
 
@@ -146,6 +154,7 @@ def test_visual_collector_sends_raw_primary_then_temporal_composite(tmp_path):
     pipeline = SimpleNamespace(
         config=SimpleNamespace(
             notes=SimpleNamespace(
+                visual_chunk_board_scan=False,
                 visual_rule_selector=True,
                 visual_llm_selector=False,
                 max_low_confidence_visual_requests=0,
@@ -193,3 +202,54 @@ def test_visual_collector_sends_raw_primary_then_temporal_composite(tmp_path):
     assert llm.first_image.name != "board_composite.jpg"
     assert llm.image_names[1] == "board_composite.jpg"
     assert llm.first_image.is_file()
+
+
+def test_visual_collector_scans_entire_chunk_in_one_vlm_call(tmp_path):
+    llm = _FakeLLM()
+    vision = VisionConfig(
+        board_uniform_samples=6,
+        board_crop_max_vlm_images=6,
+        board_auto_crop_enabled=False,
+        temporal_composite_enabled=False,
+        math_ocr=MathOCRConfig(backend="none"),
+    )
+    pipeline = SimpleNamespace(
+        config=SimpleNamespace(
+            notes=SimpleNamespace(
+                visual_chunk_board_scan=True,
+                visual_rule_selector=False,
+                visual_llm_selector=False,
+                max_low_confidence_visual_requests=0,
+                visual_dedupe_seconds=8.0,
+            ),
+            vision=vision,
+            latex=SimpleNamespace(output_dir=tmp_path / "tex"),
+        ),
+        llm=llm,
+    )
+    transcript = Transcript(lecture_id="lecture", language="ru", segments=[])
+    chunk = LectureChunk(
+        id="chunk_0000",
+        start=0,
+        end=180,
+        segment_ids=[],
+        text="",
+    )
+
+    requests, evidence, _elapsed = collect_visual_evidence(
+        pipeline,
+        SimpleNamespace(id="lecture"),
+        chunk,
+        transcript,
+        _FakeSource(),
+        tmp_path / "work",
+        tmp_path / "tex" / "figures",
+        {},
+    )
+
+    assert len(requests) == 1
+    assert requests[0].reason == "chunk_board_scan"
+    assert len(evidence) == 1
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["timestamps"] == [15.0, 45.0, 75.0, 105.0, 135.0, 165.0]
+    assert len(llm.calls[0]["paths"]) == 6

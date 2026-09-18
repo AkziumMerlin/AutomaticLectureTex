@@ -386,7 +386,7 @@ Write descriptions in language code `{self.config.output_language}`.
             prompt,
             VisualEvidence,
             images=frame_paths,
-            max_tokens=1024,
+            max_tokens=2048 if request.reason == "chunk_board_scan" else 1024,
             guided_json=False,
             operation="visual_ocr",
         )
