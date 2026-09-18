@@ -20,5 +20,5 @@ def test_functional_analysis_config_uses_pre_pr2_linear_baseline():
     assert config.llm.math_audit_min_equals == 4
     assert config.notes.linear_correction_scan_enabled is True
     assert config.vision.temporal_composite_enabled is False
-    assert config.vision.board_uniform_samples == 6
-    assert config.vision.board_crop_max_vlm_images == 6
+    assert config.vision.board_uniform_samples == 5
+    assert config.vision.board_crop_max_vlm_images == 5
