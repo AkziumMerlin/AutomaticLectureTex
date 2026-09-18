@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Literal, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from pydantic_core import ValidationError
 
 from .llm_robust import LectureModelClient as RobustLectureModelClient
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Included in linear cache identity by pipeline_robust so prompt-policy changes cannot silently reuse
 # older chunk artifacts.
-LINEAR_SOURCE_POLICY_VERSION = 4
+LINEAR_SOURCE_POLICY_VERSION = 5
 
 _FINALIZE_SOURCE_POLICY = r"""
 
@@ -61,6 +61,7 @@ SOURCE-FAITHFUL AUDIT POLICY:
   up-to-scalar, indices/quantifiers/domains, and topology/type labels.
 - Mathematical plausibility is not evidence. Preceding notes are not correction evidence.
 - If uncertain, keep. Do not rewrite for style or expand the lecture.
+- Keep verdicts should be terse. For replace/suppress, always include target_excerpt and evidence.
 """
 
 # The historical pre-PR2 prompt contained two permissions that encouraged textbook completion. The
@@ -118,25 +119,21 @@ class AuditEvidence(BaseModel):
 
 
 class SourceGroundedAuditVerdict(BaseModel):
+    """LLM-facing verdict.
+
+    Keep the schema structurally permissive enough that one malformed action cannot invalidate the
+    entire per-block audit batch. Safety-critical requirements for replace/suppress are enforced
+    independently by the host below, so a bad verdict is rejected locally while valid sibling
+    verdicts remain usable.
+    """
+
     block_index: int = Field(ge=0)
     action: Literal["keep", "replace", "suppress"]
     target_excerpt: str | None = None
     replacement_latex: str | None = None
-    reason: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     evidence: list[AuditEvidence] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_action_payload(self) -> SourceGroundedAuditVerdict:
-        if self.action == "keep":
-            return self
-        if not self.target_excerpt or len(self.target_excerpt.strip()) < 4:
-            raise ValueError("replace/suppress verdict requires a concrete target_excerpt")
-        if not self.evidence:
-            raise ValueError("replace/suppress verdict requires current-source evidence")
-        if self.action == "replace" and not (self.replacement_latex or "").strip():
-            raise ValueError("replace verdict requires replacement_latex")
-        return self
 
 
 class SourceGroundedMathAudit(BaseModel):
@@ -354,13 +351,14 @@ CURRENT visual evidence:
 DRAFT BLOCKS:
 {indexed_draft}
 
+Keep reasons under 12 words and replace/suppress reasons under 30 words.
 Write reasons in language code `{self.config.output_language}`.
 """
         try:
             audit = self._structured(
                 prompt,
                 SourceGroundedMathAudit,
-                max_tokens=2048,
+                max_tokens=max(4096, self.config.max_tokens),
                 operation="math_audit",
             )
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -413,6 +411,13 @@ Write reasons in language code `{self.config.output_language}`.
 
             if verdict.action == "replace":
                 replacement = (verdict.replacement_latex or "").strip()
+                if not replacement:
+                    logger.warning(
+                        "[%s] audit replace rejected for block %d: replacement_latex is empty",
+                        chunk.id,
+                        verdict.block_index,
+                    )
+                    continue
                 if replacement == block.latex.strip():
                     continue
                 original = block.latex
