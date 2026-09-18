@@ -114,7 +114,8 @@ every such content-changing step in `corrections`.
     assert "garbled ASR fragments" in final_prompt
     assert "[omitted-math]" in final_prompt
     assert "z_f versus y_f" in captured["math_audit"]
-    assert "Never change a lecturer statement solely" in captured["math_audit"]
+    assert "Produce exactly one keep/replace/suppress verdict" in captured["math_audit"]
+    assert "Never suppress a statement that the lecturer/current board literally states" in captured["math_audit"]
 
 
 def test_audit_evidence_must_exist_in_declared_current_source():
