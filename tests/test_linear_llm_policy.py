@@ -555,3 +555,70 @@ def test_suppress_cannot_erase_literal_lecturer_statement(monkeypatch):
     assert not any(
         item.startswith("audit-suppress:") for item in result.blocks[0].source_evidence_ids
     )
+
+
+
+def test_malformed_audit_verdict_does_not_discard_valid_sibling(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True, max_tokens=4096)
+    notes = ChunkNotes(
+        section_title="Рисс",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Вектор y_f определяется с точностью до скаляра.",
+            ),
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Второй спорный блок остаётся без надёжного evidence.",
+            ),
+        ],
+    )
+    chunk = _chunk(
+        "Вектор y_f определён однозначно. Второй фрагмент сформулирован неразборчиво."
+    )
+    seen = {}
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        seen["max_tokens"] = kwargs["max_tokens"]
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "replace",
+                        "target_excerpt": "y_f определяется с точностью до скаляра",
+                        "replacement_latex": "Вектор y_f определён однозначно.",
+                        "reason": "Источник явно утверждает однозначность.",
+                        "confidence": 0.98,
+                        "evidence": [
+                            {
+                                "source": "transcript",
+                                "quote": "Вектор y_f определён однозначно",
+                            }
+                        ],
+                    },
+                    {
+                        "block_index": 1,
+                        "action": "suppress",
+                        "target_excerpt": "Второй спорный блок",
+                        "reason": "Модель забыла приложить evidence.",
+                        "confidence": 0.90,
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=chunk,
+        evidence_json="[]",
+        previous_context=None,
+    )
+
+    assert seen["max_tokens"] == 4096
+    assert result.blocks[0].latex == "Вектор y_f определён однозначно."
+    assert not any(
+        item.startswith("audit-suppress:") for item in result.blocks[1].source_evidence_ids
+    )
