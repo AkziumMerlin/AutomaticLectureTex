@@ -68,3 +68,9 @@ def test_uniform_chunk_sample_times_use_bin_midpoints():
     chunk = LectureChunk(id="c", start=0, end=180, segment_ids=[], text="")
 
     assert uniform_chunk_sample_times(chunk, 6) == [15.0, 45.0, 75.0, 105.0, 135.0, 165.0]
+
+
+def test_dedupe_with_zero_limit_returns_no_requests():
+    requests = [VisualRequest(id="r", timestamp=10, reason="x", question="x", priority=5)]
+
+    assert dedupe_visual_requests(requests, within_seconds=5, limit=0) == []
