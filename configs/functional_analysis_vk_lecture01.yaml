@@ -87,8 +87,8 @@ vision:
   board_crop_color_distance: 0.22
   board_crop_max_luminance: 0.78
   board_crop_min_score: 0.35
-  board_crop_max_vlm_images: 6
-  board_uniform_samples: 6
+  board_crop_max_vlm_images: 5
+  board_uniform_samples: 5
 
   # If important mathematical content remains unresolved, keep the source itself in the notes.
   unresolved_board_snapshots_enabled: true
