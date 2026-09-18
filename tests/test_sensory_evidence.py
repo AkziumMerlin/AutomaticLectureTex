@@ -243,7 +243,7 @@ def test_visual_collector_scans_entire_chunk_in_one_vlm_call(tmp_path):
         transcript,
         _FakeSource(),
         tmp_path / "work",
-        tmp_path / "figures",
+        tmp_path / "tex" / "figures",
         {},
     )
 
