@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 
 from automatic_lecture_tex.board_crop import detect_board_roi, generate_board_crops
 from automatic_lecture_tex.config import LatexConfig, NotesConfig, VisionConfig
-from automatic_lecture_tex.latex import render_block
+from automatic_lecture_tex.latex import render_block, write_course_tex
 from automatic_lecture_tex.linear_visual_fallback import (
     clean_stale_architecture_artifacts,
     inject_unresolved_board_snapshots,
@@ -18,6 +18,7 @@ from automatic_lecture_tex.schemas import (
     ChunkNotes,
     ExtractedFrame,
     LectureChunk,
+    LectureIR,
     Transcript,
     TranscriptSegment,
     VisualEvidence,
@@ -76,7 +77,7 @@ def test_unresolved_math_gets_nonfloating_board_snapshot() -> None:
     notes = ChunkNotes(
         section_title="Доказательство",
         blocks=[],
-        unresolved=["Audit block 0: знак в формуле не удалось подтвердить по источнику"],
+        unresolved=["[omitted-math] знак в формуле не удалось подтвердить по источнику"],
     )
     evidence = [
         VisualEvidence(
@@ -101,6 +102,113 @@ def test_unresolved_math_gets_nonfloating_board_snapshot() -> None:
     assert r"\includegraphics" in rendered
     assert r"\begin{figure}" not in rendered
     assert r"\begin{center}" in rendered
+
+
+def test_generic_audit_text_without_block_marker_does_not_insert_photo() -> None:
+    notes = ChunkNotes(
+        section_title="Переход",
+        blocks=[],
+        unresolved=["Audit block 0: формула вызывает сомнение."],
+    )
+    evidence = [
+        VisualEvidence(
+            request_id="r",
+            kind=VisualKind.EQUATION,
+            confidence=0.95,
+            asset_path="figures/r.jpg",
+        )
+    ]
+
+    assert inject_unresolved_board_snapshots(notes, evidence, VisionConfig(), output_language="ru") == 0
+    assert notes.blocks == []
+
+
+def test_audit_issue_replaces_exact_block_at_same_position() -> None:
+    bad = NoteBlock(
+        type=BlockType.PARAGRAPH,
+        latex="Неподтверждённое утверждение.",
+        source_claim_ids=["block:block_0001_000"],
+        source_evidence_ids=["audit-issue:0.950", "audit-visual:req"],
+    )
+    tail = NoteBlock(type=BlockType.PARAGRAPH, latex="Следующий корректный абзац.")
+    notes = ChunkNotes(section_title="Рисс", blocks=[bad, tail])
+    evidence = [
+        VisualEvidence(
+            request_id="req",
+            kind=VisualKind.EQUATION,
+            confidence=0.93,
+            asset_path="figures/lecture_01/req_board.jpg",
+        )
+    ]
+
+    inserted = inject_unresolved_board_snapshots(
+        notes, evidence, VisionConfig(), output_language="ru"
+    )
+
+    assert inserted == 1
+    assert len(notes.blocks) == 2
+    assert is_board_snapshot(notes.blocks[0])
+    assert notes.blocks[0].asset_path == "figures/lecture_01/req_board.jpg"
+    assert notes.blocks[1].latex == "Следующий корректный абзац."
+
+
+def test_audit_issue_without_linked_board_is_suppressed_without_unrelated_photo() -> None:
+    notes = ChunkNotes(
+        section_title="Рисс",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Неподтверждённое утверждение.",
+                source_evidence_ids=["audit-issue:0.980"],
+            )
+        ],
+    )
+    evidence = [
+        VisualEvidence(
+            request_id="other",
+            kind=VisualKind.EQUATION,
+            confidence=0.99,
+            asset_path="figures/other.jpg",
+        )
+    ]
+
+    inserted = inject_unresolved_board_snapshots(
+        notes, evidence, VisionConfig(), output_language="ru"
+    )
+
+    assert inserted == 0
+    assert notes.blocks == []
+
+
+def test_existing_figure_prevents_duplicate_snapshot() -> None:
+    asset = "figures/lecture_01/req_board.jpg"
+    notes = ChunkNotes(
+        section_title="Рисс",
+        blocks=[
+            NoteBlock(type=BlockType.FIGURE, latex="", asset_path=asset),
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Плохой блок.",
+                source_evidence_ids=["audit-issue:0.950", "audit-visual:req"],
+            ),
+        ],
+    )
+    evidence = [
+        VisualEvidence(
+            request_id="req",
+            kind=VisualKind.EQUATION,
+            confidence=0.95,
+            asset_path=asset,
+        )
+    ]
+
+    inserted = inject_unresolved_board_snapshots(
+        notes, evidence, VisionConfig(), output_language="ru"
+    )
+
+    assert inserted == 0
+    assert len(notes.blocks) == 1
+    assert notes.blocks[0].type == BlockType.FIGURE
 
 
 def test_nonmathematical_unresolved_does_not_insert_photo() -> None:
@@ -130,6 +238,11 @@ def test_single_unmatched_double_dollar_is_closed_deterministically() -> None:
     assert normalized.startswith(r"\[")
     assert normalized.endswith(r"\]")
     assert "$$" not in normalized
+
+
+def test_orphan_sizing_command_before_non_delimiter_is_removed() -> None:
+    assert normalize_math_spans(r"$\bigl\mathbb{C}$") == r"$\mathbb{C}$"
+    assert normalize_math_spans(r"$\bigl(x\bigr)$") == r"$\bigl(x\bigr)$"
 
 
 def test_linear_hygiene_removes_retired_architecture_artifacts(tmp_path: Path) -> None:
@@ -237,4 +350,40 @@ def test_visual_collection_sends_full_context_plus_board_crops_and_keeps_asset(t
     assert any(path.name == "board_full.jpg" for path in llm.paths)
     assert sum(path.name.startswith("board_tile_") for path in llm.paths) == 3
     assert evidence[0].asset_path is not None
-    assert (output_dir / evidence[0].asset_path).exists()
+    asset = output_dir / evidence[0].asset_path
+    assert asset.exists()
+    # The persisted user-facing asset is the wide full-board ROI even though the fake VLM selected
+    # image index 2 (a narrow tile) for recognition.
+    with Image.open(asset) as image:
+        assert image.width > 700
+
+
+def test_course_writer_prunes_unreferenced_generated_assets(tmp_path: Path) -> None:
+    output_dir = tmp_path / "tex"
+    figures = output_dir / "figures" / "lecture_01"
+    figures.mkdir(parents=True)
+    keep = figures / "keep.jpg"
+    stale = figures / "stale.jpg"
+    keep.write_bytes(b"keep")
+    stale.write_bytes(b"stale")
+    ir = LectureIR(
+        lecture_id="lecture_01",
+        title="Лекция 1",
+        chunks=[
+            ChunkNotes(
+                section_title="Тема",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.FIGURE,
+                        latex="",
+                        asset_path="figures/lecture_01/keep.jpg",
+                    )
+                ],
+            )
+        ],
+    )
+
+    write_course_tex("Курс", [ir], output_dir)
+
+    assert keep.exists()
+    assert not stale.exists()
