@@ -8,7 +8,8 @@ from .schemas import BlockType, ChunkNotes, NoteBlock, VisualEvidence, VisualKin
 
 _BOARD_SNAPSHOT_PREFIX = "board-snapshot:"
 _OMITTED_MATH_PREFIX = "[omitted-math]"
-_AUDIT_ISSUE_PREFIX = "audit-issue:"
+_AUDIT_SUPPRESS_PREFIX = "audit-suppress:"
+_AUDIT_ISSUE_PREFIX = "audit-issue:"  # compatibility with pre-v6 cached artifacts
 _AUDIT_VISUAL_PREFIX = "audit-visual:"
 
 _STALE_FILES = (
@@ -30,10 +31,18 @@ def is_board_snapshot(block: NoteBlock) -> bool:
 
 def _is_high_confidence_audit_issue(block: NoteBlock) -> bool:
     for item in block.source_evidence_ids:
-        if not item.startswith(_AUDIT_ISSUE_PREFIX):
+        prefix = next(
+            (
+                candidate
+                for candidate in (_AUDIT_SUPPRESS_PREFIX, _AUDIT_ISSUE_PREFIX)
+                if item.startswith(candidate)
+            ),
+            None,
+        )
+        if prefix is None:
             continue
         try:
-            return float(item.removeprefix(_AUDIT_ISSUE_PREFIX)) >= 0.8
+            return float(item.removeprefix(prefix)) >= 0.8
         except ValueError:
             continue
     return False
