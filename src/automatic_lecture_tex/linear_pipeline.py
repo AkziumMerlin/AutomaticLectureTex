@@ -28,9 +28,9 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-# Version 4 adds host-side unresolved board snapshots and correction-cache pruning while preserving
-# the restored pre-PR2 chronological writer.
-LINEAR_PIPELINE_VERSION = 4
+# Version 5 makes board fallbacks block-linked and suppresses source-grounded unsafe blocks while
+# preserving the restored pre-PR2 chronological writer.
+LINEAR_PIPELINE_VERSION = 5
 
 
 def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
