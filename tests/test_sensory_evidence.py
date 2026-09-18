@@ -207,8 +207,8 @@ def test_visual_collector_sends_raw_primary_then_temporal_composite(tmp_path):
 def test_visual_collector_scans_entire_chunk_in_one_vlm_call(tmp_path):
     llm = _FakeLLM()
     vision = VisionConfig(
-        board_uniform_samples=6,
-        board_crop_max_vlm_images=6,
+        board_uniform_samples=5,
+        board_crop_max_vlm_images=5,
         board_auto_crop_enabled=False,
         temporal_composite_enabled=False,
         math_ocr=MathOCRConfig(backend="none"),
@@ -251,5 +251,5 @@ def test_visual_collector_scans_entire_chunk_in_one_vlm_call(tmp_path):
     assert requests[0].reason == "chunk_board_scan"
     assert len(evidence) == 1
     assert len(llm.calls) == 1
-    assert llm.calls[0]["timestamps"] == [15.0, 45.0, 75.0, 105.0, 135.0, 165.0]
-    assert len(llm.calls[0]["paths"]) == 6
+    assert llm.calls[0]["timestamps"] == [18.0, 54.0, 90.0, 126.0, 162.0]
+    assert len(llm.calls[0]["paths"]) == 5
