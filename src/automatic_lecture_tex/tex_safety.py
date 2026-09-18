@@ -68,6 +68,7 @@ _BARE_COMMAND_WORD = re.compile(rf"(?<![\\A-Za-z])({_COMMAND_NAMES})\b")
 _BARE_MATH_COMMAND = re.compile(
     rf"(\\(?:{_COMMAND_NAMES})(?:(?:\\?_\{{?[^\s,.;:)]+\}}?)|(?:\^\{{?[^\s,.;:)]+\}}?))*)"
 )
+_BARE_INDEXED_SET_OPERATOR = re.compile(r"(?<![\\A-Za-z])(?:(?:big)?(cap|cup))(?=_)")
 _SIZE_COMMAND = re.compile(r"\\(?:big|Big|bigg|Bigg)[lr]?")
 _VALID_SIZED_DELIMITER = re.compile(
     r"(?:[()\[\]|.]|\\[{}]|\\(?:langle|rangle|lvert|rvert|lVert|rVert|vert|Vert|"
@@ -102,6 +103,10 @@ def canonicalize_math_fragment(value: str) -> str:
     """Repair deterministic serialization/typography damage inside mathematical material."""
 
     result = _drop_orphan_sizing_commands(normalize_math_unicode(value))
+    result = _BARE_INDEXED_SET_OPERATOR.sub(
+        lambda match: r"\big" + match.group(1),
+        result,
+    )
     for source, replacement in _MATH_ONLY_UNICODE.items():
         result = result.replace(source, replacement)
     result = _BAD_TAB_COMMAND.sub(lambda match: "\\" + match.group(1), result)
