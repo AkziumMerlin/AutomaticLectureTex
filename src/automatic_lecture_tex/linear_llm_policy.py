@@ -49,22 +49,18 @@ STRICT SOURCE-FAITHFULNESS POLICY FOR THE LINEAR LECTURE PIPELINE:
 _AUDIT_SOURCE_POLICY = r"""
 
 SOURCE-FAITHFUL AUDIT POLICY:
-- This is a source-fidelity checker, not a second mathematical author and not a textbook solver.
-- First compare each retained draft block literally with the CURRENT transcript and visual evidence.
-- Check exact signs, constants, variable names, indices, quantifiers, domains/codomains, and object
-  identity. Explicitly check distinctions such as z_f versus y_f and unique versus up-to-scalar.
-- A correction MUST cite one or more verbatim source excerpts in `evidence`. Each excerpt must be
-  copied from the current transcript or current visual evidence. Do not cite preceding notes,
-  textbook knowledge, or your own derivation as evidence.
-- Mathematical consistency may help detect a likely draft error, but mathematical plausibility is
-  not evidence. Never change a lecturer statement solely because a standard theorem says otherwise.
-- A short algebraic correction is allowed only when it is directly forced by the cited local source
-  formulas. Do not introduce a new construction, theorem, assumption, sequence, or multi-step proof.
-- If a retained block appears to misrepresent the source but no source-backed replacement is safe,
-  return an `issue` for that block instead of a correction.
-- Do NOT report raw ASR garbage, filler, false starts, or unrelated source ambiguities. An issue must
-  concern an existing retained draft block and materially affect what the notes say.
-- Do not rewrite for style and do not expand the lecture.
+- Produce exactly one keep/replace/suppress verdict for every retained draft block.
+- Every replace/suppress verdict must identify its exact block with a verbatim target_excerpt copied
+  from that block, and must cite verbatim CURRENT transcript/visual evidence.
+- Never use a target_excerpt from one block to justify an action on another block.
+- Use suppress only for writer-added source drift when no complete source-backed replacement is safe.
+- Never suppress a statement that the lecturer/current board literally states merely because a
+  textbook theorem disagrees with it.
+- Use replace only when the complete replacement is directly forced by cited current evidence.
+- Check exact signs, constants, object identity (especially z_f versus y_f), uniqueness versus
+  up-to-scalar, indices/quantifiers/domains, and topology/type labels.
+- Mathematical plausibility is not evidence. Preceding notes are not correction evidence.
+- If uncertain, keep. Do not rewrite for style or expand the lecture.
 """
 
 # The historical pre-PR2 prompt contained two permissions that encouraged textbook completion. The
@@ -313,11 +309,6 @@ class LectureModelClient(RobustLectureModelClient):
         if not self.config.math_audit or not notes.blocks:
             return notes
 
-        draft = json.dumps(
-            [block.model_dump(mode="json") for block in notes.blocks],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
         indexed_draft = "\n\n".join(
             f"BLOCK_INDEX={index}\n"
             + json.dumps(block.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
