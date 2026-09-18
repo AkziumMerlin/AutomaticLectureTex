@@ -68,6 +68,11 @@ _BARE_COMMAND_WORD = re.compile(rf"(?<![\\A-Za-z])({_COMMAND_NAMES})\b")
 _BARE_MATH_COMMAND = re.compile(
     rf"(\\(?:{_COMMAND_NAMES})(?:(?:\\?_\{{?[^\s,.;:)]+\}}?)|(?:\^\{{?[^\s,.;:)]+\}}?))*)"
 )
+_SIZE_COMMAND = re.compile(r"\\(?:big|Big|bigg|Bigg)[lr]?")
+_VALID_SIZED_DELIMITER = re.compile(
+    r"(?:[()\[\]|.]|\\[{}]|\\(?:langle|rangle|lvert|rvert|lVert|rVert|vert|Vert|"
+    r"lfloor|rfloor|lceil|rceil)\b)"
+)
 
 
 def strip_control_chars(value: str) -> str:
@@ -83,10 +88,20 @@ def normalize_math_unicode(value: str) -> str:
     return result
 
 
+def _drop_orphan_sizing_commands(value: str) -> str:
+    """Drop \bigl/\bigr-style commands when no TeX delimiter follows them."""
+
+    def replace(match: re.Match[str]) -> str:
+        tail = match.string[match.end() :]
+        return match.group(0) if _VALID_SIZED_DELIMITER.match(tail) else ""
+
+    return _SIZE_COMMAND.sub(replace, value)
+
+
 def canonicalize_math_fragment(value: str) -> str:
     """Repair deterministic serialization/typography damage inside mathematical material."""
 
-    result = normalize_math_unicode(value)
+    result = _drop_orphan_sizing_commands(normalize_math_unicode(value))
     for source, replacement in _MATH_ONLY_UNICODE.items():
         result = result.replace(source, replacement)
     result = _BAD_TAB_COMMAND.sub(lambda match: "\\" + match.group(1), result)
