@@ -12,9 +12,13 @@ def test_functional_analysis_config_uses_pre_pr2_linear_baseline():
     assert "функциональный анализ" in config.asr.hotwords
     assert "слабая сходимость" in config.asr.hotwords
     assert config.notes.chunk_target_seconds == 180
+    assert config.notes.visual_chunk_board_scan is True
     assert config.notes.visual_rule_selector is True
     assert config.notes.visual_llm_selector is False
+    assert config.notes.max_low_confidence_visual_requests == 0
     assert config.llm.math_audit is True
     assert config.llm.math_audit_min_equals == 4
     assert config.notes.linear_correction_scan_enabled is True
     assert config.vision.temporal_composite_enabled is False
+    assert config.vision.board_uniform_samples == 6
+    assert config.vision.board_crop_max_vlm_images == 6
