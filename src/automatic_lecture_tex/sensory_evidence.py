@@ -97,7 +97,7 @@ def collect_visual_evidence(
 
     scan_requests = []
     if (
-        pipeline.config.notes.visual_chunk_board_scan
+        getattr(pipeline.config.notes, "visual_chunk_board_scan", False)
         and pipeline.config.vision.max_requests_per_chunk > 0
     ):
         scan_requests.append(make_chunk_board_scan_request(chunk))
