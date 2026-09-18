@@ -112,6 +112,7 @@ every such content-changing step in `corrections`.
     assert "make any further correction or inference" not in final_prompt
     assert "Do NOT invent or complete a multi-step derivation" in final_prompt
     assert "garbled ASR fragments" in final_prompt
+    assert "[omitted-math]" in final_prompt
     assert "z_f versus y_f" in captured["math_audit"]
     assert "Never change a lecturer statement solely" in captured["math_audit"]
 
@@ -282,3 +283,61 @@ def test_policy_version_is_in_linear_chunk_cache_identity(monkeypatch):
         "media_source": {"url": "lecture"},
         "linear_source_policy_version": LINEAR_SOURCE_POLICY_VERSION,
     }
+
+
+def test_high_confidence_source_grounded_issue_marks_exact_block(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Рисс",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Представляющий вектор y_f определяется с точностью до скаляра.",
+            )
+        ],
+    )
+    chunk = _chunk("y_f определён однозначно.")
+    evidence_json = json.dumps(
+        [
+            {
+                "request_id": "req_riesz",
+                "raw_latex": "y_f — единственный представляющий вектор",
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        return schema.model_validate(
+            {
+                "corrections": [],
+                "issues": [
+                    {
+                        "block_index": 0,
+                        "reason": "Блок неверно передаёт свойство y_f.",
+                        "confidence": 0.96,
+                        "evidence": [
+                            {
+                                "source": "visual",
+                                "quote": "y_f — единственный представляющий вектор",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=chunk,
+        evidence_json=evidence_json,
+        previous_context=None,
+    )
+
+    assert any(
+        item.startswith("audit-issue:") for item in result.blocks[0].source_evidence_ids
+    )
+    assert "audit-visual:req_riesz" in result.blocks[0].source_evidence_ids
+    assert any("Audit block 0" in item for item in result.unresolved)

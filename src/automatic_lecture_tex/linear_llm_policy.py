@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Included in linear cache identity by pipeline_robust so prompt-policy changes cannot silently reuse
 # older chunk artifacts.
-LINEAR_SOURCE_POLICY_VERSION = 2
+LINEAR_SOURCE_POLICY_VERSION = 3
 
 _FINALIZE_SOURCE_POLICY = r"""
 
@@ -40,8 +40,10 @@ STRICT SOURCE-FAITHFULNESS POLICY FOR THE LINEAR LECTURE PIPELINE:
 - `unresolved` is only for ambiguities that materially affect a retained note block or force omission
   of unique substantive mathematical content. Ignore filler, false starts, repetitions, and isolated
   garbled ASR fragments that do not carry recoverable mathematical content.
-- If a faithful statement cannot be reconstructed from current evidence, put that material ambiguity
-  in unresolved and OMIT the unsupported claim from note blocks.
+- If a faithful statement cannot be reconstructed from current evidence, OMIT the unsupported claim
+  from note blocks. Only when this omission loses unique substantive mathematical content, add one
+  unresolved entry prefixed exactly with `[omitted-math] `. Never use that marker for filler, names,
+  historical remarks, generic ASR noise, or an ambiguity that did not force mathematical omission.
 """
 
 _AUDIT_SOURCE_POLICY = r"""
@@ -131,6 +133,7 @@ class SourceGroundedAuditIssue(BaseModel):
     block_index: int = Field(ge=0)
     reason: str
     confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[AuditEvidence] = Field(default_factory=list)
 
 
 class SourceGroundedMathAudit(BaseModel):
@@ -192,6 +195,36 @@ def audit_evidence_supported(
         if quote not in haystack:
             return False
     return True
+
+
+def _visual_request_ids_for_evidence(
+    evidence: list[AuditEvidence], *, evidence_json: str
+) -> list[str]:
+    """Map verified visual quotes back to the concrete current visual request ids."""
+
+    try:
+        payload = json.loads(evidence_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    result: list[str] = []
+    for cited in evidence:
+        if cited.source != "visual":
+            continue
+        quote = _normalize_quote(cited.quote)
+        for item in payload if isinstance(payload, list) else []:
+            if not isinstance(item, dict):
+                continue
+            request_id = item.get("request_id")
+            if not isinstance(request_id, str) or not request_id:
+                continue
+            text = "\n".join(
+                value
+                for key in ("raw_latex", "latex", "description")
+                if isinstance((value := item.get(key)), str) and value.strip()
+            )
+            if quote and quote in _normalize_quote(text) and request_id not in result:
+                result.append(request_id)
+    return result
 
 
 def _basis_from_evidence(evidence: list[AuditEvidence]) -> str:
@@ -265,8 +298,10 @@ For a concrete source-backed error in a retained block, return a correction with
   cannot be found literally in the declared source.
 
 Return at most four corrections. If a retained block materially misrepresents the current source but
-there is no safe source-backed replacement, return an issue for that block instead. Return at most
-three issues. Do not report raw ASR garbage, filler, false starts, or ambiguities that did not affect
+there is no safe source-backed replacement, return an issue for that block instead. Every issue must
+also carry one or more verbatim current-source `evidence` citations using the same format as a
+correction. Return at most three issues. Do not report raw ASR garbage, filler, false starts, or
+ambiguities that did not affect
 an existing retained block. Do not rewrite correct blocks for style.
 
 Preceding context is continuity context only, not evidence for a correction:
@@ -328,6 +363,25 @@ Write reasons in language code `{self.config.output_language}`.
         for issue in audit.issues:
             if issue.block_index >= len(notes.blocks) or issue.confidence < 0.6:
                 continue
+            if issue.confidence >= 0.8:
+                if not audit_evidence_supported(
+                    issue.evidence, chunk=chunk, evidence_json=evidence_json
+                ):
+                    audit_findings.append(
+                        f"Audit block {issue.block_index}: source support not verified; "
+                        f"block retained: {issue.reason}"
+                    )
+                    continue
+                block = notes.blocks[issue.block_index]
+                marker = f"audit-issue:{issue.confidence:.3f}"
+                if marker not in block.source_evidence_ids:
+                    block.source_evidence_ids.append(marker)
+                for request_id in _visual_request_ids_for_evidence(
+                    issue.evidence, evidence_json=evidence_json
+                ):
+                    visual_marker = f"audit-visual:{request_id}"
+                    if visual_marker not in block.source_evidence_ids:
+                        block.source_evidence_ids.append(visual_marker)
             audit_findings.append(f"Audit block {issue.block_index}: {issue.reason}")
 
         # Keep audit diagnostics small and block-linked. They remain in the audit sidecar through

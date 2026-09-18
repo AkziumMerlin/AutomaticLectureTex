@@ -288,18 +288,12 @@ def collect_visual_evidence(
                     )
                 visual.math_ocr_candidates = candidates
 
-                # Preserve a readable board crop for both ordinary figure requests and unresolved
-                # fallbacks. Prefer the VLM-selected crop when it selected one; otherwise keep the
-                # full board ROI. Raw frames remain the fallback for non-board diagrams/slides.
+                # Persist the wide full-board ROI, never a narrow VLM tile. Tiles remain useful
+                # sensor inputs for recognition, but user-facing fallbacks need surrounding context
+                # and must not accidentally crop away the other side of a formula.
                 asset_frame: ExtractedFrame | None = None
                 if board_views and visual.kind != "none":
-                    index = visual.best_frame_index if visual.best_frame_index is not None else 0
-                    index = max(0, min(index, len(frames) - 1)) if frames else 0
-                    selected = frames[index] if frames else None
-                    if selected is not None and any(selected.path == item.path for item in board_views):
-                        asset_frame = selected
-                    else:
-                        asset_frame = board_views[0]
+                    asset_frame = board_views[0]
                 elif visual.requires_figure_in_notes and frames:
                     index = visual.best_frame_index if visual.best_frame_index is not None else 0
                     index = max(0, min(index, len(frames) - 1))
