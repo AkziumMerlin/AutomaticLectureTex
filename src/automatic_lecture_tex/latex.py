@@ -120,6 +120,29 @@ def render_lecture(ir: LectureIR) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _prune_unreferenced_figure_assets(ir: LectureIR, output_dir: Path) -> None:
+    """Keep only generated figure assets referenced by the current lecture IR."""
+
+    figures_root = output_dir / "figures" / ir.lecture_id
+    if not figures_root.is_dir():
+        return
+    referenced = {
+        (output_dir / block.asset_path).resolve()
+        for chunk in ir.chunks
+        for block in chunk.blocks
+        if block.asset_path
+    }
+    for path in figures_root.rglob("*"):
+        if path.is_file() and path.resolve() not in referenced:
+            path.unlink()
+    directories = [path for path in figures_root.rglob("*") if path.is_dir()]
+    for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
 def _audit_payload(ir: LectureIR) -> dict:
     return {
         "lecture_id": ir.lecture_id,
@@ -170,6 +193,7 @@ def write_course_tex(course_title: str, lectures: list[LectureIR], output_dir: P
     audit_dir.mkdir(parents=True, exist_ok=True)
     includes: list[str] = []
     for ir in lectures:
+        _prune_unreferenced_figure_assets(ir, output_dir)
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", ir.lecture_id)
         path = lectures_dir / f"{safe}.tex"
         path.write_text(render_lecture(ir), encoding="utf-8")
