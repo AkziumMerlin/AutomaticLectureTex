@@ -4,9 +4,11 @@ import base64
 import json
 import logging
 import mimetypes
+import re
 from pathlib import Path
 from typing import TypeVar
 
+from openai import BadRequestError
 from pydantic import BaseModel
 from pydantic_core import ValidationError
 
@@ -16,6 +18,40 @@ from .util import strip_thinking_and_fences
 
 T = TypeVar("T", bound=BaseModel)
 logger = logging.getLogger(__name__)
+
+
+_MAX_CONTEXT_RE = re.compile(
+    r"maximum context length is\s+(\d+)\s+tokens",
+    re.IGNORECASE,
+)
+_INPUT_TOKENS_RE = re.compile(
+    r"prompt contains at least\s+(\d+)\s+input tokens",
+    re.IGNORECASE,
+)
+_INPUT_VALUE_RE = re.compile(
+    r"parameter=input_tokens,\s*value=(\d+)",
+    re.IGNORECASE,
+)
+_CONTEXT_RETRY_RESERVE_TOKENS = 512
+
+
+def _context_overflow_output_ceiling(
+    error: Exception,
+    *,
+    reserve_tokens: int = _CONTEXT_RETRY_RESERVE_TOKENS,
+) -> int | None:
+    """Extract a safe completion budget from a vLLM/OpenAI-style context-overflow 400."""
+
+    message = str(error)
+    context_match = _MAX_CONTEXT_RE.search(message)
+    input_match = _INPUT_TOKENS_RE.search(message) or _INPUT_VALUE_RE.search(message)
+    if context_match is None or input_match is None:
+        return None
+
+    context_tokens = int(context_match.group(1))
+    input_tokens = int(input_match.group(1))
+    budget = context_tokens - input_tokens - reserve_tokens
+    return budget if budget > 0 else None
 
 
 def _json_structure_incomplete(raw: str) -> bool:
@@ -119,6 +155,7 @@ class LectureModelClient(BaseLectureModelClient):
         parse_error: json.JSONDecodeError | ValidationError | None = None
         previous_truncated = False
         previous_guided_failure = False
+        context_output_ceiling: int | None = None
 
         for attempt in range(self.config.max_retries + 1):
             if attempt and parse_error is not None:
@@ -149,7 +186,30 @@ class LectureModelClient(BaseLectureModelClient):
             }
             if use_guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)
-            response = self.client.chat.completions.create(**request_kwargs)
+
+            while True:
+                request_kwargs["max_tokens"] = current_max_tokens
+                try:
+                    response = self.client.chat.completions.create(**request_kwargs)
+                    break
+                except BadRequestError as exc:
+                    safe_ceiling = _context_overflow_output_ceiling(exc)
+                    if safe_ceiling is None or safe_ceiling >= current_max_tokens:
+                        raise
+                    context_output_ceiling = (
+                        safe_ceiling
+                        if context_output_ceiling is None
+                        else min(context_output_ceiling, safe_ceiling)
+                    )
+                    logger.warning(
+                        "[%s] requested max_tokens=%d exceeds backend context budget; "
+                        "retrying same request with max_tokens=%d",
+                        operation,
+                        current_max_tokens,
+                        context_output_ceiling,
+                    )
+                    current_max_tokens = context_output_ceiling
+
             self._record_usage(operation, response)
 
             choice = response.choices[0]
@@ -199,8 +259,13 @@ class LectureModelClient(BaseLectureModelClient):
                         operation,
                     )
                     use_guided_json = False
-                if truncated and current_max_tokens < max_retry_tokens:
-                    next_max_tokens = min(max_retry_tokens, current_max_tokens * 2)
+                retry_ceiling = (
+                    min(max_retry_tokens, context_output_ceiling)
+                    if context_output_ceiling is not None
+                    else max_retry_tokens
+                )
+                if truncated and current_max_tokens < retry_ceiling:
+                    next_max_tokens = min(retry_ceiling, current_max_tokens * 2)
                     logger.warning(
                         "[%s] retrying structurally incomplete output with max_tokens=%d",
                         operation,

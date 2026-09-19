@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from automatic_lecture_tex.config import NotesConfig
 from automatic_lecture_tex.episode_synthesis_resilient import (
@@ -295,3 +295,83 @@ def test_renderer_preserves_math_in_titles_and_does_not_double_wrap_prose_equati
     assert r"[Критерий $\tau_{weak}$]" in tex
     assert "\x7f" not in tex
     assert r"$x \in  X$" in tex
+
+
+
+def test_context_overflow_parser_uses_backend_reported_budget():
+    from automatic_lecture_tex.llm_robust import _context_overflow_output_ceiling
+
+    error = RuntimeError(
+        "This model's maximum context length is 20000 tokens. However, you requested 16384 "
+        "output tokens and your prompt contains at least 3617 input tokens, for a total of at "
+        "least 20001 tokens. (parameter=input_tokens, value=3617)"
+    )
+
+    assert _context_overflow_output_ceiling(error) == 15871
+
+
+def test_structured_retry_recovers_from_vllm_context_overflow(monkeypatch):
+    from automatic_lecture_tex import llm_robust
+
+    class Payload(BaseModel):
+        value: int
+
+    class FakeBadRequest(Exception):
+        pass
+
+    class FakeCompletions:
+        def __init__(self):
+            self.max_tokens_seen = []
+
+        def create(self, **kwargs):
+            budget = kwargs["max_tokens"]
+            self.max_tokens_seen.append(budget)
+            if budget == 16384:
+                raise FakeBadRequest(
+                    "This model's maximum context length is 20000 tokens. However, you requested "
+                    "16384 output tokens and your prompt contains at least 3617 input tokens, "
+                    "for a total of at least 20001 tokens. "
+                    "(parameter=input_tokens, value=3617)"
+                )
+            if budget in {4096, 8192}:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"value":'),
+                            finish_reason="length",
+                        )
+                    ],
+                    usage=SimpleNamespace(completion_tokens=budget),
+                )
+            assert budget == 15871
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"value":7}'),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(completion_tokens=8),
+            )
+
+    fake_completions = FakeCompletions()
+    client = object.__new__(llm_robust.LectureModelClient)
+    client.config = SimpleNamespace(
+        model="test",
+        temperature=0.0,
+        max_tokens=4096,
+        max_retries=2,
+    )
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=fake_completions)
+    )
+    client._extra_body = lambda: {}
+    client._response_format = lambda schema: {"type": "json_object"}
+    client._record_usage = lambda operation, response: None
+
+    monkeypatch.setattr(llm_robust, "BadRequestError", FakeBadRequest)
+
+    result = client._structured("prompt", Payload, operation="math_audit")
+
+    assert result.value == 7
+    assert fake_completions.max_tokens_seen == [4096, 8192, 16384, 15871]
