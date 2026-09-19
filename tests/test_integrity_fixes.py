@@ -298,19 +298,19 @@ def test_renderer_preserves_math_in_titles_and_does_not_double_wrap_prose_equati
 
 
 
-def test_context_overflow_parser_uses_backend_reported_budget():
-    from automatic_lecture_tex.llm_robust import _context_overflow_output_ceiling
+def test_context_overflow_detection_does_not_treat_lower_bound_as_exact():
+    from automatic_lecture_tex.llm_robust import _is_context_overflow_error
 
     error = RuntimeError(
-        "This model's maximum context length is 20000 tokens. However, you requested 16384 "
-        "output tokens and your prompt contains at least 3617 input tokens, for a total of at "
-        "least 20001 tokens. (parameter=input_tokens, value=3617)"
+        "This model's maximum context length is 20000 tokens. However, you requested 505 "
+        "output tokens and your prompt contains at least 19496 input tokens, for a total of at "
+        "least 20001 tokens. (parameter=input_tokens, value=19496)"
     )
 
-    assert _context_overflow_output_ceiling(error) == 15871
+    assert _is_context_overflow_error(error) is True
 
 
-def test_structured_retry_recovers_from_vllm_context_overflow(monkeypatch):
+def test_structured_retry_halves_first_overflow_instead_of_using_reported_lower_bound(monkeypatch):
     from automatic_lecture_tex import llm_robust
 
     class Payload(BaseModel):
@@ -326,24 +326,14 @@ def test_structured_retry_recovers_from_vllm_context_overflow(monkeypatch):
         def create(self, **kwargs):
             budget = kwargs["max_tokens"]
             self.max_tokens_seen.append(budget)
-            if budget == 16384:
+            if budget == 4096:
                 raise FakeBadRequest(
                     "This model's maximum context length is 20000 tokens. However, you requested "
-                    "16384 output tokens and your prompt contains at least 3617 input tokens, "
+                    "4096 output tokens and your prompt contains at least 15905 input tokens, "
                     "for a total of at least 20001 tokens. "
-                    "(parameter=input_tokens, value=3617)"
+                    "(parameter=input_tokens, value=15905)"
                 )
-            if budget in {4096, 8192}:
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content='{"value":'),
-                            finish_reason="length",
-                        )
-                    ],
-                    usage=SimpleNamespace(completion_tokens=budget),
-                )
-            assert budget == 15871
+            assert budget == 2048
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
@@ -362,9 +352,7 @@ def test_structured_retry_recovers_from_vllm_context_overflow(monkeypatch):
         max_tokens=4096,
         max_retries=2,
     )
-    client.client = SimpleNamespace(
-        chat=SimpleNamespace(completions=fake_completions)
-    )
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     client._extra_body = lambda: {}
     client._response_format = lambda schema: {"type": "json_object"}
     client._record_usage = lambda operation, response: None
@@ -374,4 +362,5 @@ def test_structured_retry_recovers_from_vllm_context_overflow(monkeypatch):
     result = client._structured("prompt", Payload, operation="math_audit")
 
     assert result.value == 7
-    assert fake_completions.max_tokens_seen == [4096, 8192, 16384, 15871]
+    assert fake_completions.max_tokens_seen == [4096, 2048]
+
