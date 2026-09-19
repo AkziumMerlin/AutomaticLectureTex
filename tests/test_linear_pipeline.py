@@ -345,8 +345,10 @@ def test_global_editor_uses_compact_structure_plus_bounded_full_text_batches():
     assert operations[0] == "global_lecture_structure"
     assert operations.count("global_lecture_math_batch") >= 2
     structure_prompt = llm.calls[0][1]
-    assert "UNIQUE_A_TAIL" not in structure_prompt
+    assert "A" * 100 not in structure_prompt
+    assert "B" * 100 not in structure_prompt
+    assert "D" * 100 not in structure_prompt
     for operation, prompt, _ in llm.calls[1:]:
         assert operation == "global_lecture_math_batch"
         # A batch sees the compact whole-lecture catalog plus only a bounded subset at full length.
-        assert sum(marker in prompt for marker in ["UNIQUE_A_TAIL", "UNIQUE_B_TAIL", "UNIQUE_D_TAIL"]) <= 2
+        assert sum(marker in prompt for marker in ["A" * 100, "B" * 100, "D" * 100]) <= 1
