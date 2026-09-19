@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_CONTEXT_RE = re.compile(
-    r"maximum context length is\\s+(\\d+)\\s+tokens",
+    r"maximum context length is\s+(\d+)\s+tokens",
     re.IGNORECASE,
 )
 
