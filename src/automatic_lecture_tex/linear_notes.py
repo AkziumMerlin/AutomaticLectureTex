@@ -257,6 +257,7 @@ def _global_draft_payload(ir: LectureIR) -> list[dict]:
                 "start": chunk.start,
                 "end": chunk.end,
                 "section_title": chunk.section_title,
+                "unresolved": list(chunk.unresolved),
                 "blocks": [
                     {
                         "id": block_id(block),
@@ -322,6 +323,8 @@ GLOBAL CHECKS:
 - Check object identity across the whole lecture (for example auxiliary vectors versus unique
   representing vectors).
 - Check that a statement is not contradicted later without being corrected.
+- Treat per-chunk unresolved items as warnings about uncertain reconstruction; do not convert them
+  into confident new claims unless the rest of the lecture resolves the ambiguity.
 - Remove duplicated proofs/definitions created by overlapping local reconstruction.
 - Preserve useful derivations and examples; do not over-compress the lecture into a summary.
 - Titles must be clean human-readable section titles, not raw TeX fragments.
