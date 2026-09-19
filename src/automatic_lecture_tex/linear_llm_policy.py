@@ -17,51 +17,51 @@ logger = logging.getLogger(__name__)
 
 # Included in linear cache identity by pipeline_robust so prompt-policy changes cannot silently reuse
 # older chunk artifacts.
-LINEAR_SOURCE_POLICY_VERSION = 5
+LINEAR_SOURCE_POLICY_VERSION = 6
 
 _FINALIZE_SOURCE_POLICY = r"""
 
-STRICT SOURCE-FAITHFULNESS POLICY FOR THE LINEAR LECTURE PIPELINE:
-- The current transcript and current visual evidence are the only evidence for NEW mathematical
-  content in this chunk. Known notation and preceding notes are continuity context, not evidence for
-  adding a theorem, construction, assumption, example, or proof step.
-- You may repair an ASR/OCR error only when the corrected reading is locally forced by the current
+STRICT MULTIMODAL SOURCE-FIDELITY POLICY FOR THE LINEAR LECTURE PIPELINE:
+- The current ASR transcript and attached current board frames are synchronized noisy observations.
+  Neither is ground truth by itself. Reconstruct NEW mathematical content from their agreement,
+  temporal development, and locally forced cross-channel consistency.
+- Known notation and preceding notes are continuity context, not evidence for adding a theorem,
+  construction, assumption, example, proof step, or named result.
+- You may repair an ASR/OCR error only when the intended reading is locally forced by the current
   speech/board evidence, or when established notation makes the intended symbol unambiguous.
-- You may perform only an immediate local algebraic normalization that is directly forced by an
-  explicitly spoken/written formula. Do NOT invent or complete a multi-step derivation.
-- In particular, do NOT introduce a new sequence, vector construction, auxiliary object, theorem,
-  standard argument, proof strategy, or textbook completion that is absent from the current source.
-- Mathematical plausibility is not evidence. If the lecturer and board consistently state something
-  mathematically suspicious, preserve what the lecture says and put the concern in unresolved rather
-  than silently replacing it with the textbook result. A later explicit lecturer correction is
-  handled by the separate correction pass.
-- Preserve exact source roles and notation: signs, constants, indices, quantifiers, and which object
-  has which property (for example z_f versus y_f, uniqueness versus up-to-scalar).
-- `unresolved` is only for ambiguities that materially affect a retained note block or force omission
-  of unique substantive mathematical content. Ignore filler, false starts, repetitions, and isolated
-  garbled ASR fragments that do not carry recoverable mathematical content.
-- If a faithful statement cannot be reconstructed from current evidence, OMIT the unsupported claim
-  from note blocks. Only when this omission loses unique substantive mathematical content, add one
-  unresolved entry prefixed exactly with `[omitted-math] `. Never use that marker for filler, names,
-  historical remarks, generic ASR noise, or an ambiguity that did not force mathematical omission.
+- Never guess the name of a theorem, person, or named construction from mathematical plausibility.
+  If the identity itself is not recoverable, omit the name and use a source-supported descriptive
+  formulation instead.
+- You may perform only immediate local algebraic normalization directly forced by current evidence.
+  Do NOT invent or complete a multi-step derivation, proof strategy, or textbook completion.
+- If the lecturer and board consistently state something mathematically suspicious, preserve what
+  the lecture says and put the concern in unresolved rather than replacing it with textbook truth.
+- Preserve signs, constants, indices, quantifiers, object roles, and uniqueness/up-to-scalar claims.
+- Ignore filler, false starts, repetitions, and isolated garbled ASR fragments that do not carry
+  recoverable mathematical content.
+- If a faithful statement cannot be reconstructed from the synchronized observations, OMIT it from
+  note blocks. Only when this loses unique substantive mathematical content, add one unresolved entry
+  prefixed exactly with `[omitted-math] `.
 """
 
 _AUDIT_SOURCE_POLICY = r"""
 
-SOURCE-FAITHFUL AUDIT POLICY:
+MULTIMODAL VERIFIER POLICY:
 - Produce exactly one keep/replace/suppress verdict for every retained draft block.
-- Every replace/suppress verdict must identify its exact block with a verbatim target_excerpt copied
-  from that block, and must cite verbatim CURRENT transcript/visual evidence.
-- Never use a target_excerpt from one block to justify an action on another block.
-- Use suppress only for writer-added source drift when no complete source-backed replacement is safe.
-- Never suppress a statement that the lecturer/current board literally states merely because a
-  textbook theorem disagrees with it.
-- Use replace only when the complete replacement is directly forced by cited current evidence.
-- Check exact signs, constants, object identity (especially z_f versus y_f), uniqueness versus
-  up-to-scalar, indices/quantifiers/domains, and topology/type labels.
-- Mathematical plausibility is not evidence. Preceding notes are not correction evidence.
+- The transcript is noisy ASR, not authoritative text. Attached board images are an independent
+  synchronized source. Judge fidelity from the pair, not from ASR alone.
+- Every replace/suppress verdict must identify its exact block with a verbatim target_excerpt.
+- Set support to transcript, visual, combined, or uncertain. Transcript support must cite verbatim
+  transcript evidence. Visual support may rely directly on attached images because no intermediate
+  OCR is required. Combined support may use both.
+- Never guess a theorem/person/name from topic knowledge. If a draft inserted a name that is not
+  recoverable from the observations, prefer a source-supported descriptive replacement or suppress
+  only the unsupported name/claim.
+- Use replace only when the complete replacement is directly supported by current observations.
+  Use suppress for writer-added source drift when no safe complete replacement is available.
+- Mathematical plausibility and textbook knowledge are not evidence. Preceding notes are not
+  correction evidence.
 - If uncertain, keep. Do not rewrite for style or expand the lecture.
-- Keep verdicts should be terse. For replace/suppress, always include target_excerpt and evidence.
 """
 
 # The historical pre-PR2 prompt contained two permissions that encouraged textbook completion. The
@@ -133,6 +133,7 @@ class SourceGroundedAuditVerdict(BaseModel):
     replacement_latex: str | None = None
     reason: str = ""
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    support: Literal["transcript", "visual", "combined", "uncertain"] = "uncertain"
     evidence: list[AuditEvidence] = Field(default_factory=list)
 
 
@@ -253,13 +254,43 @@ def _target_excerpt_is_literal_source(
     return excerpt in transcript or excerpt in visual
 
 
-def _basis_from_evidence(evidence: list[AuditEvidence]) -> str:
-    sources = {item.source for item in evidence}
+def _effective_support(verdict: SourceGroundedAuditVerdict) -> str:
+    if verdict.support != "uncertain":
+        return verdict.support
+    sources = {item.source for item in verdict.evidence}
     if sources == {"visual"}:
         return "visual"
     if sources == {"transcript"}:
+        return "transcript"
+    if sources == {"visual", "transcript"}:
+        return "combined"
+    return "uncertain"
+
+
+def _basis_from_verdict(verdict: SourceGroundedAuditVerdict) -> str:
+    support = _effective_support(verdict)
+    if support == "visual":
+        return "visual"
+    if support == "transcript":
         return "audio_context"
+    if support == "combined":
+        return "multimodal"
     return "mathematical_consistency"
+
+
+def _board_scan_request_ids(evidence_json: str) -> list[str]:
+    try:
+        payload = json.loads(evidence_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    result: list[str] = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict) or item.get("kind") != "board_scan":
+            continue
+        request_id = item.get("request_id")
+        if isinstance(request_id, str) and request_id and request_id not in result:
+            result.append(request_id)
+    return result
 
 
 class LectureModelClient(RobustLectureModelClient):
@@ -302,6 +333,7 @@ class LectureModelClient(RobustLectureModelClient):
         chunk: LectureChunk,
         evidence_json: str,
         previous_context: dict | None,
+        images: list[Path] | None = None,
     ) -> ChunkNotes:
         if not self.config.math_audit or not notes.blocks:
             return notes
@@ -311,41 +343,38 @@ class LectureModelClient(RobustLectureModelClient):
             + json.dumps(block.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
             for index, block in enumerate(notes.blocks)
         )
-        prompt = f"""Check every retained lecture-note block only for fidelity to the supplied CURRENT
-lecture source. This is not a mathematical correctness solver and not a textbook editor.
+        prompt = f"""Verify every retained lecture-note block against the synchronized CURRENT
+observations. This is a fidelity verifier, not a mathematical correctness solver.
+
+The timestamped transcript below is noisy ASR. The attached images are the uniformly sampled board
+states from the same interval. Use both channels directly. A board formula may resolve garbled ASR;
+clear speech may resolve unreadable writing. If they still conflict, do not invent a resolution.
 
 Return EXACTLY ONE verdict for EVERY draft block, in ascending block_index order:
-- keep: the block is source-faithful enough to retain;
-- replace: the block contains a concrete source-fidelity error and CURRENT source directly supports
-  the complete replacement_latex;
-- suppress: the block contains a concrete unsupported/source-drift claim, but no safe complete
-  source-backed replacement can be written.
+- keep: faithful enough to retain;
+- replace: a concrete source-fidelity error exists and the current observations directly support the
+  complete replacement_latex;
+- suppress: the draft contains unsupported/source-drift content and no safe complete replacement can
+  be written.
 
 For every replace/suppress verdict:
-1. block_index MUST identify the block that actually contains the bad claim;
-2. target_excerpt MUST be a VERBATIM contiguous excerpt copied from that exact draft block and must
-   identify the problematic claim. Never put an excerpt from another block here;
-3. evidence MUST contain one or more VERBATIM contiguous quotes copied from CURRENT transcript or
-   CURRENT visual evidence. Preceding notes and textbook knowledge are never evidence;
-4. confidence must describe source-fidelity confidence, not mathematical plausibility.
+1. target_excerpt MUST be a verbatim contiguous excerpt from that exact draft block;
+2. set support to transcript, visual, combined, or uncertain;
+3. if support uses transcript as the decisive source, include verbatim transcript evidence quotes;
+4. visual support may rely directly on attached board images and therefore needs no OCR quote;
+5. confidence describes source-fidelity confidence, not mathematical plausibility.
 
-Use suppress for writer-added claims that are absent from the source when the cited current-source
-passage establishes what was actually said but does not justify the extra draft assertion. Do NOT
-suppress a statement merely because a standard theorem says it is false. If the lecturer/source
-literally states the target claim, keep it unless the current source itself explicitly corrects it.
-Use replace only when the cited source forces the complete replacement. If uncertain, choose keep.
+Never infer a theorem/person/name because it would be the standard theorem in this context. If a
+name is not recoverable, a descriptive source-supported formulation is safer than a guessed name.
+Do not use textbook knowledge to replace a lecturer statement. If uncertain, choose keep.
 
-Pay particular attention to exact object roles (for example z_f versus y_f), uniqueness versus
-up-to-scalar, signs/constants/indices/quantifiers, and topology/type labels. Do not report raw ASR
-garbage or rewrite correct blocks for style.
-
-Preceding context is continuity context only, not correction evidence:
+Preceding context (continuity only, never correction evidence):
 {json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
 
-CURRENT transcript:
+CURRENT noisy transcript:
 {chunk.timestamped_text or chunk.text}
 
-CURRENT visual evidence:
+CURRENT auxiliary visual metadata/OCR:
 {evidence_json}
 
 DRAFT BLOCKS:
@@ -358,11 +387,13 @@ Write reasons in language code `{self.config.output_language}`.
             audit = self._structured(
                 prompt,
                 SourceGroundedMathAudit,
+                images=images,
                 max_tokens=max(4096, self.config.max_tokens),
+                guided_json=not bool(images),
                 operation="math_audit",
             )
         except (json.JSONDecodeError, ValidationError) as exc:
-            logger.warning("[%s] source-grounded audit skipped: %s", chunk.id, exc)
+            logger.warning("[%s] multimodal verifier skipped: %s", chunk.id, exc)
             return notes
 
         verdicts = audit.verdicts
@@ -370,12 +401,13 @@ Write reasons in language code `{self.config.output_language}`.
         indices = [item.block_index for item in verdicts]
         if len(verdicts) != len(notes.blocks) or sorted(indices) != expected_indices:
             logger.warning(
-                "[%s] source-grounded audit contract rejected: expected one verdict per block; got %s",
+                "[%s] verifier contract rejected: expected one verdict per block; got %s",
                 chunk.id,
                 indices,
             )
             return notes
 
+        board_request_ids = _board_scan_request_ids(evidence_json)
         audit_findings: list[str] = []
         for verdict in verdicts:
             block = notes.blocks[verdict.block_index]
@@ -383,7 +415,7 @@ Write reasons in language code `{self.config.output_language}`.
                 continue
             if verdict.confidence < 0.8:
                 logger.info(
-                    "[%s] audit %s for block %d ignored at confidence %.3f",
+                    "[%s] verifier %s for block %d ignored at confidence %.3f",
                     chunk.id,
                     verdict.action,
                     verdict.block_index,
@@ -392,28 +424,61 @@ Write reasons in language code `{self.config.output_language}`.
                 continue
             if not _target_excerpt_matches_block(verdict.target_excerpt, block.latex):
                 logger.warning(
-                    "[%s] audit %s rejected for block %d: target_excerpt does not belong to block",
-                    chunk.id,
-                    verdict.action,
-                    verdict.block_index,
-                )
-                continue
-            if not audit_evidence_supported(
-                verdict.evidence, chunk=chunk, evidence_json=evidence_json
-            ):
-                logger.warning(
-                    "[%s] audit %s rejected for block %d: current-source citation not verified",
+                    "[%s] verifier %s rejected for block %d: target excerpt mismatch",
                     chunk.id,
                     verdict.action,
                     verdict.block_index,
                 )
                 continue
 
+            support = _effective_support(verdict)
+            if support == "uncertain":
+                logger.warning(
+                    "[%s] verifier %s rejected for block %d: support is uncertain",
+                    chunk.id,
+                    verdict.action,
+                    verdict.block_index,
+                )
+                continue
+
+            if support == "transcript":
+                if not audit_evidence_supported(
+                    verdict.evidence, chunk=chunk, evidence_json=evidence_json
+                ):
+                    logger.warning(
+                        "[%s] verifier %s rejected for block %d: transcript citation not verified",
+                        chunk.id,
+                        verdict.action,
+                        verdict.block_index,
+                    )
+                    continue
+            elif support in {"visual", "combined"}:
+                if not images:
+                    logger.warning(
+                        "[%s] verifier %s rejected for block %d: no direct images available",
+                        chunk.id,
+                        verdict.action,
+                        verdict.block_index,
+                    )
+                    continue
+                # If explicit textual citations were supplied as well, verify them. Direct visual
+                # support itself is intentionally not reduced to OCR text.
+                if verdict.evidence and not audit_evidence_supported(
+                    verdict.evidence, chunk=chunk, evidence_json=evidence_json
+                ):
+                    logger.warning(
+                        "[%s] verifier %s rejected for block %d: supplied citation not verified",
+                        chunk.id,
+                        verdict.action,
+                        verdict.block_index,
+                    )
+                    continue
+
             if verdict.action == "replace":
                 replacement = (verdict.replacement_latex or "").strip()
                 if not replacement:
                     logger.warning(
-                        "[%s] audit replace rejected for block %d: replacement_latex is empty",
+                        "[%s] verifier replace rejected for block %d: replacement is empty",
                         chunk.id,
                         verdict.block_index,
                     )
@@ -427,19 +492,19 @@ Write reasons in language code `{self.config.output_language}`.
                         original=original,
                         corrected=replacement,
                         reason=verdict.reason,
-                        basis=_basis_from_evidence(verdict.evidence),
+                        basis=_basis_from_verdict(verdict),
                         confidence=verdict.confidence,
                     )
                 )
                 continue
 
-            # suppress: never erase a statement that is itself literally present in the current
-            # lecture source. This protects lecturer mistakes from textbook-driven "correction".
-            if _target_excerpt_is_literal_source(
+            # Preserve literal current speech only for transcript-only verdicts. In multimodal mode
+            # the ASR string itself may be the corrupted channel that the board resolves.
+            if support == "transcript" and _target_excerpt_is_literal_source(
                 verdict.target_excerpt, chunk=chunk, evidence_json=evidence_json
             ):
                 logger.warning(
-                    "[%s] suppress rejected for block %d: target excerpt is literal current source",
+                    "[%s] suppress rejected for block %d: literal transcript statement",
                     chunk.id,
                     verdict.block_index,
                 )
@@ -448,16 +513,26 @@ Write reasons in language code `{self.config.output_language}`.
             marker = f"audit-suppress:{verdict.confidence:.3f}"
             if marker not in block.source_evidence_ids:
                 block.source_evidence_ids.append(marker)
-            for request_id in _visual_request_ids_for_evidence(
+
+            request_ids = _visual_request_ids_for_evidence(
                 verdict.evidence, evidence_json=evidence_json
-            ):
+            )
+            if support in {"visual", "combined"}:
+                request_ids.extend(
+                    request_id
+                    for request_id in board_request_ids
+                    if request_id not in request_ids
+                )
+            for request_id in request_ids:
                 visual_marker = f"audit-visual:{request_id}"
                 if visual_marker not in block.source_evidence_ids:
                     block.source_evidence_ids.append(visual_marker)
+
             audit_findings.append(
-                f"Audit block {verdict.block_index}: suppressed source-drift claim: {verdict.reason}"
+                f"Verifier block {verdict.block_index}: suppressed source-drift claim: {verdict.reason}"
             )
 
         notes.unresolved.extend(audit_findings[:3])
         notes.unresolved = list(dict.fromkeys(notes.unresolved))
         return notes
+
