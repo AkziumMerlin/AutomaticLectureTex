@@ -402,7 +402,7 @@ Write descriptions in language code `{self.config.output_language}`.
         previous_notes: ChunkNotes | None = None,
     ) -> ChunkNotes:
         evidence_json = json.dumps(
-            [item.model_dump(mode="json") for item in evidence],
+            [item.model_dump(mode="json", exclude={"frame_paths"}) for item in evidence],
             ensure_ascii=False,
             separators=(",", ":"),
         )
