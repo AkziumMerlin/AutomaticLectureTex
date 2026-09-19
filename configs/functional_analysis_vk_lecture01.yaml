@@ -71,6 +71,12 @@ notes:
   linear_correction_catalog_chars: 320
   linear_patch_apply_threshold: 0.90
 
+  # Global lecture editor: compact whole-lecture structure pass plus bounded full-text math batches.
+  global_validation: true
+  global_validation_apply_threshold: 0.85
+  linear_global_editor_batch_chars: 16000
+  linear_global_editor_catalog_excerpt_chars: 140
+
 vision:
   frame_offsets_seconds: [-3, 2, 7]
   temporal_composite_enabled: false
