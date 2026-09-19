@@ -510,6 +510,20 @@ Write the final section title, reasons, and prose in language code `{self.config
                 )
                 continue
 
+            # Literal transcript support cannot justify erasing a lecturer statement merely
+            # because the editor dislikes it. A genuine correction of a lecturer slip must be
+            # represented explicitly as high-confidence contextual reconstruction.
+            if support == "transcript" and _target_excerpt_is_literal_source(
+                verdict.target_excerpt, chunk=chunk, evidence_json=evidence_json
+            ):
+                logger.warning(
+                    "[%s] suppress rejected for block %d: literal transcript statement needs "
+                    "contextual correction, not transcript-only suppression",
+                    chunk.id,
+                    verdict.block_index,
+                )
+                continue
+
             marker = f"audit-suppress:{verdict.confidence:.3f}"
             if marker not in block.source_evidence_ids:
                 block.source_evidence_ids.append(marker)
