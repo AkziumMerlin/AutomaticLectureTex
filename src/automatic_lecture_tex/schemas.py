@@ -55,12 +55,14 @@ class VisualKind(StrEnum):
     NOTATION = "notation"
     DIAGRAM = "diagram"
     SLIDE_TEXT = "slide_text"
+    BOARD_SCAN = "board_scan"
     NONE = "none"
 
 
 class CorrectionBasis(StrEnum):
     VISUAL = "visual"
     AUDIO_CONTEXT = "audio_context"
+    MULTIMODAL = "multimodal"
     MATHEMATICAL_CONSISTENCY = "mathematical_consistency"
     NOTATION_REGISTRY = "notation_registry"
 
@@ -91,6 +93,10 @@ class VisualEvidence(BaseModel):
     requires_figure_in_notes: bool = False
     best_frame_index: int | None = None
     asset_path: str | None = None
+    # Raw/cropped sensor frames retained for direct multimodal reconstruction. These are working
+    # artifact paths, not user-facing figure references.
+    frame_paths: list[str] = Field(default_factory=list)
+    frame_timestamps: list[float] = Field(default_factory=list)
 
 
 class BlockType(StrEnum):
