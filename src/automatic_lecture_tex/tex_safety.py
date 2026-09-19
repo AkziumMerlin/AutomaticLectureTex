@@ -149,21 +149,21 @@ def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
     return _BARE_MATH_COMMAND.sub(replace, value)
 
 
-_SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\\\(?:leq|geq))\\\)slant")
+_SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\(?:leq|geq))\\\)slant")
 
 
 def _repair_unmatched_display_lines(value: str) -> str:
-    """Repair multiple independent one-line `$formula` serialization failures."""
+    """Repair multiple independent one-line \`$$formula\` serialization failures."""
 
     repaired: list[str] = []
     for line in value.splitlines():
-        if line.count("$") != 1:
+        if line.count("$$") != 1:
             repaired.append(line)
             continue
         stripped = line.strip()
-        if stripped.startswith("$"):
+        if stripped.startswith("$$"):
             content = stripped[2:].strip()
-        elif stripped.endswith("$"):
+        elif stripped.endswith("$$"):
             content = stripped[:-2].strip()
         else:
             repaired.append(line)
