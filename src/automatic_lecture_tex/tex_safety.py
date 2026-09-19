@@ -60,8 +60,8 @@ _TEXT_COMMAND = re.compile(r"\\text\{[^{}]*\}")
 
 _COMMAND_NAMES = (
     "alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|tau|"
-    "Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|subset|subseteq|cup|cap|"
-    "bigcup|bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt"
+    "Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|leqslant|geqslant|ell|"
+    "subset|subseteq|cup|cap|bigcup|bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt"
 )
 _BAD_TAB_COMMAND = re.compile(rf"\\t({_COMMAND_NAMES})\b")
 _BARE_COMMAND_WORD = re.compile(rf"(?<![\\A-Za-z])({_COMMAND_NAMES})\b")
@@ -103,6 +103,10 @@ def canonicalize_math_fragment(value: str) -> str:
     """Repair deterministic serialization/typography damage inside mathematical material."""
 
     result = _drop_orphan_sizing_commands(normalize_math_unicode(value))
+    # Nested math delimiters are a common model serialization error: once a fragment is already
+    # known to be mathematical, inner \(...\)/\[...\] wrappers are invalid and redundant.
+    result = result.replace(r"\(", "").replace(r"\)", "")
+    result = result.replace(r"\[", "").replace(r"\]", "")
     result = _BARE_INDEXED_SET_OPERATOR.sub(
         lambda match: r"\big" + match.group(1),
         result,
@@ -145,6 +149,32 @@ def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
     return _BARE_MATH_COMMAND.sub(replace, value)
 
 
+_SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\\\(?:leq|geq))\\\)slant")
+
+
+def _repair_unmatched_display_lines(value: str) -> str:
+    """Repair multiple independent one-line `$formula` serialization failures."""
+
+    repaired: list[str] = []
+    for line in value.splitlines():
+        if line.count("$") != 1:
+            repaired.append(line)
+            continue
+        stripped = line.strip()
+        if stripped.startswith("$"):
+            content = stripped[2:].strip()
+        elif stripped.endswith("$"):
+            content = stripped[:-2].strip()
+        else:
+            repaired.append(line)
+            continue
+        if not content:
+            repaired.append(line)
+            continue
+        repaired.append(r"\[" + canonicalize_math_fragment(content) + r"\]")
+    return "\n".join(repaired)
+
+
 def _repair_single_unmatched_display(value: str) -> str:
     """Repair the common model failure `$$formula` (or `formula$$`) without guessing prose spans."""
 
@@ -163,7 +193,12 @@ def _repair_single_unmatched_display(value: str) -> str:
 def normalize_math_spans(value: str) -> str:
     """Normalize math syntax in delimited spans and safely wrap raw math glyphs in prose."""
 
-    clean = _repair_single_unmatched_display(strip_control_chars(value))
+    clean = _repair_unmatched_display_lines(strip_control_chars(value))
+    clean = _repair_single_unmatched_display(clean)
+    clean = _SPLIT_SLANT_COMMAND.sub(
+        lambda match: r"\(" + match.group(1) + "slant" + r"\)",
+        clean,
+    )
     clean = _DOUBLE_DOLLAR_MATH.sub(
         lambda match: r"\[" + canonicalize_math_fragment(match.group(1)).strip() + r"\]",
         clean,
@@ -216,3 +251,20 @@ def looks_like_math_fragment(value: str) -> bool:
         return False
     without_text = _TEXT_COMMAND.sub("", clean)
     return _CYRILLIC.search(without_text) is None
+
+
+_UNESCAPED_DOLLAR = re.compile(r"(?<!\\)\$")
+
+
+def assert_balanced_math_delimiters(value: str) -> None:
+    """Reject residual malformed math delimiters after deterministic normalization."""
+
+    clean = strip_control_chars(value)
+    if "$$" in clean:
+        raise ValueError("raw $$ display delimiter survived TeX normalization")
+    if len(_UNESCAPED_DOLLAR.findall(clean)) % 2:
+        raise ValueError("unbalanced $ math delimiter")
+    if clean.count(r"\(") != clean.count(r"\)"):
+        raise ValueError("unbalanced \\( ... \\) math delimiter")
+    if clean.count(r"\[") != clean.count(r"\]"):
+        raise ValueError("unbalanced \\[ ... \\] math delimiter")
