@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .schemas import BlockType, LectureChunk, NotationItem, NoteBlock, VisualEvidence
+from .schemas import BlockType, LectureChunk, LectureIR, NotationItem, NoteBlock, VisualEvidence
 from .tex_safety import strip_control_chars
 
 _BLOCK_ID_PREFIX = "block:"
@@ -219,4 +219,121 @@ Write reasons/unresolved text in language code `{output_language}`.
         LinearCorrectionScan,
         operation="linear_correction_scan",
         max_tokens=2048,
+    )
+
+
+class GlobalBlockEdit(BaseModel):
+    target_block_id: str = Field(min_length=1)
+    action: Literal["replace", "drop"]
+    replacement_latex: str | None = None
+    reason: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_action(self) -> GlobalBlockEdit:
+        if self.action == "replace" and not (self.replacement_latex or "").strip():
+            raise ValueError("global replace edit requires replacement_latex")
+        return self
+
+
+class GlobalSectionPlan(BaseModel):
+    title: str = Field(min_length=1)
+    block_ids: list[str] = Field(min_length=1)
+
+
+class GlobalLectureEditPlan(BaseModel):
+    sections: list[GlobalSectionPlan] = Field(min_length=1)
+    patches: list[GlobalBlockEdit] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+def _global_draft_payload(ir: LectureIR) -> list[dict]:
+    payload: list[dict] = []
+    for chunk_index, chunk in enumerate(ir.chunks):
+        payload.append(
+            {
+                "chunk_index": chunk_index,
+                "chunk_id": chunk.chunk_id,
+                "start": chunk.start,
+                "end": chunk.end,
+                "section_title": chunk.section_title,
+                "unresolved": list(chunk.unresolved),
+                "blocks": [
+                    {
+                        "id": block_id(block),
+                        "type": block.type,
+                        "title": block.title,
+                        "latex": block.latex,
+                    }
+                    for block in chunk.blocks
+                ],
+            }
+        )
+    return payload
+
+
+def plan_global_lecture_edit(
+    llm,
+    *,
+    draft_ir: LectureIR,
+    output_language: str,
+) -> GlobalLectureEditPlan:
+    prompt = f"""Edit the COMPLETE reconstructed lecture into one coherent, mathematically correct,
+study-friendly set of notes. The input is a DraftLectureIR produced from local multimodal chunks.
+This pass is deliberately global: resolve contradictions between chunks, remove repetitions, merge
+fragmented topics into sensible sections, stabilize notation and canonical theorem names, and repair
+mathematical mistakes when the intended lecture content is clear.
+
+You are NOT asked to reproduce the lecture verbatim and you are NOT allowed to turn it into a
+different textbook chapter. Preserve the lecture's subject, level, main examples, and argument flow.
+Use standard mathematical knowledge to correct obvious local reconstruction mistakes, missing
+hypotheses, wrong inequality directions, confused object roles, malformed standard names, and
+internally inconsistent claims.
+
+INPUT DRAFT:
+{json.dumps(_global_draft_payload(draft_ir), ensure_ascii=False, separators=(",", ":"))}
+
+Return a compact EDIT PLAN, not the full lecture text.
+
+SECTIONS:
+- Create a concise sequence of final sections. Each section contains existing exact block_ids.
+- Every retained source block id must occur exactly once across all section block_ids.
+- Keep chronological mathematical order, but merge adjacent/repeated chunk sections when they are
+  really one topic.
+- Do not create new block ids.
+- A block omitted from all sections MUST have an explicit high-confidence action=drop patch.
+- Prefer substantially fewer, semantically meaningful sections over one section per 3-minute chunk.
+
+PATCHES:
+- action=replace: rewrite ONE existing block completely when it contains a mathematical/content
+  error. replacement_latex is the complete final contents of that block; do not emit outer TeX
+  environments or section commands.
+- action=drop: remove a duplicate, redundant transition, unrecoverable noise, or superseded block.
+- Do not use drop merely to avoid fixing a difficult but important mathematical statement.
+- Do not merge unrelated material into one replacement block. Deduplication should normally be done
+  by choosing the best existing block and dropping its repeats.
+- confidence reflects confidence that the editorial operation improves the intended lecture notes.
+- Use canonical mathematical terminology and theorem names when they are identifiable. If a name is
+  genuinely ambiguous, use a descriptive formulation in a replacement rather than inventing a name.
+
+GLOBAL CHECKS:
+- Check all theorem hypotheses and conclusions.
+- Check signs, inequality directions, quantifiers, domains/codomains, topology names, and compactness
+  claims.
+- Check object identity across the whole lecture (for example auxiliary vectors versus unique
+  representing vectors).
+- Check that a statement is not contradicted later without being corrected.
+- Treat per-chunk unresolved items as warnings about uncertain reconstruction; do not convert them
+  into confident new claims unless the rest of the lecture resolves the ambiguity.
+- Remove duplicated proofs/definitions created by overlapping local reconstruction.
+- Preserve useful derivations and examples; do not over-compress the lecture into a summary.
+- Titles must be clean human-readable section titles, not raw TeX fragments.
+
+Write titles, reasons and unresolved items in language code `{output_language}`.
+"""
+    return llm._structured(
+        prompt,
+        GlobalLectureEditPlan,
+        operation="global_lecture_edit",
+        max_tokens=4096,
     )
