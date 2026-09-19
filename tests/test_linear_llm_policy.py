@@ -15,7 +15,13 @@ from automatic_lecture_tex.linear_llm_policy import (
 from automatic_lecture_tex.linear_notes import LinearCorrectionScan
 from automatic_lecture_tex.llm_robust import LectureModelClient as RobustLectureModelClient
 from automatic_lecture_tex.pipeline_robust import _run_linear_pipeline_with_policy
-from automatic_lecture_tex.schemas import BlockType, ChunkNotes, LectureChunk, NoteBlock
+from automatic_lecture_tex.schemas import (
+    BlockType,
+    ChunkNotes,
+    LectureChunk,
+    NoteBlock,
+    VisualEvidence,
+)
 
 
 def _chunk(text: str = "Продолжаем доказательство.") -> LectureChunk:
@@ -115,7 +121,126 @@ every such content-changing step in `corrections`.
     assert "[omitted-math]" in final_prompt
     assert "z_f versus y_f" in captured["math_audit"]
     assert "Produce exactly one keep/replace/suppress verdict" in captured["math_audit"]
-    assert "Never suppress a statement that the lecturer/current board literally states" in captured["math_audit"]
+    assert "transcript is noisy ASR" in captured["math_audit"]
+    assert "Never guess a theorem/person/name" in captured["math_audit"]
+
+
+def test_finalize_chunk_sends_board_scan_frames_directly(tmp_path, monkeypatch):
+    image_paths = []
+    for index in range(5):
+        path = tmp_path / f"board_{index}.jpg"
+        path.write_bytes(b"image")
+        image_paths.append(path)
+
+    captured = {}
+
+    def fake_structured(
+        self,
+        prompt,
+        schema,
+        images=None,
+        max_tokens=None,
+        *,
+        guided_json=True,
+        operation="structured",
+    ):
+        captured[operation] = {
+            "prompt": prompt,
+            "images": list(images or []),
+            "guided_json": guided_json,
+        }
+        return schema.model_validate(
+            {
+                "section_title": "Комплексные функционалы",
+                "blocks": [{"type": "paragraph", "latex": "Продолжаем доказательство."}],
+            }
+        )
+
+    monkeypatch.setattr(RobustLectureModelClient, "_structured", fake_structured)
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=False)
+
+    evidence = [
+        VisualEvidence(
+            request_id="chunk_test_board_scan_00",
+            kind="board_scan",
+            confidence=1.0,
+            frame_paths=[str(path) for path in image_paths],
+            frame_timestamps=[1.0, 3.0, 5.0, 7.0, 9.0],
+        )
+    ]
+
+    notes = client.finalize_chunk(_chunk(), evidence, {}, None)
+
+    assert notes.blocks
+    assert captured["finalize_chunk"]["images"] == image_paths
+    assert captured["finalize_chunk"]["guided_json"] is False
+    assert "transcript is a noisy observation" in captured["finalize_chunk"]["prompt"].lower()
+    assert "never identify a named theorem/person" in captured["finalize_chunk"]["prompt"].lower()
+
+
+def test_multimodal_verifier_can_apply_visual_only_replacement(tmp_path, monkeypatch):
+    image = tmp_path / "board.jpg"
+    image.write_bytes(b"image")
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Продолжение функционала",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="По теореме Гельфанда-Неймана функционал продолжается.",
+            )
+        ],
+    )
+    evidence_json = json.dumps(
+        [
+            {
+                "request_id": "chunk_test_board_scan_00",
+                "kind": "board_scan",
+                "frame_paths": [str(image)],
+                "frame_timestamps": [5.0],
+            }
+        ],
+        ensure_ascii=False,
+    )
+    seen = {}
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        seen.update(kwargs)
+        return schema.model_validate(
+            {
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "replace",
+                        "target_excerpt": "теореме Гельфанда-Неймана",
+                        "replacement_latex": (
+                            "По теореме о продолжении линейного функционала с сохранением нормы "
+                            "функционал продолжается."
+                        ),
+                        "reason": "Имя не подтверждается; содержание продолжения видно из доски.",
+                        "confidence": 0.96,
+                        "support": "visual",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=_chunk("По теореме Анванкова продолжаем функционал."),
+        evidence_json=evidence_json,
+        previous_context=None,
+        images=[image],
+    )
+
+    assert "Гельфанда-Неймана" not in result.blocks[0].latex
+    assert "продолжении линейного функционала" in result.blocks[0].latex
+    assert str(result.corrections[0].basis) == "visual"
+    assert seen["images"] == [image]
+    assert seen["guided_json"] is False
 
 
 def test_audit_evidence_must_exist_in_declared_current_source():
