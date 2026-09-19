@@ -204,7 +204,7 @@ def test_visual_collector_sends_raw_primary_then_temporal_composite(tmp_path):
     assert llm.first_image.is_file()
 
 
-def test_visual_collector_scans_entire_chunk_in_one_vlm_call(tmp_path):
+def test_visual_collector_keeps_uniform_scan_as_direct_multimodal_frames(tmp_path):
     llm = _FakeLLM()
     vision = VisionConfig(
         board_uniform_samples=5,
@@ -250,6 +250,8 @@ def test_visual_collector_scans_entire_chunk_in_one_vlm_call(tmp_path):
     assert len(requests) == 1
     assert requests[0].reason == "chunk_board_scan"
     assert len(evidence) == 1
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["timestamps"] == [18.0, 54.0, 90.0, 126.0, 162.0]
-    assert len(llm.calls[0]["paths"]) == 5
+    assert llm.calls == []
+    assert str(evidence[0].kind) == "board_scan"
+    assert evidence[0].frame_timestamps == [18.0, 54.0, 90.0, 126.0, 162.0]
+    assert len(evidence[0].frame_paths) == 5
+    assert all(Path(path).is_file() for path in evidence[0].frame_paths)

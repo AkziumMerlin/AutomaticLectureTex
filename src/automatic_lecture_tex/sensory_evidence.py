@@ -11,7 +11,7 @@ from .board_crop import generate_board_crops
 from .frame_selection import select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
-from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence
+from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence, VisualKind
 from .vision import (
     CHUNK_BOARD_SCAN_REASON,
     dedupe_visual_requests,
@@ -86,13 +86,12 @@ def collect_visual_evidence(
     figures_root: Path,
     notation: dict[str, str],
 ) -> tuple[list, list[VisualEvidence], float]:
-    """Collect literal visual evidence, preferring high-resolution board crops when available.
+    """Collect visual sensor inputs and OCR evidence.
 
-    The VLM always retains one uncropped frame for context. Host-side board detection then contributes
-    a full board ROI plus overlapping horizontal tiles, up to the configured image budget. If crop
-    detection fails, behavior falls back to the existing raw-frame path. The best crop is also copied
-    into the TeX figure tree so an unresolved mathematical fragment can be represented by source
-    evidence rather than an invented reconstruction.
+    The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate VLM call. Its
+    uniformly sampled frames are retained as raw multimodal inputs for the note writer and verifier.
+    Supplemental local visual requests keep the legacy isolated OCR path. This avoids compressing the
+    main board channel into an intermediate text representation before reconstruction.
     """
 
     scan_requests = []
@@ -293,7 +292,7 @@ def collect_visual_evidence(
             )
 
         candidates: list[MathOCRCandidate] = []
-        if ocr_backend is not None and ocr_image is not None:
+        if not is_chunk_board_scan and ocr_backend is not None and ocr_image is not None:
             try:
                 candidate = ocr_backend.recognize(ocr_image)
                 if candidate is not None and (
@@ -313,9 +312,14 @@ def collect_visual_evidence(
 
     if prepared_visuals:
         workers = min(pipeline.config.vision.max_workers, len(prepared_visuals))
-        futures: list[Future[VisualEvidence]] = []
+        futures: list[Future[VisualEvidence] | None] = []
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             for request, frames, _board_views, _candidates in prepared_visuals:
+                if request.reason == CHUNK_BOARD_SCAN_REASON:
+                    # The uniform scan is a raw sensor bundle. Do not spend a separate VLM call
+                    # converting it to OCR before the multimodal writer sees the images.
+                    futures.append(None)
+                    continue
                 futures.append(
                     executor.submit(
                         pipeline.llm.resolve_visual_request,
@@ -325,32 +329,44 @@ def collect_visual_evidence(
                         [frame.timestamp for frame in frames],
                     )
                 )
+
             for (request, frames, board_views, candidates), future in zip(
                 prepared_visuals, futures, strict=True
             ):
-                try:
-                    visual = future.result()
-                except Exception as exc:
-                    logger.warning(
-                        "[%s] visual OCR failed for %s: %s",
-                        lecture.id,
-                        request.id,
-                        exc,
-                    )
+                if future is None:
                     visual = VisualEvidence(
                         request_id=request.id,
-                        description=f"Visual OCR failed after retries: {type(exc).__name__}: {exc}",
+                        kind=VisualKind.BOARD_SCAN,
+                        description=(
+                            "Chronologically ordered board states attached directly to the "
+                            "multimodal writer/verifier; no intermediate VLM OCR was performed."
+                        ),
+                        confidence=1.0,
+                        frame_paths=[str(frame.path) for frame in frames],
+                        frame_timestamps=[frame.timestamp for frame in frames],
                     )
-                visual.math_ocr_candidates = candidates
+                else:
+                    try:
+                        visual = future.result()
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] visual OCR failed for %s: %s",
+                            lecture.id,
+                            request.id,
+                            exc,
+                        )
+                        visual = VisualEvidence(
+                            request_id=request.id,
+                            description=f"Visual OCR failed after retries: {type(exc).__name__}: {exc}",
+                        )
+                    visual.math_ocr_candidates = candidates
 
-                # Persist the wide full-board ROI, never a narrow VLM tile. Tiles remain useful
-                # sensor inputs for recognition, but user-facing fallbacks need surrounding context
-                # and must not accidentally crop away the other side of a formula.
+                # Persist one wide board state only as a possible unresolved-content fallback.
+                # The five scan frames themselves remain working sensor inputs and are not figures
+                # in the final lecture unless a fallback explicitly references this asset.
                 asset_frame: ExtractedFrame | None = None
-                if request.reason == CHUNK_BOARD_SCAN_REASON and visual.kind != "none" and frames:
-                    index = visual.best_frame_index if visual.best_frame_index is not None else 0
-                    index = max(0, min(index, len(frames) - 1))
-                    asset_frame = frames[index]
+                if request.reason == CHUNK_BOARD_SCAN_REASON and frames:
+                    asset_frame = frames[len(frames) // 2]
                 elif board_views and visual.kind != "none":
                     asset_frame = board_views[0]
                 elif visual.requires_figure_in_notes and frames:

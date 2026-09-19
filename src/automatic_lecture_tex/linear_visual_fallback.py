@@ -68,7 +68,8 @@ def _eligible_board_evidence(
         for item in evidence
         if item.asset_path
         and item.asset_path not in existing_assets
-        and item.kind in {VisualKind.EQUATION, VisualKind.NOTATION, VisualKind.DIAGRAM}
+        and item.kind
+        in {VisualKind.EQUATION, VisualKind.NOTATION, VisualKind.DIAGRAM, VisualKind.BOARD_SCAN}
         and item.confidence >= config.unresolved_board_min_visual_confidence
         and (request_ids is None or item.request_id in request_ids)
     ]
