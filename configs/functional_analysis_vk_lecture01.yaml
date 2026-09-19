@@ -78,7 +78,7 @@ vision:
   max_requests_per_chunk: 1
   max_workers: 3
 
-  # Give the VLM one full frame plus a full board crop and three overlapping board tiles.
+  # Sample five times across the chunk; use one full-board crop per timestamp (raw frame fallback).
   board_auto_crop_enabled: true
   board_crop_tiles: 3
   board_crop_tile_overlap: 0.14
