@@ -438,7 +438,7 @@ Write descriptions in language code `{self.config.output_language}`.
         if previous_notes is not None:
             previous_context = {
                 "section_title": previous_notes.section_title,
-                "blocks": [block.model_dump(mode="json") for block in previous_notes.blocks[-3:]],
+                "blocks": [block.model_dump(mode="json") for block in previous_notes.blocks[-6:]],
                 "unresolved": previous_notes.unresolved,
             }
         prompt = f"""Create concise, mathematically coherent notes from this lecture interval.
@@ -467,17 +467,21 @@ Mean ASR confidence (when available): {chunk.asr_confidence}.
 Fraction of low-confidence ASR segments: {chunk.low_confidence_fraction}.
 
 The transcript is a noisy observation, not ground truth. The attached board images are a second
-synchronized observation channel. Reconstruct from their agreement and temporal development. When
-they conflict, do not mechanically prefer ASR wording; use visible notation/formulas and local
-cross-channel consistency. If the conflict cannot be resolved, omit the claim and record it in
-unresolved. Never identify a named theorem/person merely because the mathematics resembles a
-standard result: use a descriptive formulation when the name itself is not recoverable.
+synchronized observation channel, and the preceding reconstructed notes provide mathematical
+continuity. Reconstruct the lecturer's intended mathematics from all three together. You may use
+standard mathematical knowledge as a bounded repair prior: correct garbled terminology, theorem
+names, obvious lecturer slips, signs, hypotheses, and short missing steps when the surrounding
+argument makes the intended result clear. For example, extension of a bounded linear functional from
+a subspace with preservation of norm is the Hahn--Banach theorem even if ASR mangles the name.
+If several interpretations remain genuinely plausible, prefer a descriptive formulation or record
+the ambiguity rather than inventing a specific fact.
 
 Write prose, titles, and ambiguity descriptions in language code `{self.config.output_language}`.
 Do not translate established mathematical notation.
-Never put guesses, alternatives, ASR commentary, or words such as "probably"/"вероятно" into note
-blocks. Put them only in `unresolved`. Omit a mathematical statement unless the transcript or visual
-evidence supports it.
+Never put unresolved guesses, alternatives, or ASR commentary into note blocks. Put genuine
+ambiguities in `unresolved`. The final blocks should be mathematically correct and convenient to
+study from, even when this requires contextual repair beyond the literal ASR wording. Do not add
+unrelated textbook exposition or material the lecture was not developing.
 
 Attached board-frame index (same order as attached images):
 {multimodal_frame_index or "No direct board frames available."}
