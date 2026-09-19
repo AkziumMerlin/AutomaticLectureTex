@@ -69,24 +69,24 @@ CONTEXTUAL MULTIMODAL EDITOR POLICY:
   lecture was not developing.
 """
 
-# The historical pre-PR2 prompt contained two permissions that encouraged textbook completion. The
-# base implementation remains untouched, but the effective linear prompt removes them before the
-# request reaches the model.
+# Rewrite legacy finalize wording so the writer performs bounded contextual reconstruction rather
+# than either literal ASR copying or unconstrained textbook completion.
 _PERMISSIVE_FINALIZE = (
     (
         "You may actively correct ASR/OCR errors, normalize terminology, reconstruct formulas from combined\n"
         "audio and video evidence, and complete a short derivation when its mathematical conclusion is\n"
         "reliable. Do not add unrelated textbook exposition.",
-        "You may correct ASR/OCR errors, normalize terminology, and reconstruct formulas from combined\n"
-        "audio and video evidence only when the intended reading is locally forced by those sources.\n"
-        "Do not complete a derivation or add mathematical steps that are absent from the current evidence.",
+        "You may correct ASR/OCR errors, normalize terminology, reconstruct formulas from combined\n"
+        "audio/video/context evidence, and complete short missing steps when the lecturer's intended\n"
+        "mathematics is clear. Use standard mathematics as a bounded disambiguation prior, not as a\n"
+        "license to add unrelated exposition.",
     ),
     (
         "Use the speech, known\nnotation, and mathematical consistency here to make any further correction or inference, and record\n"
         "every such content-changing step in `corrections`.",
-        "Use speech and known notation only to resolve local ASR/OCR ambiguity. Do not use mathematical\n"
-        "consistency to add an inference that is not supported by the current transcript or visual evidence.\n"
-        "Record every source-supported content-changing correction in `corrections`.",
+        "Use speech, board evidence, preceding context, established notation, and mathematical\n"
+        "consistency together to reconstruct the intended lecture content. Record substantive\n"
+        "content-changing repairs in `corrections`.",
     ),
     (
         "For figure blocks, asset_path must be copied exactly from visual evidence. Record unresolved\n"
