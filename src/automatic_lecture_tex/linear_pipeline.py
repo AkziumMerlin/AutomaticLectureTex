@@ -10,9 +10,11 @@ from pydantic_core import ValidationError
 from .chunking import chunk_transcript
 from .linear_llm_policy import has_explicit_correction_signal
 from .linear_notes import (
+    GlobalLectureEditPlan,
     LinearCorrectionScan,
     LinearPatch,
     block_id,
+    plan_global_lecture_edit,
     provenance_claim_ids,
     scan_linear_corrections,
 )
@@ -24,13 +26,20 @@ from .linear_visual_fallback import (
 from .llm import LectureModelClient
 from .schemas import ChunkNotes, CorrectionRecord, LectureIR, NoteBlock, Transcript, VisualEvidence
 from .sensory_evidence import collect_visual_evidence
+from .tex_safety import (
+    assert_balanced_math_delimiters,
+    normalize_heading_math,
+    normalize_math_spans,
+)
 from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-# Version 6 uses strict per-block source-audit verdicts while preserving the restored pre-PR2
-# chronological writer and the block-linked visual fallback.
-LINEAR_PIPELINE_VERSION = 6
+# Final-IR version. Chunk reconstruction keeps its own cache version so adding the global editor
+# does not force expensive multimodal chunk recomputation.
+LINEAR_PIPELINE_VERSION = 7
+LINEAR_CHUNK_CACHE_VERSION = 6
+GLOBAL_LECTURE_EDITOR_VERSION = 1
 
 
 def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
@@ -159,7 +168,7 @@ def _chunk_cache_fingerprint(
 ) -> str:
     return stable_hash(
         {
-            "version": LINEAR_PIPELINE_VERSION,
+            "version": LINEAR_CHUNK_CACHE_VERSION,
             "writer": "pre_pr2_finalize_chunk_clean_context",
             "chunk": chunk.model_dump(mode="json"),
             "previous_notes": (
@@ -185,6 +194,137 @@ def _register_blocks(
             continue
         block_map[stable_id] = block
         owner_map[stable_id] = notes
+
+
+def _apply_global_edit_plan(
+    draft_ir: LectureIR,
+    plan: GlobalLectureEditPlan,
+    *,
+    apply_threshold: float,
+) -> LectureIR:
+    """Apply a compact global edit plan while preventing silent block loss or invention."""
+
+    block_map: dict[str, NoteBlock] = {}
+    owner_map: dict[str, ChunkNotes] = {}
+    for chunk in draft_ir.chunks:
+        for block in chunk.blocks:
+            stable_id = block_id(block)
+            if not stable_id:
+                raise ValueError("global editor requires stable ids on every draft block")
+            if stable_id in block_map:
+                raise ValueError(f"duplicate draft block id {stable_id!r}")
+            block_map[stable_id] = block
+            owner_map[stable_id] = chunk
+
+    applied_patches = {}
+    dropped: set[str] = set()
+    seen_patch_targets: set[str] = set()
+    for patch in plan.patches:
+        if patch.target_block_id not in block_map:
+            raise ValueError(f"global edit references unknown block {patch.target_block_id!r}")
+        if patch.target_block_id in seen_patch_targets:
+            raise ValueError(f"multiple global edits target {patch.target_block_id!r}")
+        seen_patch_targets.add(patch.target_block_id)
+        if patch.confidence < apply_threshold:
+            continue
+        if patch.action == "drop":
+            dropped.add(patch.target_block_id)
+        else:
+            applied_patches[patch.target_block_id] = patch
+
+    ordered_ids = [stable_id for section in plan.sections for stable_id in section.block_ids]
+    if len(ordered_ids) != len(set(ordered_ids)):
+        raise ValueError("global edit plan assigns a block to multiple sections")
+    unknown = set(ordered_ids) - set(block_map)
+    if unknown:
+        raise ValueError(f"global edit plan contains unknown block ids: {sorted(unknown)!r}")
+    if dropped.intersection(ordered_ids):
+        raise ValueError("global edit plan both drops and retains the same block")
+
+    expected = set(block_map) - dropped
+    retained = set(ordered_ids)
+    if retained != expected:
+        missing = sorted(expected - retained)
+        extra = sorted(retained - expected)
+        raise ValueError(
+            f"global edit coverage mismatch; missing={missing[:8]!r}, extra={extra[:8]!r}"
+        )
+
+    final_chunks: list[ChunkNotes] = []
+    for section_index, section in enumerate(plan.sections):
+        blocks: list[NoteBlock] = []
+        corrections: list[CorrectionRecord] = []
+        starts: list[float] = []
+        ends: list[float] = []
+        for stable_id in section.block_ids:
+            source_block = block_map[stable_id]
+            source_owner = owner_map[stable_id]
+            block = source_block.model_copy(deep=True)
+            starts.append(source_owner.start)
+            ends.append(source_owner.end)
+            patch = applied_patches.get(stable_id)
+            if patch is not None:
+                original = block.latex
+                replacement = (patch.replacement_latex or "").strip()
+                checked = NoteBlock(
+                    type=block.type,
+                    title=block.title,
+                    latex=replacement,
+                    asset_path=block.asset_path,
+                    caption=block.caption,
+                    source_claim_ids=list(block.source_claim_ids),
+                    source_evidence_ids=list(block.source_evidence_ids),
+                )
+                block.latex = checked.latex
+                corrections.append(
+                    CorrectionRecord(
+                        original=original,
+                        corrected=checked.latex,
+                        reason=patch.reason,
+                        basis="mathematical_consistency",
+                        confidence=patch.confidence,
+                    )
+                )
+            blocks.append(block)
+
+        final_chunks.append(
+            ChunkNotes(
+                chunk_id=f"global_section_{section_index:03d}",
+                start=min(starts) if starts else 0.0,
+                end=max(ends) if ends else 0.0,
+                section_title=section.title.strip(),
+                blocks=blocks,
+                corrections=corrections,
+                unresolved=list(plan.unresolved) if section_index == 0 else [],
+            )
+        )
+
+    return LectureIR(
+        lecture_id=draft_ir.lecture_id,
+        title=draft_ir.title,
+        chunks=final_chunks,
+    )
+
+
+def _sanitize_final_ir_tex(ir: LectureIR) -> LectureIR:
+    """Normalize common model TeX damage and reject residual delimiter corruption."""
+
+    result = ir.model_copy(deep=True)
+    result.title = normalize_heading_math(result.title)
+    assert_balanced_math_delimiters(result.title)
+    for chunk in result.chunks:
+        chunk.section_title = normalize_heading_math(chunk.section_title)
+        assert_balanced_math_delimiters(chunk.section_title)
+        for block in chunk.blocks:
+            block.latex = normalize_math_spans(block.latex).strip()
+            assert_balanced_math_delimiters(block.latex)
+            if block.title:
+                block.title = normalize_heading_math(block.title)
+                assert_balanced_math_delimiters(block.title)
+            if block.caption:
+                block.caption = normalize_heading_math(block.caption)
+                assert_balanced_math_delimiters(block.caption)
+    return result
 
 
 def run_linear_pipeline(
@@ -437,11 +577,76 @@ def run_linear_pipeline(
                 dict.fromkeys(note_chunks[chunk_index].unresolved)
             )
 
-    ir = LectureIR(
+    draft_ir = LectureIR(
         lecture_id=lecture.id,
         title=lecture.title or lecture.id,
         chunks=note_chunks,
     )
+    atomic_json_dump(work / "draft_lecture_ir.json", draft_ir.model_dump(mode="json"))
+
+    global_edit_seconds = 0.0
+    global_edit_cache_hit = False
+    global_edit_applied = False
+    ir = draft_ir
+    if config.global_validation and _all_blocks(note_chunks):
+        global_path = work / "global_lecture_edit.json"
+        global_fingerprint = stable_hash(
+            {
+                "version": GLOBAL_LECTURE_EDITOR_VERSION,
+                "draft_ir": draft_ir.model_dump(mode="json"),
+                "llm": pipeline.config.llm.model_dump(mode="json"),
+                "apply_threshold": config.global_validation_apply_threshold,
+            }
+        )
+        global_plan = None
+        if global_path.exists() and not force:
+            try:
+                payload = json.loads(global_path.read_text(encoding="utf-8"))
+                if payload.get("fingerprint") == global_fingerprint:
+                    global_plan = GlobalLectureEditPlan.model_validate(payload["plan"])
+                    global_edit_cache_hit = True
+                    llm_usages.append(payload.get("llm_usage", {}))
+            except (json.JSONDecodeError, ValueError):
+                global_plan = None
+
+        if global_plan is None:
+            usage_before = pipeline.llm.usage_snapshot()
+            started = time.perf_counter()
+            try:
+                global_plan = plan_global_lecture_edit(
+                    pipeline.llm,
+                    draft_ir=draft_ir,
+                    output_language=pipeline.config.llm.output_language,
+                )
+            except (json.JSONDecodeError, ValidationError) as exc:
+                logger.warning("[%s] global lecture editor failed: %s", lecture.id, exc)
+                global_plan = None
+            global_edit_seconds += time.perf_counter() - started
+            usage = LectureModelClient.usage_delta(pipeline.llm.usage_snapshot(), usage_before)
+            llm_usages.append(usage)
+            if global_plan is not None:
+                atomic_json_dump(
+                    global_path,
+                    {
+                        "fingerprint": global_fingerprint,
+                        "plan": global_plan.model_dump(mode="json"),
+                        "llm_usage": usage,
+                    },
+                )
+
+        if global_plan is not None:
+            try:
+                ir = _apply_global_edit_plan(
+                    draft_ir,
+                    global_plan,
+                    apply_threshold=config.global_validation_apply_threshold,
+                )
+                global_edit_applied = True
+            except (ValueError, ValidationError) as exc:
+                logger.warning("[%s] global lecture edit plan rejected: %s", lecture.id, exc)
+                ir = draft_ir
+
+    ir = _sanitize_final_ir_tex(ir)
     atomic_json_dump(ir_path, ir.model_dump(mode="json"))
     pipeline._save_notation_registry(notation)
     manifest["ir_fingerprint"] = pipeline._ir_fingerprint(transcript, notation)
@@ -450,7 +655,7 @@ def run_linear_pipeline(
         work / "run_metrics.json",
         {
             "lecture_id": lecture.id,
-            "architecture": "linear_pre_pr2_with_corrections",
+            "architecture": "linear_multimodal_with_global_editor",
             "linear_pipeline_version": LINEAR_PIPELINE_VERSION,
             "media_seconds": round(media_seconds, 3),
             "asr_seconds": round(asr_seconds, 3),
@@ -460,19 +665,24 @@ def run_linear_pipeline(
             "finalize_contextless_retries": finalize_contextless_retries,
             "finalize_failures": finalize_failures,
             "correction_scan_seconds": round(correction_seconds, 3),
+            "global_edit_seconds": round(global_edit_seconds, 3),
+            "global_edit_cache_hit": global_edit_cache_hit,
+            "global_edit_applied": global_edit_applied,
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "chunks_total": len(chunks),
             "chunks_processed": processed_chunks,
             "chunk_cache_hits": chunk_cache_hits,
-            "blocks_total": sum(len(notes.blocks) for notes in note_chunks),
+            "draft_blocks_total": sum(len(notes.blocks) for notes in note_chunks),
+            "final_sections_total": len(ir.chunks),
+            "blocks_total": sum(len(notes.blocks) for notes in ir.chunks),
             "board_snapshots_total": sum(
-                is_board_snapshot(block) for block in _all_blocks(note_chunks)
+                is_board_snapshot(block) for block in _all_blocks(ir.chunks)
             ),
             "correction_patches_applied": correction_patches_applied,
             "visual_requests_processed": visual_requests_processed,
             "visual_evidence_successful": visual_evidence_successful,
-            "corrections_total": sum(len(notes.corrections) for notes in note_chunks),
-            "unresolved_total": sum(len(notes.unresolved) for notes in note_chunks),
+            "corrections_total": sum(len(notes.corrections) for notes in ir.chunks),
+            "unresolved_total": sum(len(notes.unresolved) for notes in ir.chunks),
             "llm_usage": LectureModelClient.combine_usage(llm_usages),
         },
     )

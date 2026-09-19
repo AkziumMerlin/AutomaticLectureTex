@@ -1,6 +1,9 @@
 import inspect
 
 from automatic_lecture_tex.linear_notes import (
+    GlobalBlockEdit,
+    GlobalLectureEditPlan,
+    GlobalSectionPlan,
     LinearPatch,
     block_id,
     block_segment_ids,
@@ -8,7 +11,9 @@ from automatic_lecture_tex.linear_notes import (
     scan_linear_corrections,
 )
 from automatic_lecture_tex.linear_pipeline import (
+    _apply_global_edit_plan,
     _apply_patch,
+    _sanitize_final_ir_tex,
     _stamp_chunk_provenance,
     _writer_context_notes,
     run_linear_pipeline,
@@ -17,6 +22,7 @@ from automatic_lecture_tex.schemas import (
     BlockType,
     ChunkNotes,
     LectureChunk,
+    LectureIR,
     NoteBlock,
 )
 
@@ -170,3 +176,96 @@ def test_distant_correction_scan_is_explicit_only_not_math_audit():
     assert "block_0000_000" in llm.prompt
     assert "Do NOT patch because standard mathematics" in llm.prompt
     assert "explicit corrections or retractions" in llm.prompt
+
+
+
+def test_global_editor_plan_merges_sections_drops_duplicate_and_repairs_math():
+    a = _block("block_0000_000", "Определим слабую топологию.", "seg_a")
+    b = _block("block_0000_001", r"\|f\| \ge \|y_f\|.", "seg_a")
+    c_dup = _block("block_0001_000", "Определим слабую топологию.", "seg_b")
+    d = _block("block_0001_001", "Следующий шаг доказательства.", "seg_b")
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Chunk A", start=0, end=10, blocks=[a, b]),
+            ChunkNotes(section_title="Chunk B", start=10, end=20, blocks=[c_dup, d]),
+        ],
+    )
+    plan = GlobalLectureEditPlan(
+        sections=[
+            GlobalSectionPlan(
+                title="Слабая топология",
+                block_ids=["block_0000_000", "block_0000_001", "block_0001_001"],
+            )
+        ],
+        patches=[
+            GlobalBlockEdit(
+                target_block_id="block_0001_000",
+                action="drop",
+                reason="Дословный дубль предыдущего определения.",
+                confidence=0.99,
+            ),
+            GlobalBlockEdit(
+                target_block_id="block_0000_001",
+                action="replace",
+                replacement_latex=r"\|f\| \le \|y_f\|.",
+                reason="В неравенстве был обращён знак.",
+                confidence=0.99,
+            ),
+        ],
+    )
+
+    result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+
+    assert len(result.chunks) == 1
+    assert result.chunks[0].section_title == "Слабая топология"
+    assert [block_id(block) for block in result.chunks[0].blocks] == [
+        "block_0000_000",
+        "block_0000_001",
+        "block_0001_001",
+    ]
+    assert result.chunks[0].blocks[1].latex == r"\|f\| \le \|y_f\|."
+    assert len(result.chunks[0].corrections) == 1
+
+
+def test_global_editor_rejects_silent_block_loss():
+    a = _block("block_0000_000", "A")
+    b = _block("block_0000_001", "B")
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[ChunkNotes(section_title="Chunk", blocks=[a, b])],
+    )
+    plan = GlobalLectureEditPlan(
+        sections=[GlobalSectionPlan(title="Section", block_ids=["block_0000_000"])],
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="coverage mismatch"):
+        _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+
+
+def test_final_ir_tex_sanity_repairs_repeated_unmatched_display_lines():
+    block = _block(
+        "block_0000_000",
+        "$$\\|f\\| = \\|u\\|.\nТекст.\n$$x \\in X.",
+    )
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(
+                section_title=r"Слабая сходимость в \ell\_2",
+                blocks=[block],
+            )
+        ],
+    )
+
+    result = _sanitize_final_ir_tex(draft)
+
+    assert "$$" not in result.chunks[0].blocks[0].latex
+    assert r"\[\|f\| = \|u\|.\]" in result.chunks[0].blocks[0].latex
+    assert r"\[x \in X.\]" in result.chunks[0].blocks[0].latex
+    assert "$" in result.chunks[0].section_title
