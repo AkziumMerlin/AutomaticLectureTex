@@ -22,6 +22,7 @@ from .schemas import (
     MathAudit,
     NoteBlock,
     VisualEvidence,
+    VisualKind,
     VisualRequest,
 )
 from .util import strip_thinking_and_fences
@@ -405,6 +406,34 @@ Write descriptions in language code `{self.config.output_language}`.
             ensure_ascii=False,
             separators=(",", ":"),
         )
+
+        # The mandatory board scan remains an image channel all the way into reconstruction.
+        # Do not force the writer to trust an intermediate OCR transcription.
+        multimodal_images: list[Path] = []
+        multimodal_frame_labels: list[str] = []
+        for item in evidence:
+            if item.kind != VisualKind.BOARD_SCAN:
+                continue
+            for index, raw_path in enumerate(item.frame_paths):
+                path = Path(raw_path)
+                if not path.is_file():
+                    continue
+                timestamp = (
+                    item.frame_timestamps[index]
+                    if index < len(item.frame_timestamps)
+                    else None
+                )
+                multimodal_frame_labels.append(
+                    f"Image {len(multimodal_images)}: "
+                    + (f"{timestamp:.3f}s" if timestamp is not None else "timestamp unavailable")
+                )
+                multimodal_images.append(path)
+                if len(multimodal_images) >= 5:
+                    break
+            if len(multimodal_images) >= 5:
+                break
+        multimodal_frame_index = "\n".join(multimodal_frame_labels)
+
         previous_context = None
         if previous_notes is not None:
             previous_context = {
@@ -434,10 +463,15 @@ Immediately preceding reconstructed context:
 Timestamped transcript interval [{chunk.start:.3f}, {chunk.end:.3f}]:
 {chunk.timestamped_text or chunk.text}
 
-Mean ASR confidence (when available): {chunk.asr_confidence}. Treat low-confidence wording as
-uncertain evidence: use visual evidence to resolve it, or record the ambiguity instead of turning it
-into a mathematical claim.
+Mean ASR confidence (when available): {chunk.asr_confidence}.
 Fraction of low-confidence ASR segments: {chunk.low_confidence_fraction}.
+
+The transcript is a noisy observation, not ground truth. The attached board images are a second
+synchronized observation channel. Reconstruct from their agreement and temporal development. When
+they conflict, do not mechanically prefer ASR wording; use visible notation/formulas and local
+cross-channel consistency. If the conflict cannot be resolved, omit the claim and record it in
+unresolved. Never identify a named theorem/person merely because the mathematics resembles a
+standard result: use a descriptive formulation when the name itself is not recoverable.
 
 Write prose, titles, and ambiguity descriptions in language code `{self.config.output_language}`.
 Do not translate established mathematical notation.
@@ -445,21 +479,26 @@ Never put guesses, alternatives, ASR commentary, or words such as "probably"/"в
 blocks. Put them only in `unresolved`. Omit a mathematical statement unless the transcript or visual
 evidence supports it.
 
-Visual evidence:
+Attached board-frame index (same order as attached images):
+{multimodal_frame_index or "No direct board frames available."}
+
+Auxiliary visual evidence (supplemental OCR/local requests only):
 {evidence_json}
 
-In visual evidence, `raw_latex` is literal image-only OCR and has priority when you state what was
-physically written. The `latex` field contains typography normalization only. Use the speech, known
-notation, and mathematical consistency here to make any further correction or inference, and record
-every such content-changing step in `corrections`. Write every user-facing string in language code
-`{self.config.output_language}`, including correction reasons and unresolved items.
-Treat visual confidence below 0.75 as weak evidence: it may suggest a reconstruction but must not
-override clearer audio, preceding context, established notation, or a consistency check. The
-preceding context is for continuity and must not be repeated unless the current interval develops
-it.
+For `kind=board_scan`, the attached image itself is the evidence; `raw_latex` may intentionally
+be empty because no intermediate VLM OCR pass was run. Other visual evidence entries remain
+supplemental observations. Write every user-facing string in language code
+`{self.config.output_language}`, including correction reasons and unresolved items. The preceding
+context is for continuity and must not be repeated unless the current interval develops it.
 """
         notes = self._demote_speculative_blocks(
-            self._structured(prompt, ChunkNotes, operation="finalize_chunk")
+            self._structured(
+                prompt,
+                ChunkNotes,
+                images=multimodal_images or None,
+                guided_json=not bool(multimodal_images),
+                operation="finalize_chunk",
+            )
         )
         visual_corrections = [correction for item in evidence for correction in item.corrections]
         known = {
@@ -484,6 +523,7 @@ it.
             chunk=chunk,
             evidence_json=evidence_json,
             previous_context=previous_context,
+            images=multimodal_images or None,
         )
         notes = self._demote_speculative_blocks(notes)
         notes.chunk_id = chunk.id
@@ -499,6 +539,7 @@ it.
         chunk: LectureChunk,
         evidence_json: str,
         previous_context: dict[str, Any] | None,
+        images: list[Path] | None = None,
     ) -> ChunkNotes:
         equals_count = sum(block.latex.count("=") for block in notes.blocks)
         if not self.config.math_audit or equals_count < self.config.math_audit_min_equals:
@@ -536,7 +577,9 @@ Draft blocks:
             audit = self._structured(
                 prompt,
                 MathAudit,
+                images=images,
                 max_tokens=4096,
+                guided_json=not bool(images),
                 operation="math_audit",
             )
         except (json.JSONDecodeError, ValidationError) as exc:
