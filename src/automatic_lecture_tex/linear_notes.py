@@ -332,5 +332,5 @@ Write titles, reasons and unresolved items in language code `{output_language}`.
         prompt,
         GlobalLectureEditPlan,
         operation="global_lecture_edit",
-        max_tokens=6144,
+        max_tokens=4096,
     )
