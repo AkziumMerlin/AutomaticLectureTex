@@ -594,7 +594,7 @@ def test_high_confidence_source_grounded_issue_marks_exact_block(monkeypatch):
         item.startswith("audit-suppress:") for item in result.blocks[0].source_evidence_ids
     )
     assert "audit-visual:req_riesz" in result.blocks[0].source_evidence_ids
-    assert any("Verifier block 0" in item for item in result.unresolved)
+    assert any("Editor block 0" in item for item in result.unresolved)
 
 
 def test_strict_verdict_rejects_target_excerpt_from_another_block(monkeypatch):
