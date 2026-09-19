@@ -292,7 +292,7 @@ def collect_visual_evidence(
             )
 
         candidates: list[MathOCRCandidate] = []
-        if ocr_backend is not None and ocr_image is not None:
+        if not is_chunk_board_scan and ocr_backend is not None and ocr_image is not None:
             try:
                 candidate = ocr_backend.recognize(ocr_image)
                 if candidate is not None and (
