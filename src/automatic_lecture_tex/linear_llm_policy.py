@@ -61,6 +61,8 @@ MULTIMODAL VERIFIER POLICY:
   Use suppress for writer-added source drift when no safe complete replacement is available.
 - Mathematical plausibility and textbook knowledge are not evidence. Preceding notes are not
   correction evidence.
+- Check exact signs, constants, indices, quantifiers, topology labels, and object identity
+  (especially z_f versus y_f and uniqueness versus up-to-scalar).
 - If uncertain, keep. Do not rewrite for style or expand the lecture.
 """
 
