@@ -59,14 +59,15 @@ notes:
   architecture: linear
   chunk_target_seconds: 180
   chunk_overlap_seconds: 0
-  # Always observe the board across the whole chunk. Transcript cues only add local requests.
+  # Exactly one raw five-frame board scan feeds the multimodal writer and verifier directly.
   visual_chunk_board_scan: true
-  visual_rule_selector: true
+  visual_rule_selector: false
   visual_llm_selector: false
   visual_dedupe_seconds: 8
   max_low_confidence_visual_requests: 0
 
-  linear_correction_scan_enabled: true
+  # Keep the experiment to the two core multimodal calls per chunk.
+  linear_correction_scan_enabled: false
   linear_correction_catalog_chars: 320
   linear_patch_apply_threshold: 0.90
 
@@ -74,10 +75,10 @@ vision:
   frame_offsets_seconds: [-3, 2, 7]
   temporal_composite_enabled: false
   youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
-  max_requests_per_chunk: 4
+  max_requests_per_chunk: 1
   max_workers: 3
 
-  # Give the VLM one full frame plus a full board crop and three overlapping board tiles.
+  # Sample five times across the chunk; use one full-board crop per timestamp (raw frame fallback).
   board_auto_crop_enabled: true
   board_crop_tiles: 3
   board_crop_tile_overlap: 0.14

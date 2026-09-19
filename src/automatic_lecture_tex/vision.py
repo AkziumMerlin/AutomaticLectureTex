@@ -57,10 +57,9 @@ def make_chunk_board_scan_request(chunk: LectureChunk) -> VisualRequest:
         timestamp=(chunk.start + chunk.end) / 2,
         reason=CHUNK_BOARD_SCAN_REASON,
         question=(
-            "The attached frames are evenly sampled board states from this entire lecture chunk. "
-            "Transcribe the mathematically relevant board content across them literally, preserving "
-            "symbols, signs, indices, and visible changes between states. In raw_latex and latex, "
-            "separate distinct states with Frame 0:, Frame 1:, etc. Do not infer missing steps."
+            "The frames are evenly sampled board states from this entire lecture chunk. Preserve "
+            "their chronological order as direct multimodal evidence for reconstruction; do not "
+            "collapse them into an inferred derivation or guess missing board content."
         ),
         priority=5,
     )
