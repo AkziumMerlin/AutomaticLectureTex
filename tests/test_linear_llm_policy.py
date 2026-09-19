@@ -78,7 +78,7 @@ Current visual evidence:
     assert result.unresolved == []
 
 
-def test_finalize_prompt_removes_old_textbook_completion_permissions(monkeypatch):
+def test_finalize_prompt_allows_bounded_contextual_reconstruction(monkeypatch):
     captured = {}
 
     def fake_structured(
@@ -114,15 +114,13 @@ every such content-changing step in `corrections`.
     client._structured("audit", EmptyModel, operation="math_audit")
 
     final_prompt = captured["finalize_chunk"]
-    assert "complete a short derivation" not in final_prompt
-    assert "make any further correction or inference" not in final_prompt
-    assert "Do NOT invent or complete a multi-step derivation" in final_prompt
-    assert "garbled ASR fragments" in final_prompt
-    assert "[omitted-math]" in final_prompt
-    assert "z_f versus y_f" in captured["math_audit"]
+    assert "standard mathematical knowledge" in final_prompt
+    assert "Hahn--Banach" in final_prompt
+    assert "bounded disambiguation prior" in final_prompt
+    assert "mathematically correct, readable lecture note" in final_prompt
     assert "Produce exactly one keep/replace/suppress verdict" in captured["math_audit"]
-    assert "transcript is noisy ASR" in captured["math_audit"]
-    assert "Never guess a theorem/person/name" in captured["math_audit"]
+    assert "contextual" in captured["math_audit"]
+    assert "Correct mathematical errors and internal contradictions" in captured["math_audit"]
 
 
 def test_finalize_chunk_sends_board_scan_frames_directly(tmp_path, monkeypatch):
@@ -176,7 +174,8 @@ def test_finalize_chunk_sends_board_scan_frames_directly(tmp_path, monkeypatch):
     assert captured["finalize_chunk"]["images"] == image_paths
     assert captured["finalize_chunk"]["guided_json"] is False
     assert "transcript is a noisy observation" in captured["finalize_chunk"]["prompt"].lower()
-    assert "never identify a named theorem/person" in captured["finalize_chunk"]["prompt"].lower()
+    assert "hahn--banach" in captured["finalize_chunk"]["prompt"].lower()
+    assert "mathematically correct and convenient" in captured["finalize_chunk"]["prompt"].lower()
 
 
 def test_multimodal_verifier_can_apply_visual_only_replacement(tmp_path, monkeypatch):
@@ -241,6 +240,121 @@ def test_multimodal_verifier_can_apply_visual_only_replacement(tmp_path, monkeyp
     assert str(result.corrections[0].basis) == "visual"
     assert seen["images"] == [image]
     assert seen["guided_json"] is False
+
+
+def test_contextual_editor_can_recover_hahn_banach_and_fix_section_title(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Теорема Гельфанда — Хаймина",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex=(
+                    "По теореме Гельфанда — Хаймина линейный функционал с подпространства "
+                    "продолжается на всё пространство с сохранением нормы."
+                ),
+            )
+        ],
+    )
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        assert "standard mathematical knowledge" in prompt
+        return schema.model_validate(
+            {
+                "section_title": "Теорема Хана—Банаха",
+                "section_title_reason": "Контекст однозначно задаёт стандартную теорему.",
+                "section_title_confidence": 0.98,
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "replace",
+                        "target_excerpt": "теореме Гельфанда — Хаймина",
+                        "replacement_latex": (
+                            "По теореме Хана—Банаха линейный функционал, заданный на "
+                            "подпространстве, продолжается на всё пространство с сохранением нормы."
+                        ),
+                        "reason": "Содержание однозначно идентифицирует теорему Хана—Банаха.",
+                        "confidence": 0.98,
+                        "support": "contextual",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=_chunk("По теореме Анванкова продолжаем функционал без увеличения нормы."),
+        evidence_json="[]",
+        previous_context={"section_title": "Комплексные функционалы", "blocks": []},
+    )
+
+    assert result.section_title == "Теорема Хана—Банаха"
+    assert "Хана—Банаха" in result.blocks[0].latex
+    assert "Гельфанда" not in result.blocks[0].latex
+    assert str(result.corrections[0].basis) == "mathematical_consistency"
+
+
+def test_contextual_editor_can_fix_internal_mathematical_contradiction(monkeypatch):
+    client = object.__new__(LectureModelClient)
+    client.config = LLMConfig(math_audit=True)
+    notes = ChunkNotes(
+        section_title="Теорема Рисса",
+        blocks=[
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Представляющий вектор y_f определяется с точностью до скаляра.",
+            ),
+            NoteBlock(
+                type=BlockType.PARAGRAPH,
+                latex="Следовательно, представляющий вектор y_f определён однозначно.",
+            ),
+        ],
+    )
+
+    def fake_structured(self, prompt, schema, **kwargs):
+        assert "Check blocks jointly for contradictions" in prompt
+        return schema.model_validate(
+            {
+                "section_title": "Представление функционала в гильбертовом пространстве",
+                "section_title_confidence": 0.95,
+                "verdicts": [
+                    {
+                        "block_index": 0,
+                        "action": "replace",
+                        "target_excerpt": "определяется с точностью до скаляра",
+                        "replacement_latex": (
+                            "Ненулевой вектор $z_f\\in(\\ker f)^\\perp$ выбирается с точностью "
+                            "до ненулевого скаляра; представляющий вектор $y_f$ после нормировки "
+                            "определяется однозначно."
+                        ),
+                        "reason": "Черновик смешал вспомогательный z_f и единственный y_f.",
+                        "confidence": 0.96,
+                        "support": "contextual",
+                    },
+                    {
+                        "block_index": 1,
+                        "action": "keep",
+                        "reason": "Согласуется с исправленным предыдущим блоком.",
+                        "confidence": 0.96,
+                        "support": "contextual",
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr(LectureModelClient, "_structured", fake_structured)
+    result = client._audit_math(
+        notes,
+        chunk=_chunk("Берём вектор из ортогонального дополнения и нормируем его."),
+        evidence_json="[]",
+        previous_context=None,
+    )
+
+    assert "z_f" in result.blocks[0].latex
+    assert "y_f" in result.blocks[0].latex
+    assert "однозначно" in result.blocks[0].latex
 
 
 def test_audit_evidence_must_exist_in_declared_current_source():
