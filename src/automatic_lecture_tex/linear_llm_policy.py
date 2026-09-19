@@ -453,21 +453,24 @@ Write reasons in language code `{self.config.output_language}`.
                     )
                     continue
             elif support in {"visual", "combined"}:
-                if not images:
-                    logger.warning(
-                        "[%s] verifier %s rejected for block %d: no direct images available",
-                        chunk.id,
-                        verdict.action,
-                        verdict.block_index,
-                    )
-                    continue
-                # If explicit textual citations were supplied as well, verify them. Direct visual
-                # support itself is intentionally not reduced to OCR text.
-                if verdict.evidence and not audit_evidence_supported(
+                # Direct board images are sufficient visual evidence without OCR. Legacy/supplemental
+                # visual requests can still support a verdict through host-verified OCR quotes.
+                if images:
+                    if verdict.evidence and not audit_evidence_supported(
+                        verdict.evidence, chunk=chunk, evidence_json=evidence_json
+                    ):
+                        logger.warning(
+                            "[%s] verifier %s rejected for block %d: supplied citation not verified",
+                            chunk.id,
+                            verdict.action,
+                            verdict.block_index,
+                        )
+                        continue
+                elif not verdict.evidence or not audit_evidence_supported(
                     verdict.evidence, chunk=chunk, evidence_json=evidence_json
                 ):
                     logger.warning(
-                        "[%s] verifier %s rejected for block %d: supplied citation not verified",
+                        "[%s] verifier %s rejected for block %d: no visual support available",
                         chunk.id,
                         verdict.action,
                         verdict.block_index,
