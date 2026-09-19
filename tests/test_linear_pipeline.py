@@ -257,7 +257,7 @@ def test_final_ir_tex_sanity_repairs_repeated_unmatched_display_lines():
         title="Lecture",
         chunks=[
             ChunkNotes(
-                section_title=r"Слабая сходимость в \\ell\\_2",
+                section_title=r"Слабая сходимость в \ell\_2",
                 blocks=[block],
             )
         ],
