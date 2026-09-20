@@ -37,6 +37,9 @@ all = [
 [project.scripts]
 automatic-lecture-tex = "automatic_lecture_tex.cli:main"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/automatic_lecture_tex"]
 
