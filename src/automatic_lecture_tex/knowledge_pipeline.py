@@ -73,6 +73,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "hierarchy_batch_episodes",
     "episode_synthesis_max_evidence_chars",
     "episode_symbol_context_limit",
+    "state_section_max_evidence_chars",
 }
 
 
@@ -487,6 +488,11 @@ def run_knowledge_pipeline(
             },
         )
         atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
+        if pipeline.config.notes.architecture == "state":
+            atomic_json_dump(
+                work / "lecture_state.json",
+                make_lecture_state(kb).model_dump(mode="json"),
+            )
 
     # A technical window never closes an episode. End-of-lecture is the only unconditional close.
     close_open_episodes(kb)
