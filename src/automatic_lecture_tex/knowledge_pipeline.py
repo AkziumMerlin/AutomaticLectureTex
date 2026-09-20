@@ -434,6 +434,11 @@ def run_knowledge_pipeline(
                 for item in payload.get("visual_evidence", [])
             )
             logger.info("[%s] %s episode cache hit", lecture.id, chunk.id)
+            if pipeline.config.notes.architecture == "state":
+                atomic_json_dump(
+                    work / "lecture_state.json",
+                    make_lecture_state(kb).model_dump(mode="json"),
+                )
             continue
 
         logger.info(
@@ -541,111 +546,183 @@ def run_knowledge_pipeline(
             "outline": outline.model_dump(mode="json"),
         },
     )
+    if pipeline.config.notes.architecture == "state":
+        atomic_json_dump(
+            work / "lecture_state.json",
+            make_lecture_state(kb, outline=outline).model_dump(mode="json"),
+        )
 
-    episode_notes: dict[str, ChunkNotes] = {}
-    episode_batch_cache_hits = 0
-    episode_batches_total = 0
-    episode_synthesis_seconds = 0.0
-    episode_validation_seconds = 0.0
+    state_mode = pipeline.config.notes.architecture == "state"
+    state_section_cache_hits = 0
+    state_section_batches_total = 0
+    state_synthesis_seconds = 0.0
 
-    episodes = sorted(
-        [item for item in kb.episodes if item.observation_ids],
-        key=lambda item: (item.start, item.end, item.id),
-    )
-    for episode in episodes:
-        evidence_batches = episode_evidence_batches(kb, episode, pipeline.config.notes)
-        episode_batches_total += len(evidence_batches)
-        generated_batches: list[ChunkNotes] = []
-
-        for batch_index, evidence_payload in enumerate(evidence_batches):
-            previous_context = previous_block_context(generated_batches)
-            batch_fingerprint = stable_hash(
-                {
-                    "episode": episode.model_dump(mode="json"),
-                    "evidence": evidence_payload,
-                    "previous_context": previous_context,
-                    "llm": pipeline.config.llm.model_dump(mode="json"),
-                    "validation_enabled": pipeline.config.notes.global_validation,
-                    "validation_threshold": (
-                        pipeline.config.notes.global_validation_apply_threshold
-                    ),
-                    "episode_synthesis_cache_version": EPISODE_SYNTHESIS_CACHE_VERSION,
-                }
+    if state_mode:
+        note_sections: list[ChunkNotes] = []
+        outline_context = _state_outline_context(outline)
+        for section in outline.sections:
+            evidence_batches = _state_section_batches(
+                kb,
+                section,
+                transcript,
+                pipeline.config.notes,
             )
-            batch_path = (
-                work
-                / "knowledge_episode_batches"
-                / episode.id
-                / f"batch_{batch_index:03d}.json"
-            )
-            notes = None if force else _load_episode_batch(batch_path, batch_fingerprint)
-            if notes is not None:
-                episode_batch_cache_hits += 1
+            state_section_batches_total += len(evidence_batches)
+            generated_batches: list[ChunkNotes] = []
+            for batch_index, evidence_payload in enumerate(evidence_batches):
+                previous_context = previous_block_context(generated_batches)
+                fingerprint = stable_hash(
+                    {
+                        "state_pipeline_version": STATE_PIPELINE_VERSION,
+                        "section": section.model_dump(mode="json"),
+                        "outline_context": outline_context,
+                        "evidence": evidence_payload,
+                        "previous_context": previous_context,
+                        "llm": pipeline.config.llm.model_dump(mode="json"),
+                    }
+                )
+                path = (
+                    work
+                    / "state_section_batches"
+                    / section.id
+                    / f"batch_{batch_index:03d}.json"
+                )
+                notes = None if force else _load_episode_batch(path, fingerprint)
+                if notes is not None:
+                    state_section_cache_hits += 1
+                    generated_batches.append(notes)
+                    continue
+
+                started = time.perf_counter()
+                notes = _write_state_section_batch(
+                    orchestrator,
+                    section,
+                    evidence_payload,
+                    outline_context=outline_context,
+                    previous_context=previous_context,
+                )
+                state_synthesis_seconds += time.perf_counter() - started
+                atomic_json_dump(
+                    path,
+                    {
+                        "fingerprint": fingerprint,
+                        "evidence": evidence_payload,
+                        "notes": notes.model_dump(mode="json"),
+                    },
+                )
                 generated_batches.append(notes)
+
+            note_sections.append(_merge_state_section_batches(section, generated_batches))
+
+        episode_batch_cache_hits = 0
+        episode_batches_total = 0
+        episode_synthesis_seconds = 0.0
+        episode_validation_seconds = 0.0
+    else:
+        episode_notes: dict[str, ChunkNotes] = {}
+        episode_batch_cache_hits = 0
+        episode_batches_total = 0
+        episode_synthesis_seconds = 0.0
+        episode_validation_seconds = 0.0
+
+        episodes = sorted(
+            [item for item in kb.episodes if item.observation_ids],
+            key=lambda item: (item.start, item.end, item.id),
+        )
+        for episode in episodes:
+            evidence_batches = episode_evidence_batches(kb, episode, pipeline.config.notes)
+            episode_batches_total += len(evidence_batches)
+            generated_batches: list[ChunkNotes] = []
+
+            for batch_index, evidence_payload in enumerate(evidence_batches):
+                previous_context = previous_block_context(generated_batches)
+                batch_fingerprint = stable_hash(
+                    {
+                        "episode": episode.model_dump(mode="json"),
+                        "evidence": evidence_payload,
+                        "previous_context": previous_context,
+                        "llm": pipeline.config.llm.model_dump(mode="json"),
+                        "validation_enabled": pipeline.config.notes.global_validation,
+                        "validation_threshold": (
+                            pipeline.config.notes.global_validation_apply_threshold
+                        ),
+                        "episode_synthesis_cache_version": EPISODE_SYNTHESIS_CACHE_VERSION,
+                    }
+                )
+                batch_path = (
+                    work
+                    / "knowledge_episode_batches"
+                    / episode.id
+                    / f"batch_{batch_index:03d}.json"
+                )
+                notes = None if force else _load_episode_batch(batch_path, batch_fingerprint)
+                if notes is not None:
+                    episode_batch_cache_hits += 1
+                    generated_batches.append(notes)
+                    logger.info(
+                        "[%s] %s batch %d/%d cache hit",
+                        lecture.id,
+                        episode.id,
+                        batch_index + 1,
+                        len(evidence_batches),
+                    )
+                    continue
+
                 logger.info(
-                    "[%s] %s batch %d/%d cache hit",
+                    "[%s] synthesizing %s batch %d/%d",
                     lecture.id,
                     episode.id,
                     batch_index + 1,
                     len(evidence_batches),
                 )
-                continue
-
-            logger.info(
-                "[%s] synthesizing %s batch %d/%d",
-                lecture.id,
-                episode.id,
-                batch_index + 1,
-                len(evidence_batches),
-            )
-            started = time.perf_counter()
-            notes = write_episode_batch(
-                orchestrator,
-                episode,
-                evidence_payload,
-                previous_context,
-            )
-            episode_synthesis_seconds += time.perf_counter() - started
-
-            validation_payload = None
-            if pipeline.config.notes.global_validation and notes.blocks:
                 started = time.perf_counter()
-                validation_payload = validate_episode_batch(
+                notes = write_episode_batch(
                     orchestrator,
+                    episode,
                     evidence_payload,
-                    notes,
+                    previous_context,
                 )
-                episode_validation_seconds += time.perf_counter() - started
-                apply_episode_validation(
-                    notes,
-                    validation_payload,
-                    threshold=pipeline.config.notes.global_validation_apply_threshold,
+                episode_synthesis_seconds += time.perf_counter() - started
+
+                validation_payload = None
+                if pipeline.config.notes.global_validation and notes.blocks:
+                    started = time.perf_counter()
+                    validation_payload = validate_episode_batch(
+                        orchestrator,
+                        evidence_payload,
+                        notes,
+                    )
+                    episode_validation_seconds += time.perf_counter() - started
+                    apply_episode_validation(
+                        notes,
+                        validation_payload,
+                        threshold=pipeline.config.notes.global_validation_apply_threshold,
+                    )
+
+                atomic_json_dump(
+                    batch_path,
+                    {
+                        "fingerprint": batch_fingerprint,
+                        "evidence": evidence_payload,
+                        "notes": notes.model_dump(mode="json"),
+                        "validation": (
+                            validation_payload.model_dump(mode="json")
+                            if validation_payload is not None
+                            else None
+                        ),
+                    },
                 )
+                generated_batches.append(notes)
 
-            atomic_json_dump(
-                batch_path,
-                {
-                    "fingerprint": batch_fingerprint,
-                    "evidence": evidence_payload,
-                    "notes": notes.model_dump(mode="json"),
-                    "validation": (
-                        validation_payload.model_dump(mode="json")
-                        if validation_payload is not None
-                        else None
-                    ),
-                },
-            )
-            generated_batches.append(notes)
+            episode_notes[episode.id] = merge_episode_batches(episode, generated_batches)
 
-        episode_notes[episode.id] = merge_episode_batches(episode, generated_batches)
-
-    # Sections are now a deterministic projection of validated episode notes. No section-level or
-    # full-document synthesis/validation call can grow with lecture duration.
-    note_sections = assemble_outline_sections(
-        outline.sections,
-        episode_notes,
-        outline_unresolved=outline.unresolved,
-    )
+        # Sections are now a deterministic projection of validated episode notes. No section-level or
+        # full-document synthesis/validation call can grow with lecture duration.
+        note_sections = assemble_outline_sections(
+            outline.sections,
+            episode_notes,
+            outline_unresolved=outline.unresolved,
+        )
     ir = LectureIR(
         lecture_id=lecture.id,
         title=lecture.title or lecture.id,
@@ -672,7 +749,11 @@ def run_knowledge_pipeline(
         work / "run_metrics.json",
         {
             "lecture_id": lecture.id,
-            "architecture": "knowledge_episode_graph_bounded",
+            "architecture": (
+                "state_episode_graph_section_synthesis"
+                if state_mode
+                else "knowledge_episode_graph_bounded"
+            ),
             "media_seconds": round(media_seconds, 3),
             "asr_seconds": round(asr_seconds, 3),
             "notes_seconds": round(time.perf_counter() - notes_started, 3),
@@ -682,6 +763,7 @@ def run_knowledge_pipeline(
             "hierarchy_seconds": round(hierarchy_seconds, 3),
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
+            "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "windows_total": len(chunks),
             "windows_processed": processed_windows,
@@ -689,6 +771,8 @@ def run_knowledge_pipeline(
             "episodes_total": len(kb.episodes),
             "episode_batches_total": episode_batches_total,
             "episode_batch_cache_hits": episode_batch_cache_hits,
+            "state_section_batches_total": state_section_batches_total,
+            "state_section_cache_hits": state_section_cache_hits,
             "topic_sections_total": len(outline.sections),
             "subtopics_total": sum(len(item.subsections) for item in outline.sections),
             "sections_total": len(note_sections),
