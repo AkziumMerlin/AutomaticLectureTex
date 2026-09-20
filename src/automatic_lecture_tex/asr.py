@@ -383,7 +383,7 @@ def _extract_audio_chunk(
 
 
 class GigaAMBackend(ASRBackend):
-    """Russian ASR using GigaAM-v3 without external long-form VAD dependencies.
+    """Short-form ASR using any GigaAM CTC/RNNT family member.
 
     GigaAM's native ``transcribe`` API accepts audio up to 25 seconds. The pipeline already has a
     normalized 16 kHz mono WAV, so we chunk it deterministically with ffmpeg and shift the returned
