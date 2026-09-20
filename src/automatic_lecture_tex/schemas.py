@@ -452,6 +452,18 @@ class LectureOutline(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
+class LectureState(BaseModel):
+    """Persistent semantic state assembled before any final note blocks are written."""
+
+    lecture_id: str
+    title: str
+    observations: list[LectureObservation] = Field(default_factory=list)
+    symbols: list[SymbolRecord] = Field(default_factory=list)
+    episodes: list[SemanticEpisode] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+    outline: LectureOutline | None = None
+
+
 class GlobalBlockCorrection(BaseModel):
     section_index: int = Field(ge=0)
     block_index: int = Field(ge=0)
