@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -226,13 +227,19 @@ class GlobalBlockEdit(BaseModel):
     target_block_id: str = Field(min_length=1)
     action: Literal["replace", "drop"]
     replacement_latex: str | None = None
+    merge_into_block_id: str | None = None
     reason: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_action(self) -> GlobalBlockEdit:
-        if self.action == "replace" and not (self.replacement_latex or "").strip():
-            raise ValueError("global replace edit requires replacement_latex")
+        if self.action == "replace":
+            if not (self.replacement_latex or "").strip():
+                raise ValueError("global replace edit requires replacement_latex")
+            if self.merge_into_block_id is not None:
+                raise ValueError("replace edit cannot merge provenance into another block")
+        elif self.merge_into_block_id == self.target_block_id:
+            raise ValueError("drop edit cannot merge provenance into itself")
         return self
 
 
@@ -375,6 +382,70 @@ def _expand_global_structure(
     return sections, effective_drops
 
 
+_DUPLICATE_SPACE = re.compile(r"\s+")
+
+
+def _exact_duplicate_key(block: NoteBlock) -> tuple:
+    """Canonical key for deterministic deduplication of genuinely identical note blocks."""
+
+    return (
+        block.type,
+        _DUPLICATE_SPACE.sub(" ", (block.title or "").strip()),
+        _DUPLICATE_SPACE.sub(" ", block.latex.strip()),
+        block.asset_path or "",
+        _DUPLICATE_SPACE.sub(" ", (block.caption or "").strip()),
+    )
+
+
+def _deduplicate_exact_within_sections(
+    draft_ir: LectureIR,
+    sections: list[GlobalSectionPlan],
+) -> tuple[list[GlobalSectionPlan], list[GlobalBlockEdit]]:
+    """Drop exact repeats only inside one final semantic section.
+
+    Keep the first occurrence. The drop records a merge target so the final host-side application
+    can preserve transcript/visual provenance from a lecturer's later recap.
+    """
+
+    block_map = {
+        stable_id: block
+        for stable_id, block, _section_title, _unresolved in _ordered_global_blocks(draft_ir)
+    }
+    result_sections: list[GlobalSectionPlan] = []
+    drops: list[GlobalBlockEdit] = []
+
+    for section in sections:
+        seen: dict[tuple, str] = {}
+        kept_ids: list[str] = []
+        for stable_id in section.block_ids:
+            block = block_map[stable_id]
+            # Figures can legitimately reuse captions/assets and should never be collapsed here.
+            if block.asset_path:
+                kept_ids.append(stable_id)
+                continue
+            key = _exact_duplicate_key(block)
+            first_id = seen.get(key)
+            if first_id is None:
+                seen[key] = stable_id
+                kept_ids.append(stable_id)
+                continue
+            drops.append(
+                GlobalBlockEdit(
+                    target_block_id=stable_id,
+                    action="drop",
+                    merge_into_block_id=first_id,
+                    reason="Точный повтор уже сохранённого блока в том же итоговом разделе.",
+                    confidence=1.0,
+                )
+            )
+        if not kept_ids:
+            raise ValueError("exact deduplication emptied a global section")
+        result_sections.append(
+            GlobalSectionPlan(title=section.title, block_ids=kept_ids)
+        )
+    return result_sections, drops
+
+
 def _global_batch_payload(
     ordered: list[tuple[str, NoteBlock, str, list[str]]],
     ids: list[str],
@@ -394,34 +465,50 @@ def _global_batch_payload(
     ]
 
 
-def _iter_global_batches(
+def _block_payload_chars(
+    block: NoteBlock,
+    section_title: str,
+    unresolved: list[str],
+) -> int:
+    return (
+        len(section_title)
+        + len(block.title or "")
+        + len(block.latex)
+        + sum(len(item) for item in unresolved[:3])
+        + 160
+    )
+
+
+def _iter_section_editor_units(
     ordered: list[tuple[str, NoteBlock, str, list[str]]],
-    retained_ids: set[str],
+    sections: list[GlobalSectionPlan],
     max_chars: int,
-) -> list[list[str]]:
-    batches: list[list[str]] = []
-    current: list[str] = []
-    current_chars = 0
-    for stable_id, block, section_title, unresolved in ordered:
-        if stable_id not in retained_ids:
-            continue
-        item_chars = (
-            len(stable_id)
-            + len(section_title)
-            + len(block.title or "")
-            + len(block.latex)
-            + sum(len(item) for item in unresolved[:3])
-            + 160
-        )
-        if current and current_chars + item_chars > max_chars:
-            batches.append(current)
-            current = []
-            current_chars = 0
-        current.append(stable_id)
-        current_chars += item_chars
-    if current:
-        batches.append(current)
-    return batches
+) -> list[tuple[str, int, int, list[str]]]:
+    """Prefer one full semantic section per editor call; split only oversized sections."""
+
+    block_info = {
+        stable_id: (block, source_title, unresolved)
+        for stable_id, block, source_title, unresolved in ordered
+    }
+    units: list[tuple[str, int, int, list[str]]] = []
+    for section in sections:
+        parts: list[list[str]] = []
+        current: list[str] = []
+        current_chars = 0
+        for stable_id in section.block_ids:
+            block, _source_title, unresolved = block_info[stable_id]
+            item_chars = _block_payload_chars(block, section.title, unresolved)
+            if current and current_chars + item_chars > max_chars:
+                parts.append(current)
+                current = []
+                current_chars = 0
+            current.append(stable_id)
+            current_chars += item_chars
+        if current:
+            parts.append(current)
+        for part_index, ids in enumerate(parts):
+            units.append((section.title, part_index, len(parts), ids))
+    return units
 
 
 def plan_global_lecture_edit(
@@ -432,11 +519,17 @@ def plan_global_lecture_edit(
     apply_threshold: float = 0.85,
     batch_chars: int = 16000,
     catalog_excerpt_chars: int = 140,
+    course_conventions: list[str] | None = None,
 ) -> GlobalLectureEditPlan:
     """Build a lecture-wide edit plan without putting the full lecture into one context window."""
 
     catalog = _global_catalog_payload(draft_ir, catalog_excerpt_chars)
     catalog_json = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+    conventions_json = json.dumps(
+        list(course_conventions or []),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
     structure_prompt = f"""Plan the GLOBAL structure of a reconstructed university lecture.
 You see a compact catalog of the complete lecture, not the full block text. Use it to merge local
@@ -445,6 +538,9 @@ blocks. Do not perform detailed mathematical rewrites in this pass.
 
 COMPLETE COMPACT LECTURE CATALOG:
 {catalog_json}
+
+COURSE-SPECIFIC CONVENTIONS (authoritative; preserve them rather than "correcting" them):
+{conventions_json}
 
 Return section BOUNDARIES only:
 - sections are chronological;
@@ -471,10 +567,12 @@ Use canonical mathematical names in section titles. Write text in language code
         apply_threshold=apply_threshold,
     )
 
+    sections, exact_drops = _deduplicate_exact_within_sections(draft_ir, sections)
+    effective_drops.extend(exact_drops)
+
     ordered = _ordered_global_blocks(draft_ir)
     dropped_ids = {item.target_block_id for item in effective_drops}
-    retained_ids = {stable_id for stable_id, *_ in ordered if stable_id not in dropped_ids}
-    batches = _iter_global_batches(ordered, retained_ids, batch_chars)
+    units = _iter_section_editor_units(ordered, sections, batch_chars)
 
     section_context = [
         {
@@ -491,19 +589,26 @@ Use canonical mathematical names in section titles. Write text in language code
     unresolved = list(structure.unresolved)
     patched_ids = set(dropped_ids)
 
-    for batch_index, batch_ids in enumerate(batches):
+    for unit_index, (section_title, part_index, part_count, batch_ids) in enumerate(units):
         full_batch = _global_batch_payload(ordered, batch_ids)
-        batch_prompt = f"""Mathematically edit ONE bounded batch of blocks from a complete reconstructed
-lecture. The compact catalog and final section layout provide GLOBAL context; only blocks in
-CURRENT FULL-TEXT BATCH may be rewritten.
+        batch_prompt = f"""Mathematically edit ONE semantic section of a reconstructed university
+lecture. Normally this call sees the whole final section; only an oversized section is split into
+multiple parts. This is deliberate: proofs, notation roles, and theorem hypotheses should be checked
+together rather than in arbitrary character windows.
 
 COMPLETE COMPACT CATALOG:
 {catalog_json}
 
+COURSE-SPECIFIC CONVENTIONS (authoritative; do NOT "correct" these):
+{conventions_json}
+
 FINAL SECTION LAYOUT:
 {section_json}
 
-CURRENT FULL-TEXT BATCH {batch_index + 1}/{len(batches)}:
+CURRENT SECTION: {section_title}
+SECTION PART: {part_index + 1}/{part_count}
+EDITOR UNIT: {unit_index + 1}/{len(units)}
+CURRENT FULL-TEXT SECTION BLOCKS:
 {json.dumps(full_batch, ensure_ascii=False, separators=(",", ":"))}
 
 Return replacement patches only when a current block contains a real mathematical/content error:
@@ -512,7 +617,7 @@ sign/domain/codomain/topology/compactness error, or contradiction with the globa
 Use standard mathematics to recover the intended lecture statement when it is clear.
 
 Rules:
-- target_block_id must be from CURRENT FULL-TEXT BATCH only;
+- target_block_id must be from CURRENT FULL-TEXT SECTION BLOCKS only;
 - action must be replace;
 - replacement_latex is the complete corrected content of that ONE block;
 - do not drop blocks here; deduplication was handled by the global structure pass;
