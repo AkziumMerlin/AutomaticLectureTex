@@ -49,6 +49,27 @@ def uniform_chunk_sample_times(chunk: LectureChunk, count: int) -> list[float]:
     ]
 
 
+def board_change_probe_times(
+    chunk: LectureChunk,
+    *,
+    probe_seconds: float,
+    max_probe_frames: int,
+) -> list[float]:
+    """Return deterministic dense probe timestamps for host-side board-change detection."""
+
+    if probe_seconds <= 0 or max_probe_frames <= 0:
+        return []
+    duration = max(0.0, chunk.end - chunk.start)
+    if duration == 0.0:
+        return [chunk.start]
+
+    count = min(max_probe_frames, max(2, int(duration // probe_seconds) + 1))
+    if count <= 2:
+        return [chunk.start, chunk.end]
+    step = duration / (count - 1)
+    return [chunk.start + index * step for index in range(count)]
+
+
 def make_chunk_board_scan_request(chunk: LectureChunk) -> VisualRequest:
     """Create one multimodal request representing the board state across the whole chunk."""
 
@@ -57,7 +78,8 @@ def make_chunk_board_scan_request(chunk: LectureChunk) -> VisualRequest:
         timestamp=(chunk.start + chunk.end) / 2,
         reason=CHUNK_BOARD_SCAN_REASON,
         question=(
-            "The frames are evenly sampled board states from this entire lecture chunk. Preserve "
+            "The frames are chronologically selected board states from this lecture interval. "
+            "Selection may be driven by deterministic visual change rather than fixed timestamps. Preserve "
             "their chronological order as direct multimodal evidence for reconstruction; do not "
             "collapse them into an inferred derivation or guess missing board content."
         ),
