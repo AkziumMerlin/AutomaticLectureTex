@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 
 # Final-IR version. Chunk reconstruction keeps its own cache version so adding the global editor
 # does not force expensive multimodal chunk recomputation.
-LINEAR_PIPELINE_VERSION = 7
+LINEAR_PIPELINE_VERSION = 8
 LINEAR_CHUNK_CACHE_VERSION = 6
-GLOBAL_LECTURE_EDITOR_VERSION = 1
+GLOBAL_LECTURE_EDITOR_VERSION = 2
 
 
 def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
@@ -596,6 +596,8 @@ def run_linear_pipeline(
                 "draft_ir": draft_ir.model_dump(mode="json"),
                 "llm": pipeline.config.llm.model_dump(mode="json"),
                 "apply_threshold": config.global_validation_apply_threshold,
+                "batch_chars": config.linear_global_editor_batch_chars,
+                "catalog_excerpt_chars": config.linear_global_editor_catalog_excerpt_chars,
             }
         )
         global_plan = None
@@ -617,8 +619,11 @@ def run_linear_pipeline(
                     pipeline.llm,
                     draft_ir=draft_ir,
                     output_language=pipeline.config.llm.output_language,
+                    apply_threshold=config.global_validation_apply_threshold,
+                    batch_chars=config.linear_global_editor_batch_chars,
+                    catalog_excerpt_chars=config.linear_global_editor_catalog_excerpt_chars,
                 )
-            except (json.JSONDecodeError, ValidationError) as exc:
+            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                 logger.warning("[%s] global lecture editor failed: %s", lecture.id, exc)
                 global_plan = None
             global_edit_seconds += time.perf_counter() - started

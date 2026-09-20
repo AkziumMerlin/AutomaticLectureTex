@@ -19,6 +19,9 @@ def test_functional_analysis_config_uses_pre_pr2_linear_baseline():
     assert config.llm.math_audit is True
     assert config.llm.math_audit_min_equals == 4
     assert config.notes.linear_correction_scan_enabled is False
+    assert config.notes.global_validation is True
+    assert config.notes.linear_global_editor_batch_chars == 16000
+    assert config.notes.linear_global_editor_catalog_excerpt_chars == 140
     assert config.vision.temporal_composite_enabled is False
     assert config.vision.max_requests_per_chunk == 1
     assert config.vision.board_uniform_samples == 5
