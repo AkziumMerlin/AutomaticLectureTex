@@ -286,14 +286,7 @@ class _GlobalEditorLLM:
                         {"title": "Основы", "first_block_id": "block_0000_000"},
                         {"title": "Продолжение", "first_block_id": "block_0001_001"},
                     ],
-                    "drops": [
-                        {
-                            "target_block_id": "block_0001_000",
-                            "action": "drop",
-                            "reason": "Повтор предыдущего блока.",
-                            "confidence": 0.99,
-                        }
-                    ],
+                    "drops": [],
                 }
             )
         assert operation == "global_lecture_section_edit"
@@ -433,3 +426,86 @@ def test_short_exact_recap_is_not_deterministically_collapsed():
 
     assert not plan.patches
     assert plan.sections[0].block_ids == ["block_0000_000", "block_0001_000"]
+
+
+
+class _CorrectionThenDedupLLM:
+    def __init__(self):
+        self.section_prompt = ""
+
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Доказательство", "first_block_id": "block_0000_000"}
+                    ],
+                    "drops": [],
+                }
+            )
+        assert operation == "global_lecture_section_edit"
+        self.section_prompt = prompt
+        # Earlier proof contains the lecturer's initial wrong sign; the later recap contains
+        # the corrected statement. The section editor reconciles the early block to the later one.
+        return schema.model_validate(
+            {
+                "patches": [
+                    {
+                        "target_block_id": "block_0000_001",
+                        "action": "replace",
+                        "replacement_latex": "Исправленный шаг: знак должен быть минус.",
+                        "reason": "Позднее повторение доказательства явно даёт исправленный знак.",
+                        "confidence": 0.99,
+                    }
+                ],
+                "unresolved": [],
+            }
+        )
+
+
+def test_later_corrected_recap_remains_visible_until_section_edit_then_dedups():
+    common = (
+        "Длинный общий шаг доказательства, который лектор затем повторяет при пояснении "
+        "доказательства в конце, без изменения математического содержания."
+    )
+    early_common = _block("block_0000_000", common, "seg_early_common")
+    early_wrong = _block("block_0000_001", "Первоначальный шаг: знак должен быть плюс.", "seg_wrong")
+    late_common = _block("block_0001_000", common, "seg_late_common")
+    late_correct = _block(
+        "block_0001_001",
+        "Исправленный шаг: знак должен быть минус.",
+        "seg_correction",
+    )
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Первая версия", blocks=[early_common, early_wrong]),
+            ChunkNotes(section_title="Пояснение", blocks=[late_common, late_correct]),
+        ],
+    )
+    llm = _CorrectionThenDedupLLM()
+
+    plan = plan_global_lecture_edit(
+        llm,
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=100,
+    )
+
+    # Both early and late copies must have reached the section editor before deduplication.
+    assert "block_0000_000" in llm.section_prompt
+    assert "block_0001_000" in llm.section_prompt
+    assert "block_0000_001" in llm.section_prompt
+    assert "block_0001_001" in llm.section_prompt
+
+    # After reconciliation both repeated proof steps collapse, keeping the logical first location.
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0000_001"]
+    drops = {patch.target_block_id: patch for patch in plan.patches if patch.action == "drop"}
+    assert drops["block_0001_000"].merge_into_block_id == "block_0000_000"
+    assert drops["block_0001_001"].merge_into_block_id == "block_0000_001"
+
+    result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+    assert result.chunks[0].blocks[1].latex == "Исправленный шаг: знак должен быть минус."
+    assert block_segment_ids(result.chunks[0].blocks[1]) == ["seg_wrong", "seg_correction"]
