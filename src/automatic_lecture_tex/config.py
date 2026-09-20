@@ -75,7 +75,7 @@ class LLMConfig(BaseModel):
 
 
 class NotesConfig(BaseModel):
-    architecture: Literal["linear", "knowledge", "legacy"] = "knowledge"
+    architecture: Literal["linear", "state", "knowledge", "legacy"] = "knowledge"
     chunk_target_seconds: float = Field(default=480.0, gt=0)
     chunk_overlap_seconds: float = Field(default=120.0, ge=0)
     boundary_context_seconds: float = Field(default=120.0, ge=0)
@@ -147,7 +147,12 @@ class VisionConfig(BaseModel):
     board_crop_max_luminance: float = Field(default=0.78, ge=0.20, le=0.98)
     board_crop_min_score: float = Field(default=0.35, ge=0.0, le=1.0)
     board_crop_max_vlm_images: int = Field(default=5, ge=2, le=8)
+    board_sampling_mode: Literal["uniform", "change"] = "uniform"
     board_uniform_samples: int = Field(default=6, ge=2, le=12)
+    board_change_probe_seconds: float = Field(default=8.0, ge=1.0, le=60.0)
+    board_change_threshold: float = Field(default=0.20, ge=0.0, le=3.0)
+    board_change_min_gap_seconds: float = Field(default=6.0, ge=0.0, le=60.0)
+    board_change_max_probe_frames: int = Field(default=48, ge=3, le=240)
 
     # Fail-safe: if substantive mathematical content remains unresolved and readable visual evidence
     # exists, insert the best board crop directly into the notes instead of inventing a reconstruction.
