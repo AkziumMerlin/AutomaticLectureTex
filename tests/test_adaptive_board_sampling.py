@@ -80,3 +80,30 @@ def test_board_state_selector_does_not_add_unchanged_last_probe(tmp_path):
     )
 
     assert [item.timestamp for item in selected] == [0.0]
+
+
+
+def test_board_state_selector_spreads_budget_across_all_detected_changes(tmp_path):
+    frames = []
+    for index in range(9):
+        path = tmp_path / f"state_{index}.png"
+        image = Image.new("RGB", (160, 90), "black")
+        draw = ImageDraw.Draw(image)
+        for line_index in range(index + 1):
+            y = 8 + 8 * line_index
+            draw.line((15, y, 145, y), fill="white", width=2)
+        image.save(path)
+        frames.append(ExtractedFrame(timestamp=float(index * 10), path=path))
+
+    selected = select_board_state_frames(
+        frames,
+        max_states=5,
+        change_threshold=0.001,
+        min_gap_seconds=1.0,
+    )
+
+    timestamps = [item.timestamp for item in selected]
+    assert len(timestamps) == 5
+    assert timestamps[0] == 0.0
+    assert timestamps[-1] == 80.0
+    assert timestamps == sorted(timestamps)
