@@ -19,6 +19,8 @@ from .schemas import (
     LectureChunk,
     LectureIR,
     LectureKnowledgeBase,
+    LectureOutline,
+    LectureState,
     OutlineSection,
     Transcript,
     VisualEvidence,
@@ -119,6 +121,24 @@ def apply_knowledge_update(
         kb.symbols.append(symbol)
 
     kb.unresolved = _merge_unique(kb.unresolved, update.unresolved)
+
+
+def make_lecture_state(
+    kb: LectureKnowledgeBase,
+    *,
+    outline: LectureOutline | None = None,
+) -> LectureState:
+    """Project the mutable reconstruction KB into the persistent state exposed to synthesis."""
+
+    return LectureState(
+        lecture_id=kb.lecture_id,
+        title=kb.title,
+        observations=[item.model_copy(deep=True) for item in kb.observations],
+        symbols=[item.model_copy(deep=True) for item in kb.symbols if item.active],
+        episodes=[item.model_copy(deep=True) for item in kb.episodes],
+        unresolved=list(kb.unresolved),
+        outline=outline.model_copy(deep=True) if outline is not None else None,
+    )
 
 
 def compact_knowledge_state(kb: LectureKnowledgeBase, config: NotesConfig) -> dict[str, Any]:
