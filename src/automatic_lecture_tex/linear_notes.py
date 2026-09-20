@@ -266,10 +266,10 @@ class GlobalLectureStructurePlan(BaseModel):
 
     @model_validator(mode="after")
     def drops_only(self) -> GlobalLectureStructurePlan:
-        if any(item.action != "drop" for item in self.drops):
-            raise ValueError("global structure pass may emit drop edits only")
-        if any(item.merge_into_block_id is not None for item in self.drops):
-            raise ValueError("LLM structure drops cannot request provenance merges")
+        if self.drops:
+            raise ValueError(
+                "global structure pass must not drop content before section-level reconciliation"
+            )
         return self
 
 
@@ -556,10 +556,10 @@ Return section BOUNDARIES only:
 - use substantially fewer meaningful sections than local chunks;
 - do not reorder blocks.
 
-Return drops only for high-confidence duplication, redundant transitions, superseded text, or
-unrecoverable noise visible from the catalog. Do not drop a substantive mathematical block just
-because its excerpt looks suspicious; detailed mathematics is handled later.
-Leave merge_into_block_id null in all LLM-generated drops; provenance merging is host-owned.
+Do NOT drop any blocks in this pass: return drops=[].
+Repeated material can contain a lecturer correction or clarification, so every version must remain
+visible to the section-level mathematical editor. Deduplication happens only after mathematical
+reconciliation.
 Use canonical mathematical names in section titles. Write text in language code
 `{output_language}`.
 """
@@ -575,11 +575,7 @@ Use canonical mathematical names in section titles. Write text in language code
         apply_threshold=apply_threshold,
     )
 
-    sections, exact_drops = _deduplicate_exact_within_sections(draft_ir, sections)
-    effective_drops.extend(exact_drops)
-
     ordered = _ordered_global_blocks(draft_ir)
-    dropped_ids = {item.target_block_id for item in effective_drops}
     units = _iter_section_editor_units(ordered, sections, batch_chars)
 
     section_context = [
@@ -595,7 +591,7 @@ Use canonical mathematical names in section titles. Write text in language code
 
     patches: list[GlobalBlockEdit] = list(effective_drops)
     unresolved = list(structure.unresolved)
-    patched_ids = set(dropped_ids)
+    patched_ids = {item.target_block_id for item in effective_drops}
 
     for unit_index, (section_title, part_index, part_count, batch_ids) in enumerate(units):
         full_batch = _global_batch_payload(ordered, batch_ids)
@@ -628,7 +624,8 @@ Rules:
 - target_block_id must be from CURRENT FULL-TEXT SECTION BLOCKS only;
 - action must be replace;
 - replacement_latex is the complete corrected content of that ONE block;
-- do not drop blocks here; deduplication was handled by the global structure pass;
+- do not drop blocks here; the deterministic exact-dedup pass runs only AFTER all section
+  corrections have been collected, so repeated proofs remain available as correction evidence;
 - do not rewrite merely for style;
 - preserve useful lecture-specific derivations/examples and established notation;
 - do not add unrelated textbook exposition;
@@ -654,8 +651,36 @@ Write reasons/unresolved text in language code `{output_language}`.
             patches.append(patch)
         unresolved.extend(batch_result.unresolved)
 
+    # Reconcile high-confidence mathematical replacements in a temporary copy BEFORE exact dedup.
+    # This is essential for lecturer self-corrections: a later repeated proof stays visible to the
+    # editor, can correct the earlier version, and only then may identical final blocks collapse.
+    reconciled = draft_ir.model_copy(deep=True)
+    reconciled_map = {
+        stable_id: block
+        for stable_id, block, _section_title, _unresolved in _ordered_global_blocks(reconciled)
+    }
+    for patch in patches:
+        if (
+            patch.action == "replace"
+            and patch.confidence >= apply_threshold
+            and patch.target_block_id in reconciled_map
+        ):
+            reconciled_map[patch.target_block_id].latex = (patch.replacement_latex or "").strip()
+
+    dedup_sections, exact_drops = _deduplicate_exact_within_sections(reconciled, sections)
+    exact_drop_ids = {item.target_block_id for item in exact_drops}
+    # A block that is removed after reconciliation does not need its own replacement patch in the
+    # final plan. Its corrected semantics are represented by the retained equivalent block, while
+    # its source provenance is merged into that block by the host.
+    patches = [
+        patch
+        for patch in patches
+        if not (patch.action == "replace" and patch.target_block_id in exact_drop_ids)
+    ]
+    patches.extend(exact_drops)
+
     return GlobalLectureEditPlan(
-        sections=sections,
+        sections=dedup_sections,
         patches=patches,
         unresolved=list(dict.fromkeys(unresolved)),
     )
