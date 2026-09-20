@@ -523,3 +523,153 @@ def test_later_corrected_recap_remains_visible_until_section_edit_then_dedups():
         "слагаемых знак перед вторым членом должен быть минус; это исправленная версия шага."
     )
     assert block_segment_ids(result.chunks[0].blocks[1]) == ["seg_wrong", "seg_correction"]
+
+
+
+class _ExplicitReconcileLLM:
+    def __init__(self):
+        self.section_prompt = ""
+
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Комплексная линейность", "first_block_id": "block_0000_000"}
+                    ],
+                    "drops": [],
+                }
+            )
+        assert operation == "global_lecture_section_edit"
+        self.section_prompt = prompt
+        return schema.model_validate(
+            {
+                "patches": [],
+                "reconciliations": [
+                    {
+                        "target_block_id": "block_0000_000",
+                        "source_block_ids": ["block_0001_000"],
+                        "replacement_latex": (
+                            r"Пусть \\(\\lambda=\\mu+i\\nu\\). Тогда из вещественной "
+                            r"линейности \\(w\\) получаем "
+                            r"\\(w(\\lambda x)=\\mu w(x)+\\nu w(ix)\\), после чего "
+                            r"следует комплексная линейность восстановленного функционала."
+                        ),
+                        "reason": (
+                            "Поздний повтор исправляет знак в ранней версии того же шага "
+                            "доказательства."
+                        ),
+                        "confidence": 0.99,
+                    }
+                ],
+                "unresolved": [],
+            }
+        )
+
+
+def test_explicit_reconciliation_merges_nonidentical_corrected_versions():
+    early = _block(
+        "block_0000_000",
+        (
+            r"Пусть \\(\\lambda=\\mu+i\\nu\\). Тогда "
+            r"\\(w(\\lambda x)=\\mu w(x)-\\nu w(ix)\\)."
+        ),
+        "seg_early_wrong",
+    )
+    late = _block(
+        "block_0001_000",
+        (
+            r"Повторим вычисление: \\(w(\\lambda x)=\\mu w(x)+\\nu w(ix)\\), "
+            r"поэтому восстановленный функционал комплексно линеен."
+        ),
+        "seg_late_correction",
+    )
+    late.source_evidence_ids = ["visual_correction"]
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Первая версия", blocks=[early]),
+            ChunkNotes(section_title="Пояснение", blocks=[late]),
+        ],
+    )
+    llm = _ExplicitReconcileLLM()
+
+    plan = plan_global_lecture_edit(
+        llm,
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=120,
+    )
+
+    assert "block_0000_000" in llm.section_prompt
+    assert "block_0001_000" in llm.section_prompt
+    assert plan.sections[0].block_ids == ["block_0000_000"]
+
+    replacement = next(
+        patch
+        for patch in plan.patches
+        if patch.target_block_id == "block_0000_000" and patch.action == "replace"
+    )
+    merged_source = next(
+        patch
+        for patch in plan.patches
+        if patch.target_block_id == "block_0001_000" and patch.action == "drop"
+    )
+    assert "+" in replacement.replacement_latex
+    assert merged_source.merge_into_block_id == "block_0000_000"
+    assert merged_source.merge_kind == "reconciliation"
+
+    result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+    assert len(result.chunks[0].blocks) == 1
+    final = result.chunks[0].blocks[0]
+    assert r"+\\nu w(ix)" in final.latex
+    assert block_segment_ids(final) == ["seg_early_wrong", "seg_late_correction"]
+    assert final.source_evidence_ids == ["visual_correction"]
+
+
+class _LateTargetReconcileLLM:
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Section", "first_block_id": "block_0000_000"}
+                    ],
+                    "drops": [],
+                }
+            )
+        return schema.model_validate(
+            {
+                "reconciliations": [
+                    {
+                        "target_block_id": "block_0001_000",
+                        "source_block_ids": ["block_0000_000"],
+                        "replacement_latex": "canonical",
+                        "reason": "bad ordering",
+                        "confidence": 0.99,
+                    }
+                ]
+            }
+        )
+
+
+def test_reconciliation_target_must_be_earliest_occurrence():
+    import pytest
+
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="A", blocks=[_block("block_0000_000", "early")]),
+            ChunkNotes(section_title="B", blocks=[_block("block_0001_000", "late")]),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="earliest"):
+        plan_global_lecture_edit(
+            _LateTargetReconcileLLM(),
+            draft_ir=draft,
+            output_language="ru",
+        )
