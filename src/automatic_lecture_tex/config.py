@@ -84,6 +84,8 @@ class NotesConfig(BaseModel):
     max_outline_sections: int = Field(default=40, ge=1, le=200)
     global_validation: bool = True
     global_validation_apply_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    linear_global_editor_batch_chars: int = Field(default=16000, ge=4000, le=60000)
+    linear_global_editor_catalog_excerpt_chars: int = Field(default=140, ge=40, le=800)
     hierarchy_batch_episodes: int = Field(default=24, ge=2, le=100)
     episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
     episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)

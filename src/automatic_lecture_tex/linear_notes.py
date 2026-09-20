@@ -247,23 +247,71 @@ class GlobalLectureEditPlan(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
-def _global_draft_payload(ir: LectureIR) -> list[dict]:
+class GlobalSectionBoundary(BaseModel):
+    title: str = Field(min_length=1)
+    first_block_id: str = Field(min_length=1)
+
+
+class GlobalLectureStructurePlan(BaseModel):
+    sections: list[GlobalSectionBoundary] = Field(min_length=1)
+    drops: list[GlobalBlockEdit] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def drops_only(self) -> GlobalLectureStructurePlan:
+        if any(item.action != "drop" for item in self.drops):
+            raise ValueError("global structure pass may emit drop edits only")
+        return self
+
+
+class GlobalLecturePatchBatch(BaseModel):
+    patches: list[GlobalBlockEdit] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def replacements_only(self) -> GlobalLecturePatchBatch:
+        if any(item.action != "replace" for item in self.patches):
+            raise ValueError("global math batch may emit replace edits only")
+        return self
+
+
+def _ordered_global_blocks(ir: LectureIR) -> list[tuple[str, NoteBlock, str, list[str]]]:
+    result: list[tuple[str, NoteBlock, str, list[str]]] = []
+    for chunk in ir.chunks:
+        for block in chunk.blocks:
+            stable_id = block_id(block)
+            if not stable_id:
+                raise ValueError("global editor requires stable ids on every draft block")
+            result.append((stable_id, block, chunk.section_title, list(chunk.unresolved)))
+    return result
+
+
+def _shorten_global_text(value: str, max_chars: int) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 7:
+        return text[:max_chars]
+    half = (max_chars - 5) // 2
+    return text[:half] + " ... " + text[-half:]
+
+
+def _global_catalog_payload(ir: LectureIR, excerpt_chars: int) -> list[dict]:
     payload: list[dict] = []
     for chunk_index, chunk in enumerate(ir.chunks):
         payload.append(
             {
                 "chunk_index": chunk_index,
-                "chunk_id": chunk.chunk_id,
-                "start": chunk.start,
-                "end": chunk.end,
                 "section_title": chunk.section_title,
-                "unresolved": list(chunk.unresolved),
+                "unresolved": [
+                    _shorten_global_text(item, 180) for item in chunk.unresolved[:4]
+                ],
                 "blocks": [
                     {
                         "id": block_id(block),
                         "type": block.type,
                         "title": block.title,
-                        "latex": block.latex,
+                        "excerpt": _shorten_global_text(block.latex, excerpt_chars),
                     }
                     for block in chunk.blocks
                 ],
@@ -272,68 +320,230 @@ def _global_draft_payload(ir: LectureIR) -> list[dict]:
     return payload
 
 
+def _expand_global_structure(
+    draft_ir: LectureIR,
+    structure: GlobalLectureStructurePlan,
+    *,
+    apply_threshold: float,
+) -> tuple[list[GlobalSectionPlan], list[GlobalBlockEdit]]:
+    ordered = _ordered_global_blocks(draft_ir)
+    ordered_ids = [item[0] for item in ordered]
+    known = set(ordered_ids)
+
+    effective_drops: list[GlobalBlockEdit] = []
+    dropped: set[str] = set()
+    for patch in structure.drops:
+        if patch.target_block_id not in known:
+            raise ValueError(f"global structure references unknown block {patch.target_block_id!r}")
+        if patch.confidence < apply_threshold:
+            continue
+        if patch.target_block_id in dropped:
+            raise ValueError(f"duplicate global drop for {patch.target_block_id!r}")
+        dropped.add(patch.target_block_id)
+        effective_drops.append(patch)
+
+    retained_ids = [stable_id for stable_id in ordered_ids if stable_id not in dropped]
+    if not retained_ids:
+        raise ValueError("global structure dropped every lecture block")
+
+    boundaries = structure.sections
+    boundary_ids = [item.first_block_id for item in boundaries]
+    if len(boundary_ids) != len(set(boundary_ids)):
+        raise ValueError("global structure contains duplicate section boundaries")
+    if any(stable_id not in retained_ids for stable_id in boundary_ids):
+        raise ValueError("global section boundary must reference a retained block")
+    if boundary_ids[0] != retained_ids[0]:
+        raise ValueError("first global section must start at the first retained block")
+
+    position = {stable_id: index for index, stable_id in enumerate(retained_ids)}
+    boundary_positions = [position[stable_id] for stable_id in boundary_ids]
+    if boundary_positions != sorted(boundary_positions):
+        raise ValueError("global section boundaries must preserve lecture order")
+
+    sections: list[GlobalSectionPlan] = []
+    for index, boundary in enumerate(boundaries):
+        start = boundary_positions[index]
+        end = (
+            boundary_positions[index + 1]
+            if index + 1 < len(boundary_positions)
+            else len(retained_ids)
+        )
+        ids = retained_ids[start:end]
+        if not ids:
+            raise ValueError("global structure produced an empty section")
+        sections.append(GlobalSectionPlan(title=boundary.title.strip(), block_ids=ids))
+    return sections, effective_drops
+
+
+def _global_batch_payload(
+    ordered: list[tuple[str, NoteBlock, str, list[str]]],
+    ids: list[str],
+) -> list[dict]:
+    wanted = set(ids)
+    return [
+        {
+            "id": stable_id,
+            "source_section": section_title,
+            "type": block.type,
+            "title": block.title,
+            "latex": block.latex,
+            "unresolved": unresolved[:3],
+        }
+        for stable_id, block, section_title, unresolved in ordered
+        if stable_id in wanted
+    ]
+
+
+def _iter_global_batches(
+    ordered: list[tuple[str, NoteBlock, str, list[str]]],
+    retained_ids: set[str],
+    max_chars: int,
+) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_chars = 0
+    for stable_id, block, section_title, unresolved in ordered:
+        if stable_id not in retained_ids:
+            continue
+        item_chars = (
+            len(stable_id)
+            + len(section_title)
+            + len(block.title or "")
+            + len(block.latex)
+            + sum(len(item) for item in unresolved[:3])
+            + 160
+        )
+        if current and current_chars + item_chars > max_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(stable_id)
+        current_chars += item_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
 def plan_global_lecture_edit(
     llm,
     *,
     draft_ir: LectureIR,
     output_language: str,
+    apply_threshold: float = 0.85,
+    batch_chars: int = 16000,
+    catalog_excerpt_chars: int = 140,
 ) -> GlobalLectureEditPlan:
-    prompt = f"""Edit the COMPLETE reconstructed lecture into one coherent, mathematically correct,
-study-friendly set of notes. The input is a DraftLectureIR produced from local multimodal chunks.
-This pass is deliberately global: resolve contradictions between chunks, remove repetitions, merge
-fragmented topics into sensible sections, stabilize notation and canonical theorem names, and repair
-mathematical mistakes when the intended lecture content is clear.
+    """Build a lecture-wide edit plan without putting the full lecture into one context window."""
 
-You are NOT asked to reproduce the lecture verbatim and you are NOT allowed to turn it into a
-different textbook chapter. Preserve the lecture's subject, level, main examples, and argument flow.
-Use standard mathematical knowledge to correct obvious local reconstruction mistakes, missing
-hypotheses, wrong inequality directions, confused object roles, malformed standard names, and
-internally inconsistent claims.
+    catalog = _global_catalog_payload(draft_ir, catalog_excerpt_chars)
+    catalog_json = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
 
-INPUT DRAFT:
-{json.dumps(_global_draft_payload(draft_ir), ensure_ascii=False, separators=(",", ":"))}
+    structure_prompt = f"""Plan the GLOBAL structure of a reconstructed university lecture.
+You see a compact catalog of the complete lecture, not the full block text. Use it to merge local
+3-minute chunk headings into coherent study-note sections and to identify clear duplicate/redundant
+blocks. Do not perform detailed mathematical rewrites in this pass.
 
-Return a compact EDIT PLAN, not the full lecture text.
+COMPLETE COMPACT LECTURE CATALOG:
+{catalog_json}
 
-SECTIONS:
-- Create a concise sequence of final sections. Each section contains existing exact block_ids.
-- Every retained source block id must occur exactly once across all section block_ids.
-- Keep chronological mathematical order, but merge adjacent/repeated chunk sections when they are
-  really one topic.
-- Do not create new block ids.
-- A block omitted from all sections MUST have an explicit high-confidence action=drop patch.
-- Prefer substantially fewer, semantically meaningful sections over one section per 3-minute chunk.
+Return section BOUNDARIES only:
+- sections are chronological;
+- first_block_id is the exact id of the first retained block of that section;
+- the first section must begin at the first non-dropped lecture block;
+- use substantially fewer meaningful sections than local chunks;
+- do not reorder blocks.
 
-PATCHES:
-- action=replace: rewrite ONE existing block completely when it contains a mathematical/content
-  error. replacement_latex is the complete final contents of that block; do not emit outer TeX
-  environments or section commands.
-- action=drop: remove a duplicate, redundant transition, unrecoverable noise, or superseded block.
-- Do not use drop merely to avoid fixing a difficult but important mathematical statement.
-- Do not merge unrelated material into one replacement block. Deduplication should normally be done
-  by choosing the best existing block and dropping its repeats.
-- confidence reflects confidence that the editorial operation improves the intended lecture notes.
-- Use canonical mathematical terminology and theorem names when they are identifiable. If a name is
-  genuinely ambiguous, use a descriptive formulation in a replacement rather than inventing a name.
-
-GLOBAL CHECKS:
-- Check all theorem hypotheses and conclusions.
-- Check signs, inequality directions, quantifiers, domains/codomains, topology names, and compactness
-  claims.
-- Check object identity across the whole lecture (for example auxiliary vectors versus unique
-  representing vectors).
-- Check that a statement is not contradicted later without being corrected.
-- Treat per-chunk unresolved items as warnings about uncertain reconstruction; do not convert them
-  into confident new claims unless the rest of the lecture resolves the ambiguity.
-- Remove duplicated proofs/definitions created by overlapping local reconstruction.
-- Preserve useful derivations and examples; do not over-compress the lecture into a summary.
-- Titles must be clean human-readable section titles, not raw TeX fragments.
-
-Write titles, reasons and unresolved items in language code `{output_language}`.
+Return drops only for high-confidence duplication, redundant transitions, superseded text, or
+unrecoverable noise visible from the catalog. Do not drop a substantive mathematical block just
+because its excerpt looks suspicious; detailed mathematics is handled later.
+Use canonical mathematical names in section titles. Write text in language code
+`{output_language}`.
 """
-    return llm._structured(
-        prompt,
-        GlobalLectureEditPlan,
-        operation="global_lecture_edit",
-        max_tokens=4096,
+    structure = llm._structured(
+        structure_prompt,
+        GlobalLectureStructurePlan,
+        operation="global_lecture_structure",
+        max_tokens=3072,
     )
+    sections, effective_drops = _expand_global_structure(
+        draft_ir,
+        structure,
+        apply_threshold=apply_threshold,
+    )
+
+    ordered = _ordered_global_blocks(draft_ir)
+    dropped_ids = {item.target_block_id for item in effective_drops}
+    retained_ids = {stable_id for stable_id, *_ in ordered if stable_id not in dropped_ids}
+    batches = _iter_global_batches(ordered, retained_ids, batch_chars)
+
+    section_context = [
+        {
+            "title": section.title,
+            "first_block_id": section.block_ids[0],
+            "last_block_id": section.block_ids[-1],
+            "count": len(section.block_ids),
+        }
+        for section in sections
+    ]
+    section_json = json.dumps(section_context, ensure_ascii=False, separators=(",", ":"))
+
+    patches: list[GlobalBlockEdit] = list(effective_drops)
+    unresolved = list(structure.unresolved)
+    patched_ids = set(dropped_ids)
+
+    for batch_index, batch_ids in enumerate(batches):
+        full_batch = _global_batch_payload(ordered, batch_ids)
+        batch_prompt = f"""Mathematically edit ONE bounded batch of blocks from a complete reconstructed
+lecture. The compact catalog and final section layout provide GLOBAL context; only blocks in
+CURRENT FULL-TEXT BATCH may be rewritten.
+
+COMPLETE COMPACT CATALOG:
+{catalog_json}
+
+FINAL SECTION LAYOUT:
+{section_json}
+
+CURRENT FULL-TEXT BATCH {batch_index + 1}/{len(batches)}:
+{json.dumps(full_batch, ensure_ascii=False, separators=(",", ":"))}
+
+Return replacement patches only when a current block contains a real mathematical/content error:
+wrong theorem name, missing/incorrect hypothesis, wrong inequality direction, confused object role,
+sign/domain/codomain/topology/compactness error, or contradiction with the global lecture context.
+Use standard mathematics to recover the intended lecture statement when it is clear.
+
+Rules:
+- target_block_id must be from CURRENT FULL-TEXT BATCH only;
+- action must be replace;
+- replacement_latex is the complete corrected content of that ONE block;
+- do not drop blocks here; deduplication was handled by the global structure pass;
+- do not rewrite merely for style;
+- preserve useful lecture-specific derivations/examples and established notation;
+- do not add unrelated textbook exposition;
+- if global context reveals an ambiguity that cannot be resolved confidently, report unresolved
+  instead of guessing.
+Write reasons/unresolved text in language code `{output_language}`.
+"""
+        batch_result = llm._structured(
+            batch_prompt,
+            GlobalLecturePatchBatch,
+            operation="global_lecture_math_batch",
+            max_tokens=4096,
+        )
+        allowed = set(batch_ids)
+        for patch in batch_result.patches:
+            if patch.target_block_id not in allowed:
+                raise ValueError(
+                    f"global math batch references out-of-batch block {patch.target_block_id!r}"
+                )
+            if patch.target_block_id in patched_ids:
+                raise ValueError(f"multiple global edits target {patch.target_block_id!r}")
+            patched_ids.add(patch.target_block_id)
+            patches.append(patch)
+        unresolved.extend(batch_result.unresolved)
+
+    return GlobalLectureEditPlan(
+        sections=sections,
+        patches=patches,
+        unresolved=list(dict.fromkeys(unresolved)),
+    )
+

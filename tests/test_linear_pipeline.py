@@ -7,6 +7,7 @@ from automatic_lecture_tex.linear_notes import (
     LinearPatch,
     block_id,
     block_segment_ids,
+    plan_global_lecture_edit,
     provenance_claim_ids,
     scan_linear_corrections,
 )
@@ -269,3 +270,85 @@ def test_final_ir_tex_sanity_repairs_repeated_unmatched_display_lines():
     assert r"\[\|f\| = \|u\|.\]" in result.chunks[0].blocks[0].latex
     assert r"\[x \in X.\]" in result.chunks[0].blocks[0].latex
     assert "$" in result.chunks[0].section_title
+
+
+
+class _GlobalEditorLLM:
+    def __init__(self):
+        self.calls = []
+
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        self.calls.append((operation, prompt, max_tokens))
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Основы", "first_block_id": "block_0000_000"},
+                        {"title": "Продолжение", "first_block_id": "block_0001_001"},
+                    ],
+                    "drops": [
+                        {
+                            "target_block_id": "block_0001_000",
+                            "action": "drop",
+                            "reason": "Повтор предыдущего блока.",
+                            "confidence": 0.99,
+                        }
+                    ],
+                }
+            )
+        assert operation == "global_lecture_math_batch"
+        return schema.model_validate({"patches": [], "unresolved": []})
+
+
+def test_global_editor_uses_compact_structure_plus_bounded_full_text_batches():
+    long_a = "A" * 180 + " UNIQUE_A_TAIL"
+    long_b = "B" * 180 + " UNIQUE_B_TAIL"
+    long_dup = "A" * 180 + " UNIQUE_A_TAIL"
+    long_d = "D" * 180 + " UNIQUE_D_TAIL"
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(
+                section_title="Chunk A",
+                blocks=[
+                    _block("block_0000_000", long_a),
+                    _block("block_0000_001", long_b),
+                ],
+            ),
+            ChunkNotes(
+                section_title="Chunk B",
+                blocks=[
+                    _block("block_0001_000", long_dup),
+                    _block("block_0001_001", long_d),
+                ],
+            ),
+        ],
+    )
+    llm = _GlobalEditorLLM()
+
+    plan = plan_global_lecture_edit(
+        llm,
+        draft_ir=draft,
+        output_language="ru",
+        apply_threshold=0.85,
+        batch_chars=300,
+        catalog_excerpt_chars=40,
+    )
+
+    assert [section.title for section in plan.sections] == ["Основы", "Продолжение"]
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0000_001"]
+    assert plan.sections[1].block_ids == ["block_0001_001"]
+    assert [patch.target_block_id for patch in plan.patches] == ["block_0001_000"]
+
+    operations = [item[0] for item in llm.calls]
+    assert operations[0] == "global_lecture_structure"
+    assert operations.count("global_lecture_math_batch") >= 2
+    structure_prompt = llm.calls[0][1]
+    assert "A" * 100 not in structure_prompt
+    assert "B" * 100 not in structure_prompt
+    assert "D" * 100 not in structure_prompt
+    for operation, prompt, _ in llm.calls[1:]:
+        assert operation == "global_lecture_math_batch"
+        # A batch sees the compact whole-lecture catalog plus only a bounded subset at full length.
+        assert sum(marker in prompt for marker in ["A" * 100, "B" * 100, "D" * 100]) <= 1
