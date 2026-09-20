@@ -466,11 +466,13 @@ def _deduplicate_exact_within_sections(
                 seen[key] = stable_id
                 kept_ids.append(stable_id)
                 continue
-            if stable_id in protected or first_id in protected:
-                # Reconciliation targets carry explicit correction provenance. Avoid introducing
-                # merge chains by deterministically collapsing them again.
+            if stable_id in protected:
+                # Never drop a reconciliation target into an unrelated earlier duplicate.
                 kept_ids.append(stable_id)
+                seen[key] = stable_id
                 continue
+            # If the already-kept first block is a reconciliation target, it is safe to merge
+            # later exact duplicates directly into that protected canonical target.
             drops.append(
                 GlobalBlockEdit(
                     target_block_id=stable_id,
@@ -685,8 +687,11 @@ A reconciliation means:
 
 Ordinary error examples include wrong theorem name, missing/incorrect hypothesis, wrong inequality
 direction, confused object role, sign/domain/codomain/topology/compactness error, or contradiction
-with another version in this section. Use standard mathematics to recover the intended lecture
-statement when it is clear.
+with another version in this section. Independently recompute short algebraic/sign steps rather than
+trusting fluent prose. Check quantifiers and dimension assumptions, topology/compactness hypotheses,
+neighborhood centers and epsilon margins in convergence proofs, and whether a claimed separating
+family really separates points. Use standard mathematics to recover the intended lecture statement
+when it is clear.
 
 Rules:
 - every target/source id must be from CURRENT FULL-TEXT SECTION BLOCKS only;
