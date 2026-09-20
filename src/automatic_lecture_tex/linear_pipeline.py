@@ -287,6 +287,9 @@ def _apply_global_edit_plan(
                 merged_evidence = list(block.source_evidence_ids)
                 for merge_source_id in merge_sources:
                     duplicate = block_map[merge_source_id]
+                    duplicate_owner = owner_map[merge_source_id]
+                    starts.append(duplicate_owner.start)
+                    ends.append(duplicate_owner.end)
                     for segment_id in block_segment_ids(duplicate):
                         if segment_id not in merged_segments:
                             merged_segments.append(segment_id)
@@ -621,6 +624,7 @@ def run_linear_pipeline(
     global_edit_seconds = 0.0
     global_edit_cache_hit = False
     global_edit_applied = False
+    exact_dedup_blocks = 0
     ir = draft_ir
     if config.global_validation and _all_blocks(note_chunks):
         global_path = work / "global_lecture_edit.json"
@@ -676,6 +680,10 @@ def run_linear_pipeline(
                 )
 
         if global_plan is not None:
+            exact_dedup_blocks = sum(
+                patch.action == "drop" and patch.merge_into_block_id is not None
+                for patch in global_plan.patches
+            )
             try:
                 ir = _apply_global_edit_plan(
                     draft_ir,
@@ -709,6 +717,7 @@ def run_linear_pipeline(
             "global_edit_seconds": round(global_edit_seconds, 3),
             "global_edit_cache_hit": global_edit_cache_hit,
             "global_edit_applied": global_edit_applied,
+            "exact_dedup_blocks": exact_dedup_blocks,
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "chunks_total": len(chunks),
             "chunks_processed": processed_chunks,
