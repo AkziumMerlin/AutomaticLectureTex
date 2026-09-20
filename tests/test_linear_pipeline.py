@@ -296,7 +296,7 @@ class _GlobalEditorLLM:
                     ],
                 }
             )
-        assert operation == "global_lecture_math_batch"
+        assert operation == "global_lecture_section_edit"
         return schema.model_validate({"patches": [], "unresolved": []})
 
 
@@ -343,12 +343,93 @@ def test_global_editor_uses_compact_structure_plus_bounded_full_text_batches():
 
     operations = [item[0] for item in llm.calls]
     assert operations[0] == "global_lecture_structure"
-    assert operations.count("global_lecture_math_batch") >= 2
+    assert operations.count("global_lecture_section_edit") >= 2
     structure_prompt = llm.calls[0][1]
     assert "A" * 100 not in structure_prompt
     assert "B" * 100 not in structure_prompt
     assert "D" * 100 not in structure_prompt
     for operation, prompt, _ in llm.calls[1:]:
-        assert operation == "global_lecture_math_batch"
+        assert operation == "global_lecture_section_edit"
         # A batch sees the compact whole-lecture catalog plus only a bounded subset at full length.
         assert sum(marker in prompt for marker in ["A" * 100, "B" * 100, "D" * 100]) <= 1
+
+
+
+class _ExactDedupLLM:
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Доказательство", "first_block_id": "block_0000_000"}
+                    ],
+                    "drops": [],
+                }
+            )
+        assert operation == "global_lecture_section_edit"
+        return schema.model_validate({"patches": [], "unresolved": []})
+
+
+def test_exact_dedup_keeps_first_block_and_merges_later_provenance():
+    repeated = (
+        "Докажем утверждение. Сначала выбираем фазу, затем применяем вещественную версию "
+        "теоремы и восстанавливаем комплексный функционал с сохранением нормы."
+    )
+    first = _block("block_0000_000", repeated, "seg_first")
+    first.source_evidence_ids = ["visual_first"]
+    middle = _block("block_0000_001", "Промежуточный комментарий, который должен сохраниться.")
+    duplicate = _block("block_0001_000", repeated, "seg_recap")
+    duplicate.source_evidence_ids = ["visual_recap"]
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Chunk A", blocks=[first, middle]),
+            ChunkNotes(section_title="Chunk B", blocks=[duplicate]),
+        ],
+    )
+
+    plan = plan_global_lecture_edit(
+        _ExactDedupLLM(),
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=80,
+    )
+
+    dedup = [patch for patch in plan.patches if patch.target_block_id == "block_0001_000"]
+    assert len(dedup) == 1
+    assert dedup[0].action == "drop"
+    assert dedup[0].merge_into_block_id == "block_0000_000"
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0000_001"]
+
+    result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+    kept = result.chunks[0].blocks[0]
+    assert block_id(kept) == "block_0000_000"
+    assert block_segment_ids(kept) == ["seg_first", "seg_recap"]
+    assert kept.source_evidence_ids == ["visual_first", "visual_recap"]
+
+
+def test_short_exact_recap_is_not_deterministically_collapsed():
+    short = "Итак, получаем требуемое."
+    first = _block("block_0000_000", short, "seg_first")
+    duplicate = _block("block_0001_000", short, "seg_recap")
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Chunk A", blocks=[first]),
+            ChunkNotes(section_title="Chunk B", blocks=[duplicate]),
+        ],
+    )
+
+    plan = plan_global_lecture_edit(
+        _ExactDedupLLM(),
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=80,
+    )
+
+    assert not plan.patches
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0001_000"]
