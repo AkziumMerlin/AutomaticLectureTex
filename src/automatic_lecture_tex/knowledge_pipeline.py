@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
+from .generated_notes import GeneratedChunkNotes
 from .episode_graph import (
     apply_episode_tracking,
     build_outline_from_episodes,
@@ -30,6 +31,8 @@ from .episode_synthesis import (
 from .knowledge import (
     KnowledgeOrchestrator,
     compact_knowledge_state,
+    evidence_for_section,
+    make_lecture_state,
     merge_window_observations,
 )
 from .llm import LectureModelClient
@@ -41,6 +44,7 @@ from .schemas import (
     LectureIR,
     LectureKnowledgeBase,
     LectureOutline,
+    OutlineSection,
     VisualEvidence,
     WindowObservations,
 )
@@ -61,6 +65,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
+STATE_PIPELINE_VERSION = 1
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -177,6 +182,185 @@ def _load_episode_batch(path: Path, fingerprint: str) -> ChunkNotes | None:
         return ChunkNotes.model_validate(payload["notes"])
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
+
+
+
+def _state_outline_context(outline: LectureOutline) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": section.id,
+            "title": section.title,
+            "start": section.start,
+            "end": section.end,
+            "episode_ids": list(section.episode_ids),
+        }
+        for section in outline.sections
+    ]
+
+
+def _state_section_payload(
+    kb: LectureKnowledgeBase,
+    section: OutlineSection,
+    transcript: Transcript,
+    config,
+) -> dict[str, Any]:
+    payload = evidence_for_section(kb, section, transcript, config)
+    payload.pop("transcript", None)
+    return payload
+
+
+def _state_section_batches(
+    kb: LectureKnowledgeBase,
+    section: OutlineSection,
+    transcript: Transcript,
+    config,
+) -> list[dict[str, Any]]:
+    episode_ids = list(section.episode_ids)
+    if not episode_ids:
+        return []
+
+    max_chars = int(config.state_section_max_evidence_chars)
+    batches: list[dict[str, Any]] = []
+    current: list[str] = []
+    for episode_id in episode_ids:
+        candidate_ids = [*current, episode_id]
+        child = section.model_copy(
+            update={
+                "episode_ids": candidate_ids,
+                "claim_ids": [],
+                "evidence_ids": [],
+                "anchor_ids": [],
+                "subsections": [],
+            }
+        )
+        payload = _state_section_payload(kb, child, transcript, config)
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if current and len(serialized) > max_chars:
+            committed = section.model_copy(
+                update={
+                    "episode_ids": current,
+                    "claim_ids": [],
+                    "evidence_ids": [],
+                    "anchor_ids": [],
+                    "subsections": [],
+                }
+            )
+            batches.append(_state_section_payload(kb, committed, transcript, config))
+            current = [episode_id]
+        else:
+            current = candidate_ids
+
+    if current:
+        committed = section.model_copy(
+            update={
+                "episode_ids": current,
+                "claim_ids": [],
+                "evidence_ids": [],
+                "anchor_ids": [],
+                "subsections": [],
+            }
+        )
+        payload = _state_section_payload(kb, committed, transcript, config)
+        if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) > max_chars:
+            raise ValueError(
+                f"single state-section episode batch exceeds "
+                f"notes.state_section_max_evidence_chars={max_chars}"
+            )
+        batches.append(payload)
+
+    for index, payload in enumerate(batches):
+        payload["batch"] = {"index": index, "count": len(batches)}
+    return batches
+
+
+def _write_state_section_batch(
+    orchestrator: KnowledgeOrchestrator,
+    section: OutlineSection,
+    evidence: dict[str, Any],
+    *,
+    outline_context: list[dict[str, Any]],
+    previous_context: list[dict[str, Any]],
+) -> ChunkNotes:
+    prompt = f"""Write one contiguous part of a FINAL lecture-note section from an already assembled
+persistent LectureState. All local evidence extraction, episode tracking, notation tracking and
+global outline planning happened BEFORE this call.
+
+Global lecture outline (read-only narrative context):
+{json.dumps(outline_context, ensure_ascii=False, separators=(",", ":"))}
+
+Current fixed section:
+{json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
+
+Canonical state evidence for this batch:
+{json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
+
+Previously written blocks from THIS section only:
+{json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
+
+Rules:
+- Follow the fixed episode order and the lecture's actual narrative line.
+- Canonical observations/active claims/symbol records are the source of truth for final writing.
+- Do not recreate material from raw ASR wording; raw ASR was intentionally removed at this stage.
+- Preserve lecturer corrections, notation evolution, theorem/proof continuity and level of detail.
+- Never resurrect superseded/retracted or unresolved content as a current fact.
+- Do not introduce textbook material merely because it would make the exposition nicer.
+- Avoid repeating a definition/proof step already present in previous_context unless this batch
+  genuinely develops it further.
+- Every substantive block must cite source_claim_ids and/or source_evidence_ids present in the
+  supplied canonical state evidence.
+- Return block bodies only; renderer owns section/theorem/proof wrappers.
+- Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
+"""
+    generated = orchestrator._structured(
+        prompt,
+        GeneratedChunkNotes,
+        operation="state_section_write",
+        max_tokens=6144,
+    )
+    notes = generated.to_chunk_notes()
+    notes.chunk_id = section.id
+    notes.start = section.start
+    notes.end = section.end
+    notes.section_title = section.title.replace("$", "")
+
+    allowed_claims = {str(item["id"]) for item in evidence.get("claims", [])}
+    allowed_observations = {str(item["id"]) for item in evidence.get("observations", [])}
+    kept = []
+    for block in notes.blocks:
+        original_claims = list(block.source_claim_ids)
+        original_evidence = list(block.source_evidence_ids)
+        block.source_claim_ids = [item for item in original_claims if item in allowed_claims]
+        block.source_evidence_ids = [
+            item for item in original_evidence if item in allowed_observations
+        ]
+        if not block.source_claim_ids and not block.source_evidence_ids:
+            notes.unresolved.append(
+                f"Dropped ungrounded state-section block: {block.latex[:160]}"
+            )
+            continue
+        kept.append(block)
+    notes.blocks = kept
+    notes.unresolved = list(dict.fromkeys(notes.unresolved))
+    return notes
+
+
+def _merge_state_section_batches(
+    section: OutlineSection,
+    batches: list[ChunkNotes],
+) -> ChunkNotes:
+    merged = ChunkNotes(
+        chunk_id=section.id,
+        start=section.start,
+        end=section.end,
+        section_title=section.title.replace("$", ""),
+        blocks=[],
+    )
+    for notes in batches:
+        merged.blocks.extend(notes.blocks)
+        merged.notation.extend(notes.notation)
+        merged.corrections.extend(notes.corrections)
+        merged.unresolved = list(dict.fromkeys([*merged.unresolved, *notes.unresolved]))
+    return merged
 
 
 def run_knowledge_pipeline(
