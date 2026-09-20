@@ -453,7 +453,11 @@ class _CorrectionThenDedupLLM:
                     {
                         "target_block_id": "block_0000_001",
                         "action": "replace",
-                        "replacement_latex": "Исправленный шаг: знак должен быть минус.",
+                        "replacement_latex": (
+                            "Исправленный длинный шаг доказательства: после раскрытия выражения "
+                            "и группировки слагаемых знак перед вторым членом должен быть минус; "
+                            "это исправленная версия шага."
+                        ),
                         "reason": "Позднее повторение доказательства явно даёт исправленный знак.",
                         "confidence": 0.99,
                     }
@@ -469,11 +473,17 @@ def test_later_corrected_recap_remains_visible_until_section_edit_then_dedups():
         "доказательства в конце, без изменения математического содержания."
     )
     early_common = _block("block_0000_000", common, "seg_early_common")
-    early_wrong = _block("block_0000_001", "Первоначальный шаг: знак должен быть плюс.", "seg_wrong")
+    early_wrong = _block(
+        "block_0000_001",
+        "Первоначальный длинный шаг доказательства: после раскрытия выражения и группировки "
+        "слагаемых знак перед вторым членом был записан как плюс, что затем лектор исправляет.",
+        "seg_wrong",
+    )
     late_common = _block("block_0001_000", common, "seg_late_common")
     late_correct = _block(
         "block_0001_001",
-        "Исправленный шаг: знак должен быть минус.",
+        "Исправленный длинный шаг доказательства: после раскрытия выражения и группировки "
+        "слагаемых знак перед вторым членом должен быть минус; это исправленная версия шага.",
         "seg_correction",
     )
     draft = LectureIR(
@@ -507,5 +517,9 @@ def test_later_corrected_recap_remains_visible_until_section_edit_then_dedups():
     assert drops["block_0001_001"].merge_into_block_id == "block_0000_001"
 
     result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
-    assert result.chunks[0].blocks[1].latex == "Исправленный шаг: знак должен быть минус."
+    assert (
+        result.chunks[0].blocks[1].latex
+        == "Исправленный длинный шаг доказательства: после раскрытия выражения и группировки "
+        "слагаемых знак перед вторым членом должен быть минус; это исправленная версия шага."
+    )
     assert block_segment_ids(result.chunks[0].blocks[1]) == ["seg_wrong", "seg_correction"]
