@@ -228,6 +228,7 @@ class GlobalBlockEdit(BaseModel):
     action: Literal["replace", "drop"]
     replacement_latex: str | None = None
     merge_into_block_id: str | None = None
+    merge_kind: Literal["exact_dedup", "reconciliation"] | None = None
     reason: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
 
@@ -236,10 +237,13 @@ class GlobalBlockEdit(BaseModel):
         if self.action == "replace":
             if not (self.replacement_latex or "").strip():
                 raise ValueError("global replace edit requires replacement_latex")
-            if self.merge_into_block_id is not None:
+            if self.merge_into_block_id is not None or self.merge_kind is not None:
                 raise ValueError("replace edit cannot merge provenance into another block")
-        elif self.merge_into_block_id == self.target_block_id:
-            raise ValueError("drop edit cannot merge provenance into itself")
+        else:
+            if self.merge_into_block_id == self.target_block_id:
+                raise ValueError("drop edit cannot merge provenance into itself")
+            if (self.merge_into_block_id is None) != (self.merge_kind is None):
+                raise ValueError("drop provenance merge requires both merge target and merge kind")
         return self
 
 
@@ -273,14 +277,37 @@ class GlobalLectureStructurePlan(BaseModel):
         return self
 
 
-class GlobalLecturePatchBatch(BaseModel):
+class GlobalSectionReconciliation(BaseModel):
+    target_block_id: str = Field(min_length=1)
+    source_block_ids: list[str] = Field(min_length=1)
+    replacement_latex: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_ids(self) -> GlobalSectionReconciliation:
+        sources = list(dict.fromkeys(self.source_block_ids))
+        if len(sources) != len(self.source_block_ids):
+            raise ValueError("reconciliation source ids must be unique")
+        if self.target_block_id in sources:
+            raise ValueError("reconciliation target cannot also be a source")
+        return self
+
+
+class GlobalLectureSectionEdit(BaseModel):
     patches: list[GlobalBlockEdit] = Field(default_factory=list)
+    reconciliations: list[GlobalSectionReconciliation] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def replacements_only(self) -> GlobalLecturePatchBatch:
+    def replacements_only(self) -> GlobalLectureSectionEdit:
         if any(item.action != "replace" for item in self.patches):
-            raise ValueError("global math batch may emit replace edits only")
+            raise ValueError("section editor patches may only replace blocks")
+        if any(
+            item.merge_into_block_id is not None or item.merge_kind is not None
+            for item in self.patches
+        ):
+            raise ValueError("section editor replacement patches cannot request provenance merges")
         return self
 
 
@@ -403,6 +430,8 @@ def _exact_duplicate_key(block: NoteBlock) -> tuple:
 def _deduplicate_exact_within_sections(
     draft_ir: LectureIR,
     sections: list[GlobalSectionPlan],
+    *,
+    protected_ids: set[str] | None = None,
 ) -> tuple[list[GlobalSectionPlan], list[GlobalBlockEdit]]:
     """Drop exact repeats only inside one final semantic section.
 
@@ -416,6 +445,7 @@ def _deduplicate_exact_within_sections(
     }
     result_sections: list[GlobalSectionPlan] = []
     drops: list[GlobalBlockEdit] = []
+    protected = set(protected_ids or set())
 
     for section in sections:
         seen: dict[tuple, str] = {}
@@ -436,11 +466,19 @@ def _deduplicate_exact_within_sections(
                 seen[key] = stable_id
                 kept_ids.append(stable_id)
                 continue
+            if stable_id in protected:
+                # Never drop a reconciliation target into an unrelated earlier duplicate.
+                kept_ids.append(stable_id)
+                seen[key] = stable_id
+                continue
+            # If the already-kept first block is a reconciliation target, it is safe to merge
+            # later exact duplicates directly into that protected canonical target.
             drops.append(
                 GlobalBlockEdit(
                     target_block_id=stable_id,
                     action="drop",
                     merge_into_block_id=first_id,
+                    merge_kind="exact_dedup",
                     reason="Точный повтор уже сохранённого блока в том же итоговом разделе.",
                     confidence=1.0,
                 )
@@ -451,6 +489,19 @@ def _deduplicate_exact_within_sections(
             GlobalSectionPlan(title=section.title, block_ids=kept_ids)
         )
     return result_sections, drops
+
+
+def _remove_reconciliation_sources(
+    sections: list[GlobalSectionPlan],
+    source_ids: set[str],
+) -> list[GlobalSectionPlan]:
+    result: list[GlobalSectionPlan] = []
+    for section in sections:
+        kept = [stable_id for stable_id in section.block_ids if stable_id not in source_ids]
+        if not kept:
+            raise ValueError("section reconciliation removed every block from a section")
+        result.append(GlobalSectionPlan(title=section.title, block_ids=kept))
+    return result
 
 
 def _global_batch_payload(
@@ -615,45 +666,120 @@ EDITOR UNIT: {unit_index + 1}/{len(units)}
 CURRENT FULL-TEXT SECTION BLOCKS:
 {json.dumps(full_batch, ensure_ascii=False, separators=(",", ":"))}
 
-Return replacement patches only when a current block contains a real mathematical/content error:
-wrong theorem name, missing/incorrect hypothesis, wrong inequality direction, confused object role,
-sign/domain/codomain/topology/compactness error, or contradiction with the global lecture context.
-Use standard mathematics to recover the intended lecture statement when it is clear.
+First compare repeated or near-repeated versions of the SAME mathematical step/proof inside
+this section. A later repetition may be a lecturer clarification or correction rather than noise.
+
+Return:
+1. ordinary replacement patches for isolated mathematical/content errors;
+2. reconciliations when two or more blocks are alternative versions of the same semantic step and
+   one canonical block should replace them all.
+
+A reconciliation means:
+- target_block_id: the EARLIEST logical occurrence among the versions being unified;
+- source_block_ids: later/alternative versions that become redundant after reconciliation;
+- replacement_latex: one complete mathematically correct canonical version, preserving all useful
+  detail and using an explicit/later lecturer correction when the versions conflict;
+- do not reconcile blocks that merely discuss related material or where a later repetition adds a
+  genuinely distinct argument/example;
+- if a repeated proof spans several blocks, emit multiple reconciliations for corresponding steps,
+  or one reconciliation with several source blocks only when they jointly represent the same
+  semantic unit as the target.
+
+Ordinary error examples include wrong theorem name, missing/incorrect hypothesis, wrong inequality
+direction, confused object role, sign/domain/codomain/topology/compactness error, or contradiction
+with another version in this section. Independently recompute short algebraic/sign steps rather than
+trusting fluent prose. Check quantifiers and dimension assumptions, topology/compactness hypotheses,
+neighborhood centers and epsilon margins in convergence proofs, and whether a claimed separating
+family really separates points. Use standard mathematics to recover the intended lecture statement
+when it is clear.
 
 Rules:
-- target_block_id must be from CURRENT FULL-TEXT SECTION BLOCKS only;
-- action must be replace;
-- replacement_latex is the complete corrected content of that ONE block;
-- do not drop blocks here; the deterministic exact-dedup pass runs only AFTER all section
-  corrections have been collected, so repeated proofs remain available as correction evidence;
+- every target/source id must be from CURRENT FULL-TEXT SECTION BLOCKS only;
+- ordinary patches use action=replace and replace exactly one complete block;
+- reconciliations are the ONLY way the model may request removal of a non-identical repeated version;
 - do not rewrite merely for style;
-- preserve useful lecture-specific derivations/examples and established notation;
+- preserve useful lecture-specific derivations/examples, chronology, and established notation;
+- preserve COURSE-SPECIFIC CONVENTIONS exactly;
 - do not add unrelated textbook exposition;
-- if global context reveals an ambiguity that cannot be resolved confidently, report unresolved
-  instead of guessing.
+- if competing versions cannot be reconciled confidently, report unresolved instead of guessing.
 Write reasons/unresolved text in language code `{output_language}`.
 """
         batch_result = llm._structured(
             batch_prompt,
-            GlobalLecturePatchBatch,
+            GlobalLectureSectionEdit,
             operation="global_lecture_section_edit",
             max_tokens=4096,
         )
         allowed = set(batch_ids)
+        position = {stable_id: index for index, stable_id in enumerate(batch_ids)}
+        unit_claimed_ids: set[str] = set()
+
+        for reconciliation in batch_result.reconciliations:
+            ids = [reconciliation.target_block_id, *reconciliation.source_block_ids]
+            unknown_ids = [stable_id for stable_id in ids if stable_id not in allowed]
+            if unknown_ids:
+                raise ValueError(
+                    f"section reconciliation references out-of-batch blocks {unknown_ids!r}"
+                )
+            if reconciliation.confidence < apply_threshold:
+                continue
+            if reconciliation.target_block_id != min(ids, key=position.__getitem__):
+                raise ValueError("reconciliation target must be the earliest unified block")
+            overlap = unit_claimed_ids.intersection(ids)
+            if overlap:
+                raise ValueError(
+                    f"section reconciliation reuses blocks already reconciled: {sorted(overlap)!r}"
+                )
+            if patched_ids.intersection(ids):
+                raise ValueError("section reconciliation conflicts with another global edit")
+
+            unit_claimed_ids.update(ids)
+            patched_ids.update(ids)
+            patches.append(
+                GlobalBlockEdit(
+                    target_block_id=reconciliation.target_block_id,
+                    action="replace",
+                    replacement_latex=reconciliation.replacement_latex,
+                    reason=reconciliation.reason,
+                    confidence=reconciliation.confidence,
+                )
+            )
+            for source_id in reconciliation.source_block_ids:
+                patches.append(
+                    GlobalBlockEdit(
+                        target_block_id=source_id,
+                        action="drop",
+                        merge_into_block_id=reconciliation.target_block_id,
+                        merge_kind="reconciliation",
+                        reason=reconciliation.reason,
+                        confidence=reconciliation.confidence,
+                    )
+                )
+
         for patch in batch_result.patches:
             if patch.target_block_id not in allowed:
                 raise ValueError(
                     f"global math batch references out-of-batch block {patch.target_block_id!r}"
                 )
-            if patch.target_block_id in patched_ids:
+            if patch.target_block_id in unit_claimed_ids or patch.target_block_id in patched_ids:
                 raise ValueError(f"multiple global edits target {patch.target_block_id!r}")
             patched_ids.add(patch.target_block_id)
             patches.append(patch)
         unresolved.extend(batch_result.unresolved)
 
-    # Reconcile high-confidence mathematical replacements in a temporary copy BEFORE exact dedup.
-    # This is essential for lecturer self-corrections: a later repeated proof stays visible to the
-    # editor, can correct the earlier version, and only then may identical final blocks collapse.
+    reconciliation_source_ids = {
+        patch.target_block_id
+        for patch in patches
+        if patch.action == "drop" and patch.merge_kind == "reconciliation"
+    }
+    sections_after_reconciliation = _remove_reconciliation_sources(
+        sections,
+        reconciliation_source_ids,
+    )
+
+    # Apply high-confidence canonical replacements in a temporary copy BEFORE exact dedup.
+    # Explicit reconciliations have already removed their alternative source blocks from the
+    # section plan, but those sources remain in draft_ir for provenance merging during final apply.
     reconciled = draft_ir.model_copy(deep=True)
     reconciled_map = {
         stable_id: block
@@ -667,7 +793,18 @@ Write reasons/unresolved text in language code `{output_language}`.
         ):
             reconciled_map[patch.target_block_id].latex = (patch.replacement_latex or "").strip()
 
-    dedup_sections, exact_drops = _deduplicate_exact_within_sections(reconciled, sections)
+    reconciliation_targets = {
+        patch.merge_into_block_id
+        for patch in patches
+        if patch.action == "drop"
+        and patch.merge_kind == "reconciliation"
+        and patch.merge_into_block_id is not None
+    }
+    dedup_sections, exact_drops = _deduplicate_exact_within_sections(
+        reconciled,
+        sections_after_reconciliation,
+        protected_ids=reconciliation_targets,
+    )
     exact_drop_ids = {item.target_block_id for item in exact_drops}
     # A block that is removed after reconciliation does not need its own replacement patch in the
     # final plan. Its corrected semantics are represented by the retained equivalent block, while

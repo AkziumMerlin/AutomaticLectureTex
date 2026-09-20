@@ -27,6 +27,10 @@ def test_functional_analysis_config_uses_pre_pr2_linear_baseline():
         for item in config.notes.linear_global_editor_conventions
     )
     assert any(
+        "слабая топология Банаха" in item and "де Бана" in item
+        for item in config.notes.linear_global_editor_conventions
+    )
+    assert any(
         "соглашение курса" in item
         for item in config.notes.linear_global_editor_conventions
     )
