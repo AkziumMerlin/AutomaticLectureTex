@@ -48,7 +48,7 @@ def _doctor(cfg) -> int:
         "qwen3": ("qwen_asr", "pip install -e '.[qwen-asr]'"),
         "gigaam": (
             "gigaam",
-            "pip install 'git+https://github.com/salute-developers/GigaAM.git'",
+            "pip install -e '.[gigaam]'",
         ),
     }
     package = package_by_asr.get(cfg.asr.backend)
