@@ -268,6 +268,8 @@ class GlobalLectureStructurePlan(BaseModel):
     def drops_only(self) -> GlobalLectureStructurePlan:
         if any(item.action != "drop" for item in self.drops):
             raise ValueError("global structure pass may emit drop edits only")
+        if any(item.merge_into_block_id is not None for item in self.drops):
+            raise ValueError("LLM structure drops cannot request provenance merges")
         return self
 
 
@@ -383,6 +385,7 @@ def _expand_global_structure(
 
 
 _DUPLICATE_SPACE = re.compile(r"\s+")
+_EXACT_DEDUP_MIN_CHARS = 80
 
 
 def _exact_duplicate_key(block: NoteBlock) -> tuple:
@@ -421,6 +424,10 @@ def _deduplicate_exact_within_sections(
             block = block_map[stable_id]
             # Figures can legitimately reuse captions/assets and should never be collapsed here.
             if block.asset_path:
+                kept_ids.append(stable_id)
+                continue
+            normalized_latex = _DUPLICATE_SPACE.sub(" ", block.latex.strip())
+            if len(normalized_latex) < _EXACT_DEDUP_MIN_CHARS:
                 kept_ids.append(stable_id)
                 continue
             key = _exact_duplicate_key(block)
@@ -552,6 +559,7 @@ Return section BOUNDARIES only:
 Return drops only for high-confidence duplication, redundant transitions, superseded text, or
 unrecoverable noise visible from the catalog. Do not drop a substantive mathematical block just
 because its excerpt looks suspicious; detailed mathematics is handled later.
+Leave merge_into_block_id null in all LLM-generated drops; provenance merging is host-owned.
 Use canonical mathematical names in section titles. Write text in language code
 `{output_language}`.
 """
@@ -631,7 +639,7 @@ Write reasons/unresolved text in language code `{output_language}`.
         batch_result = llm._structured(
             batch_prompt,
             GlobalLecturePatchBatch,
-            operation="global_lecture_math_batch",
+            operation="global_lecture_section_edit",
             max_tokens=4096,
         )
         allowed = set(batch_ids)
