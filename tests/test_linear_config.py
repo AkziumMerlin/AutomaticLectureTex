@@ -22,6 +22,14 @@ def test_functional_analysis_config_uses_pre_pr2_linear_baseline():
     assert config.notes.global_validation is True
     assert config.notes.linear_global_editor_batch_chars == 16000
     assert config.notes.linear_global_editor_catalog_excerpt_chars == 140
+    assert any(
+        "слабыми топологиями Банаха" in item
+        for item in config.notes.linear_global_editor_conventions
+    )
+    assert any(
+        "соглашение курса" in item
+        for item in config.notes.linear_global_editor_conventions
+    )
     assert config.vision.temporal_composite_enabled is False
     assert config.vision.max_requests_per_chunk == 1
     assert config.vision.board_uniform_samples == 5
