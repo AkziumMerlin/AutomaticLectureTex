@@ -115,6 +115,7 @@ def select_board_state_frames(
         len(selected) < max_states
         and last.path != selected[-1].path
         and last.timestamp - selected[-1].timestamp >= min_gap_seconds
+        and board_state_change_score(selected[-1].path, last.path) >= change_threshold
     ):
         selected.append(last)
 
