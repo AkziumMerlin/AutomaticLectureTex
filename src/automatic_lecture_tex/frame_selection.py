@@ -90,33 +90,43 @@ def select_board_state_frames(
 ) -> list[ExtractedFrame]:
     """Select chronologically distinct board states without any LLM confidence signal.
 
-    The first state is always retained. A later probe is kept when the board differs sufficiently
-    from the last retained state and is not temporally redundant. The final probe is retained when
-    there is spare capacity and it is separated from the previous state. The result is bounded by
-    the multimodal image budget and remains chronological.
+    First discover all visually distinct states across the interval. Only afterwards compress that
+    sequence to the multimodal image budget. This avoids the common failure where rapid writing near
+    the beginning consumes every slot and the rest of the lecture interval is never represented.
+
+    change_threshold is therefore only a photometric noise floor, not a lecturer-confidence
+    parameter. When more distinct states exist than fit in the budget, retain states spread across
+    the full chronological sequence, including its first and latest distinct state.
     """
 
     if not frames or max_states <= 0:
         return []
     ordered = sorted(frames, key=lambda item: item.timestamp)
-    selected = [ordered[0]]
+    candidates = [ordered[0]]
 
     for frame in ordered[1:]:
-        if len(selected) >= max_states:
-            break
-        if frame.timestamp - selected[-1].timestamp < min_gap_seconds:
+        if frame.timestamp - candidates[-1].timestamp < min_gap_seconds:
             continue
-        score = board_state_change_score(selected[-1].path, frame.path)
+        score = board_state_change_score(candidates[-1].path, frame.path)
         if score >= change_threshold:
-            selected.append(frame)
+            candidates.append(frame)
 
-    last = ordered[-1]
-    if (
-        len(selected) < max_states
-        and last.path != selected[-1].path
-        and last.timestamp - selected[-1].timestamp >= min_gap_seconds
-        and board_state_change_score(selected[-1].path, last.path) >= change_threshold
-    ):
-        selected.append(last)
+    if len(candidates) <= max_states:
+        return candidates
+    if max_states == 1:
+        return [candidates[0]]
 
-    return selected[:max_states]
+    # Uniformly cover the sequence of semantic visual changes, not wall-clock probe frames.
+    indices = [
+        round(index * (len(candidates) - 1) / (max_states - 1))
+        for index in range(max_states)
+    ]
+    selected: list[ExtractedFrame] = []
+    seen: set[int] = set()
+    for index in indices:
+        if index in seen:
+            continue
+        seen.add(index)
+        selected.append(candidates[index])
+    return selected
+
