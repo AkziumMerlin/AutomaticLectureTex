@@ -286,17 +286,10 @@ class _GlobalEditorLLM:
                         {"title": "Основы", "first_block_id": "block_0000_000"},
                         {"title": "Продолжение", "first_block_id": "block_0001_001"},
                     ],
-                    "drops": [
-                        {
-                            "target_block_id": "block_0001_000",
-                            "action": "drop",
-                            "reason": "Повтор предыдущего блока.",
-                            "confidence": 0.99,
-                        }
-                    ],
+                    "drops": [],
                 }
             )
-        assert operation == "global_lecture_math_batch"
+        assert operation == "global_lecture_section_edit"
         return schema.model_validate({"patches": [], "unresolved": []})
 
 
@@ -343,12 +336,190 @@ def test_global_editor_uses_compact_structure_plus_bounded_full_text_batches():
 
     operations = [item[0] for item in llm.calls]
     assert operations[0] == "global_lecture_structure"
-    assert operations.count("global_lecture_math_batch") >= 2
+    assert operations.count("global_lecture_section_edit") >= 2
     structure_prompt = llm.calls[0][1]
     assert "A" * 100 not in structure_prompt
     assert "B" * 100 not in structure_prompt
     assert "D" * 100 not in structure_prompt
     for operation, prompt, _ in llm.calls[1:]:
-        assert operation == "global_lecture_math_batch"
+        assert operation == "global_lecture_section_edit"
         # A batch sees the compact whole-lecture catalog plus only a bounded subset at full length.
         assert sum(marker in prompt for marker in ["A" * 100, "B" * 100, "D" * 100]) <= 1
+
+
+
+class _ExactDedupLLM:
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Доказательство", "first_block_id": "block_0000_000"}
+                    ],
+                    "drops": [],
+                }
+            )
+        assert operation == "global_lecture_section_edit"
+        return schema.model_validate({"patches": [], "unresolved": []})
+
+
+def test_exact_dedup_keeps_first_block_and_merges_later_provenance():
+    repeated = (
+        "Докажем утверждение. Сначала выбираем фазу, затем применяем вещественную версию "
+        "теоремы и восстанавливаем комплексный функционал с сохранением нормы."
+    )
+    first = _block("block_0000_000", repeated, "seg_first")
+    first.source_evidence_ids = ["visual_first"]
+    middle = _block("block_0000_001", "Промежуточный комментарий, который должен сохраниться.")
+    duplicate = _block("block_0001_000", repeated, "seg_recap")
+    duplicate.source_evidence_ids = ["visual_recap"]
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Chunk A", blocks=[first, middle]),
+            ChunkNotes(section_title="Chunk B", blocks=[duplicate]),
+        ],
+    )
+
+    plan = plan_global_lecture_edit(
+        _ExactDedupLLM(),
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=80,
+    )
+
+    dedup = [patch for patch in plan.patches if patch.target_block_id == "block_0001_000"]
+    assert len(dedup) == 1
+    assert dedup[0].action == "drop"
+    assert dedup[0].merge_into_block_id == "block_0000_000"
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0000_001"]
+
+    result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+    kept = result.chunks[0].blocks[0]
+    assert block_id(kept) == "block_0000_000"
+    assert block_segment_ids(kept) == ["seg_first", "seg_recap"]
+    assert kept.source_evidence_ids == ["visual_first", "visual_recap"]
+
+
+def test_short_exact_recap_is_not_deterministically_collapsed():
+    short = "Итак, получаем требуемое."
+    first = _block("block_0000_000", short, "seg_first")
+    duplicate = _block("block_0001_000", short, "seg_recap")
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Chunk A", blocks=[first]),
+            ChunkNotes(section_title="Chunk B", blocks=[duplicate]),
+        ],
+    )
+
+    plan = plan_global_lecture_edit(
+        _ExactDedupLLM(),
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=80,
+    )
+
+    assert not plan.patches
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0001_000"]
+
+
+
+class _CorrectionThenDedupLLM:
+    def __init__(self):
+        self.section_prompt = ""
+
+    def _structured(self, prompt, schema, *, operation, max_tokens=None):
+        if operation == "global_lecture_structure":
+            return schema.model_validate(
+                {
+                    "sections": [
+                        {"title": "Доказательство", "first_block_id": "block_0000_000"}
+                    ],
+                    "drops": [],
+                }
+            )
+        assert operation == "global_lecture_section_edit"
+        self.section_prompt = prompt
+        # Earlier proof contains the lecturer's initial wrong sign; the later recap contains
+        # the corrected statement. The section editor reconciles the early block to the later one.
+        return schema.model_validate(
+            {
+                "patches": [
+                    {
+                        "target_block_id": "block_0000_001",
+                        "action": "replace",
+                        "replacement_latex": (
+                            "Исправленный длинный шаг доказательства: после раскрытия выражения "
+                            "и группировки слагаемых знак перед вторым членом должен быть минус; "
+                            "это исправленная версия шага."
+                        ),
+                        "reason": "Позднее повторение доказательства явно даёт исправленный знак.",
+                        "confidence": 0.99,
+                    }
+                ],
+                "unresolved": [],
+            }
+        )
+
+
+def test_later_corrected_recap_remains_visible_until_section_edit_then_dedups():
+    common = (
+        "Длинный общий шаг доказательства, который лектор затем повторяет при пояснении "
+        "доказательства в конце, без изменения математического содержания."
+    )
+    early_common = _block("block_0000_000", common, "seg_early_common")
+    early_wrong = _block(
+        "block_0000_001",
+        "Первоначальный длинный шаг доказательства: после раскрытия выражения и группировки "
+        "слагаемых знак перед вторым членом был записан как плюс, что затем лектор исправляет.",
+        "seg_wrong",
+    )
+    late_common = _block("block_0001_000", common, "seg_late_common")
+    late_correct = _block(
+        "block_0001_001",
+        "Исправленный длинный шаг доказательства: после раскрытия выражения и группировки "
+        "слагаемых знак перед вторым членом должен быть минус; это исправленная версия шага.",
+        "seg_correction",
+    )
+    draft = LectureIR(
+        lecture_id="lecture",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(section_title="Первая версия", blocks=[early_common, early_wrong]),
+            ChunkNotes(section_title="Пояснение", blocks=[late_common, late_correct]),
+        ],
+    )
+    llm = _CorrectionThenDedupLLM()
+
+    plan = plan_global_lecture_edit(
+        llm,
+        draft_ir=draft,
+        output_language="ru",
+        batch_chars=16000,
+        catalog_excerpt_chars=100,
+    )
+
+    # Both early and late copies must have reached the section editor before deduplication.
+    assert "block_0000_000" in llm.section_prompt
+    assert "block_0001_000" in llm.section_prompt
+    assert "block_0000_001" in llm.section_prompt
+    assert "block_0001_001" in llm.section_prompt
+
+    # After reconciliation both repeated proof steps collapse, keeping the logical first location.
+    assert plan.sections[0].block_ids == ["block_0000_000", "block_0000_001"]
+    drops = {patch.target_block_id: patch for patch in plan.patches if patch.action == "drop"}
+    assert drops["block_0001_000"].merge_into_block_id == "block_0000_000"
+    assert drops["block_0001_001"].merge_into_block_id == "block_0000_001"
+
+    result = _apply_global_edit_plan(draft, plan, apply_threshold=0.85)
+    assert (
+        result.chunks[0].blocks[1].latex
+        == "Исправленный длинный шаг доказательства: после раскрытия выражения и группировки "
+        "слагаемых знак перед вторым членом должен быть минус; это исправленная версия шага."
+    )
+    assert block_segment_ids(result.chunks[0].blocks[1]) == ["seg_wrong", "seg_correction"]
