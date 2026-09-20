@@ -90,7 +90,7 @@ def collect_visual_evidence(
     """Collect visual sensor inputs and OCR evidence.
 
     The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate VLM call. Its
-    uniformly sampled frames are retained as raw multimodal inputs for the note writer and verifier.
+    selected board-state frames are retained as raw multimodal inputs for semantic reconstruction.
     Supplemental local visual requests keep the legacy isolated OCR path. This avoids compressing the
     main board channel into an intermediate text representation before reconstruction.
     """
@@ -332,7 +332,7 @@ def collect_visual_evidence(
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             for request, frames, _board_views, _candidates in prepared_visuals:
                 if request.reason == CHUNK_BOARD_SCAN_REASON:
-                    # The uniform scan is a raw sensor bundle. Do not spend a separate VLM call
+                    # The board-state scan is a raw sensor bundle. Do not spend a separate VLM call
                     # converting it to OCR before the multimodal writer sees the images.
                     futures.append(None)
                     continue
@@ -379,7 +379,7 @@ def collect_visual_evidence(
                     visual.math_ocr_candidates = candidates
 
                 # Persist one wide board state only as a possible unresolved-content fallback.
-                # The five scan frames themselves remain working sensor inputs and are not figures
+                # The selected scan frames remain working sensor inputs and are not figures
                 # in the final lecture unless a fallback explicitly references this asset.
                 asset_frame: ExtractedFrame | None = None
                 if request.reason == CHUNK_BOARD_SCAN_REASON and frames:
