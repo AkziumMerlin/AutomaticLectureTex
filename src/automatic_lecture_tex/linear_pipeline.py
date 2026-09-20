@@ -14,6 +14,7 @@ from .linear_notes import (
     LinearCorrectionScan,
     LinearPatch,
     block_id,
+    block_segment_ids,
     plan_global_lecture_edit,
     provenance_claim_ids,
     scan_linear_corrections,
@@ -37,9 +38,9 @@ logger = logging.getLogger(__name__)
 
 # Final-IR version. Chunk reconstruction keeps its own cache version so adding the global editor
 # does not force expensive multimodal chunk recomputation.
-LINEAR_PIPELINE_VERSION = 8
+LINEAR_PIPELINE_VERSION = 9
 LINEAR_CHUNK_CACHE_VERSION = 6
-GLOBAL_LECTURE_EDITOR_VERSION = 2
+GLOBAL_LECTURE_EDITOR_VERSION = 3
 
 
 def _all_blocks(note_chunks: list[ChunkNotes]) -> list[NoteBlock]:
@@ -218,6 +219,7 @@ def _apply_global_edit_plan(
 
     applied_patches = {}
     dropped: set[str] = set()
+    provenance_merges: dict[str, list[str]] = {}
     seen_patch_targets: set[str] = set()
     for patch in plan.patches:
         if patch.target_block_id not in block_map:
@@ -229,6 +231,14 @@ def _apply_global_edit_plan(
             continue
         if patch.action == "drop":
             dropped.add(patch.target_block_id)
+            if patch.merge_into_block_id is not None:
+                if patch.merge_into_block_id not in block_map:
+                    raise ValueError(
+                        f"global provenance merge references unknown block {patch.merge_into_block_id!r}"
+                    )
+                provenance_merges.setdefault(patch.merge_into_block_id, []).append(
+                    patch.target_block_id
+                )
         else:
             applied_patches[patch.target_block_id] = patch
 
@@ -250,6 +260,15 @@ def _apply_global_edit_plan(
             f"global edit coverage mismatch; missing={missing[:8]!r}, extra={extra[:8]!r}"
         )
 
+    for merge_target, merge_sources in provenance_merges.items():
+        if merge_target in dropped:
+            raise ValueError("global provenance merge target cannot itself be dropped")
+        if merge_target not in retained:
+            raise ValueError("global provenance merge target must be retained")
+        for merge_source in merge_sources:
+            if merge_source not in dropped:
+                raise ValueError("global provenance merge source must be dropped")
+
     final_chunks: list[ChunkNotes] = []
     for section_index, section in enumerate(plan.sections):
         blocks: list[NoteBlock] = []
@@ -262,6 +281,21 @@ def _apply_global_edit_plan(
             block = source_block.model_copy(deep=True)
             starts.append(source_owner.start)
             ends.append(source_owner.end)
+            merge_sources = provenance_merges.get(stable_id, [])
+            if merge_sources:
+                merged_segments = list(block_segment_ids(block))
+                merged_evidence = list(block.source_evidence_ids)
+                for merge_source_id in merge_sources:
+                    duplicate = block_map[merge_source_id]
+                    for segment_id in block_segment_ids(duplicate):
+                        if segment_id not in merged_segments:
+                            merged_segments.append(segment_id)
+                    for evidence_id in duplicate.source_evidence_ids:
+                        if evidence_id not in merged_evidence:
+                            merged_evidence.append(evidence_id)
+                block.source_claim_ids = provenance_claim_ids(stable_id, merged_segments)
+                block.source_evidence_ids = merged_evidence
+
             patch = applied_patches.get(stable_id)
             if patch is not None:
                 original = block.latex
@@ -598,6 +632,7 @@ def run_linear_pipeline(
                 "apply_threshold": config.global_validation_apply_threshold,
                 "batch_chars": config.linear_global_editor_batch_chars,
                 "catalog_excerpt_chars": config.linear_global_editor_catalog_excerpt_chars,
+                "course_conventions": config.linear_global_editor_conventions,
             }
         )
         global_plan = None
@@ -622,6 +657,7 @@ def run_linear_pipeline(
                     apply_threshold=config.global_validation_apply_threshold,
                     batch_chars=config.linear_global_editor_batch_chars,
                     catalog_excerpt_chars=config.linear_global_editor_catalog_excerpt_chars,
+                    course_conventions=config.linear_global_editor_conventions,
                 )
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                 logger.warning("[%s] global lecture editor failed: %s", lecture.id, exc)
