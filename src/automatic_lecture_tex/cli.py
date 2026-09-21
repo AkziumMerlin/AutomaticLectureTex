@@ -36,8 +36,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def _doctor(cfg) -> int:
     required = [cfg.runtime.ffmpeg, cfg.runtime.ffprobe]
-    if cfg.latex.compile:
-        required.append(cfg.latex.compiler)
     if any(lecture.source.type == "youtube" for lecture in cfg.course.lectures):
         required.append(cfg.runtime.yt_dlp)
     missing = [binary for binary in required if shutil.which(binary) is None]
