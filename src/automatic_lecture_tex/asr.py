@@ -116,7 +116,11 @@ class Qwen3ASRBackend(ASRBackend):
     def transcribe(self, lecture_id: str, audio_path: Path) -> Transcript:
         context = ""
         if self.config.hotwords:
-            context = "Термины курса: " + ", ".join(self.config.hotwords)
+            context = (
+                "Это университетская математическая лекция. "
+                "Возможная терминология курса (используй только если она соответствует аудио): "
+                + ", ".join(self.config.hotwords)
+            )
         result = self.model.transcribe(
             audio=str(audio_path),
             context=context,
