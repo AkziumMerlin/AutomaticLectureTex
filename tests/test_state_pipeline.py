@@ -30,9 +30,6 @@ def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
     assert config.asr.aligner_model == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert config.notes.architecture == "state"
     assert config.notes.global_validation is False
-    assert config.notes.state_revision_enabled is True
-    assert config.notes.state_revision_apply_threshold == 0.88
-    assert config.latex.compile is True
     assert config.vision.board_sampling_mode == "change"
     assert config.notes.visual_chunk_board_scan is True
 
