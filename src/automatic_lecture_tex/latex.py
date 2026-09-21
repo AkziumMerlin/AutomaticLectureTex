@@ -11,6 +11,7 @@ from .tex_safety import (
     normalize_heading_math,
     normalize_math_spans,
     strip_control_chars,
+    validate_tex_source,
 )
 from .util import run_checked
 
@@ -117,7 +118,9 @@ def render_lecture(ir: LectureIR) -> str:
             previous_section = section
         for block in chunk.blocks:
             lines.append(render_block(block))
-    return "\n".join(lines).rstrip() + "\n"
+    rendered = "\n".join(lines).rstrip() + "\n"
+    validate_tex_source(rendered)
+    return rendered
 
 
 def _prune_unreferenced_figure_assets(ir: LectureIR, output_dir: Path) -> None:
@@ -167,7 +170,7 @@ PREAMBLE = r"""\documentclass[12pt,a4paper]{book}
 \usepackage{polyglossia}
 \setdefaultlanguage{russian}
 \setotherlanguage{english}
-\setmainfont{CMU Serif}
+\IfFontExistsTF{CMU Serif}{\setmainfont{CMU Serif}}{\setmainfont{Latin Modern Roman}}
 \usepackage{amsmath,amssymb,mathtools}
 \usepackage{amsthm}
 \usepackage{graphicx}
@@ -205,14 +208,15 @@ def write_course_tex(course_title: str, lectures: list[LectureIR], output_dir: P
         includes.append(f"\\input{{lectures/{safe}.tex}}")
 
     main = output_dir / "main.tex"
-    main.write_text(
+    main_text = (
         PREAMBLE
         + "\n\\begin{document}\n"
         + f"\\title{{{escape_tex_mixed(course_title)}}}\n\\maketitle\n\\tableofcontents\n"
         + "\n".join(includes)
-        + "\n\\end{document}\n",
-        encoding="utf-8",
+        + "\n\\end{document}\n"
     )
+    validate_tex_source(main_text)
+    main.write_text(main_text, encoding="utf-8")
     return main
 
 
