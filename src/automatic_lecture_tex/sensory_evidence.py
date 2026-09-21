@@ -11,6 +11,7 @@ from .board_crop import generate_board_crops
 from .frame_selection import select_board_state_frames, select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
+from .omni import make_omni_backend
 from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence, VisualKind
 from .vision import (
     CHUNK_BOARD_SCAN_REASON,
@@ -41,6 +42,16 @@ def _unique_times(values: list[float]) -> list[float]:
         seen.add(key)
         result.append(value)
     return result
+
+
+def _omni_backend(pipeline: Pipeline):
+    if not getattr(pipeline, "_omni_backend_initialized", False):
+        pipeline._omni_backend = make_omni_backend(
+            pipeline.config.omni,
+            output_language=pipeline.config.llm.output_language,
+        )
+        pipeline._omni_backend_initialized = True
+    return pipeline._omni_backend
 
 
 def _math_ocr_backend(pipeline: Pipeline):
@@ -396,5 +407,40 @@ def collect_visual_evidence(
                     copy_asset(asset_frame.path, destination)
                     visual.asset_path = str(destination.relative_to(pipeline.config.latex.output_dir))
                 evidence.append(visual)
+
+    omni_backend = _omni_backend(pipeline)
+    if omni_backend is not None:
+        request_id = f"{chunk.id}_omni_av"
+        clip_path = work / "omni_clips" / f"{chunk.id}.mp4"
+        try:
+            source.extract_clip(chunk.start, chunk.end, clip_path)
+            description = omni_backend.analyze(clip_path)
+            evidence.append(
+                VisualEvidence(
+                    request_id=request_id,
+                    kind=VisualKind.AUDIO_VIDEO,
+                    description=description,
+                    # This is a generated sensor interpretation, not a calibrated confidence score.
+                    confidence=0.5,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] native AV evidence failed for %s; continuing with ASR/board evidence: %s",
+                lecture.id,
+                chunk.id,
+                exc,
+            )
+            evidence.append(
+                VisualEvidence(
+                    request_id=request_id,
+                    kind=VisualKind.AUDIO_VIDEO,
+                    description=(
+                        "Native audio-video sensor unavailable for this window: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    confidence=0.0,
+                )
+            )
 
     return requests, evidence, time.perf_counter() - started
