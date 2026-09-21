@@ -158,7 +158,7 @@ class Pipeline:
             logger.info("[%s] LectureIR cache hit", lecture.id)
             return self._load_ir(ir_path)
 
-        if self.config.notes.architecture == "knowledge":
+        if self.config.notes.architecture in {"knowledge", "state"}:
             return run_knowledge_pipeline(
                 self,
                 lecture=lecture,

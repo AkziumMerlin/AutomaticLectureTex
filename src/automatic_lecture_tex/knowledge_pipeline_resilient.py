@@ -18,7 +18,7 @@ from .knowledge_reconstruction_resilient import ResilientIntegrityKnowledgeOrche
 from .sensory_evidence import collect_visual_evidence
 from .util import atomic_json_dump
 
-KNOWLEDGE_CACHE_VERSION = 8
+KNOWLEDGE_CACHE_VERSION = 9
 
 
 def _patch_run_metrics(work) -> None:

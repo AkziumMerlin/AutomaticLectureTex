@@ -67,7 +67,7 @@ class Pipeline(_base_pipeline.Pipeline):
                     "linear_source_policy_version": LINEAR_SOURCE_POLICY_VERSION,
                 }
             )
-        if self.config.notes.architecture == "knowledge":
+        if self.config.notes.architecture in {"knowledge", "state"}:
             return stable_hash(
                 {
                     "base": base,
@@ -132,7 +132,7 @@ class Pipeline(_base_pipeline.Pipeline):
             self._linear_dispatch_active = True
             self.config.notes.architecture = "knowledge"
             _base_pipeline.run_knowledge_pipeline = _run_linear_pipeline_with_policy
-        elif requested_architecture == "knowledge":
+        elif requested_architecture in {"knowledge", "state"}:
             _base_pipeline.run_knowledge_pipeline = resilient_knowledge_pipeline
 
         try:
