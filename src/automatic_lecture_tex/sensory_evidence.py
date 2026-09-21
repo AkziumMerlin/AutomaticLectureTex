@@ -45,9 +45,12 @@ def _unique_times(values: list[float]) -> list[float]:
 
 
 def _omni_backend(pipeline: Pipeline):
+    config = getattr(pipeline.config, "omni", None)
+    if config is None or not config.enabled:
+        return None
     if not getattr(pipeline, "_omni_backend_initialized", False):
         pipeline._omni_backend = make_omni_backend(
-            pipeline.config.omni,
+            config,
             output_language=pipeline.config.llm.output_language,
         )
         pipeline._omni_backend_initialized = True
