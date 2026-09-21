@@ -26,7 +26,7 @@ from .vision import (
 
 logger = logging.getLogger(__name__)
 
-ASR_CACHE_VERSION = 3
+ASR_CACHE_VERSION = 2
 NOTES_CACHE_VERSION = 7
 
 
