@@ -112,7 +112,7 @@ literal observation over explanation."""
             padding=True,
             use_audio_in_video=True,
         )
-        inputs = inputs.to(self.model.device)
+        inputs = inputs.to(self.model.device).to(self.model.dtype)
 
         with self._torch.inference_mode():
             generated = self.model.generate(
