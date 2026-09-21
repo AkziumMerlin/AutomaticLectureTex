@@ -128,7 +128,9 @@ latex:
   compile: false
 
 runtime:
-  work_dir: ../work/functional_analysis_vk_20s
+  # Reuse normalized audio + Qwen transcript from the baseline run; the changed notes/vision
+  # fingerprint still forces semantic-window reconstruction to rerun.
+  work_dir: ../work/functional_analysis_vk
   ffmpeg: ffmpeg
   ffprobe: ffprobe
   yt_dlp: yt-dlp
