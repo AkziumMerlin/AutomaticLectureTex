@@ -176,32 +176,19 @@ def _wrap_serialized_math_in_prose(value: str, *, dollars: bool) -> str:
         return "$" + math + "$" if dollars else r"\(" + math + r"\)"
 
     result = _BARE_TEXT_NAMED_SET.sub(
-        lambda match: "\\" + match.group(1) + "{" + match.group(2) + "}",
+        lambda match: wrap("\\" + match.group(1) + "{" + match.group(2) + "}"),
         value,
     )
     result = _BARE_TEXT_INDEXED_COMMAND.sub(
-        lambda match: "\\" + match.group(1) + match.group(2),
+        lambda match: wrap("\\" + match.group(1) + match.group(2)),
         result,
     )
     result = _BARE_TEXT_UNAMBIGUOUS.sub(
-        lambda match: "\\" + match.group(1),
+        lambda match: wrap("\\" + match.group(1)),
         result,
     )
     result = _BARE_TEXT_QUANTIFIER.sub(
-        lambda match: "\\" + match.group(1) + " " + match.group(2),
-        result,
-    )
-
-    # Wrap only the command-like fragments introduced above; existing LaTeX commands are handled by
-    # _wrap_bare_commands below.
-    result = re.sub(
-        r"(?<![$\\])\\(mathbb|mathcal)\{([^{}\n]+)\}",
-        lambda match: wrap("\\" + match.group(1) + "{" + match.group(2) + "}"),
-        result,
-    )
-    result = re.sub(
-        r"(?<![$\\])\\(lambda|varphi|varepsilon)(_[A-Za-z0-9{}]+)",
-        lambda match: wrap("\\" + match.group(1) + match.group(2)),
+        lambda match: wrap("\\" + match.group(1) + " " + match.group(2)),
         result,
     )
     return result
@@ -266,9 +253,9 @@ def normalize_math_spans(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            prose = _wrap_serialized_math_in_prose(part, dollars=False)
+            prose = _wrap_bare_commands(part, dollars=False)
+            prose = _wrap_serialized_math_in_prose(prose, dollars=False)
             prose = _wrap_unicode_math_in_prose(prose, dollars=False)
-            prose = _wrap_bare_commands(prose, dollars=False)
             result.append(prose)
     return "".join(result)
 
@@ -291,9 +278,9 @@ def normalize_heading_math(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            prose = _wrap_serialized_math_in_prose(part, dollars=True)
+            prose = _wrap_bare_commands(part, dollars=True)
+            prose = _wrap_serialized_math_in_prose(prose, dollars=True)
             prose = _wrap_unicode_math_in_prose(prose, dollars=True)
-            prose = _wrap_bare_commands(prose, dollars=True)
             result.append(prose)
     return "".join(result)
 
