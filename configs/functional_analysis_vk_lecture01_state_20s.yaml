@@ -1,0 +1,134 @@
+course:
+  id: functional_analysis_vk
+  title: Функциональный анализ
+  language: ru
+  lectures:
+    - id: lecture_01
+      title: Лекция 1
+      source:
+        type: youtube
+        url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
+
+asr:
+  # State-pipeline experiment: Qwen3-ASR with forced alignment for long-form timestamps.
+  backend: qwen3
+  model: Qwen/Qwen3-ASR-1.7B
+  aligner_model: Qwen/Qwen3-ForcedAligner-0.6B
+  language: ru
+  chunk_seconds: 60
+  max_new_tokens: 2048
+  dtype: bfloat16
+  device: cuda
+  whisper_compute_type: float16
+  whisper_beam_size: 5
+  vad_filter: true
+  vad_min_silence_ms: 500
+  condition_on_previous_text: true
+  hallucination_silence_threshold: 2.0
+  batch_size: 4
+  segment_target_seconds: 20
+  hotwords:
+    - функциональный анализ
+    - нормированное пространство
+    - банахово пространство
+    - гильбертово пространство
+    - линейный оператор
+    - ограниченный оператор
+    - непрерывный оператор
+    - линейный функционал
+    - сопряжённый оператор
+    - скалярное произведение
+    - норма
+    - слабая сходимость
+    - сильная сходимость
+    - компактность
+    - спектр
+    - резольвента
+
+llm:
+  base_url: http://127.0.0.1:8000/v1
+  api_key: EMPTY
+  model: Qwen/Qwen3.8-27B-FP8
+  output_language: ru
+  temperature: 0.0
+  max_tokens: 4096
+  timeout_seconds: 300
+  thinking: false
+  math_audit: true
+  math_audit_min_equals: 4
+
+notes:
+  architecture: state
+  # Fine-grained reconstruction ablation: approximately one local semantic window per 20 seconds.
+  # Windows still respect Qwen forced-alignment segment boundaries.
+  chunk_target_seconds: 20
+  chunk_overlap_seconds: 5
+  # One direct board-state channel per semantic window; state timestamps are selected by
+  # deterministic visual change rather than fixed uniform sampling.
+  visual_chunk_board_scan: true
+  visual_rule_selector: false
+  visual_llm_selector: false
+  visual_dedupe_seconds: 8
+  max_low_confidence_visual_requests: 0
+
+  # Keep the experiment to the two core multimodal calls per chunk.
+  linear_correction_scan_enabled: false
+  linear_correction_catalog_chars: 320
+  linear_patch_apply_threshold: 0.90
+
+  # No linear global editor/reconciliation. Final blocks are written only after LectureState,
+  # semantic episodes, notation and the global outline have been assembled.
+  global_validation: false
+  state_section_max_evidence_chars: 28000
+
+vision:
+  frame_offsets_seconds: [-3, 2, 7]
+  temporal_composite_enabled: false
+  youtube_video_format: bestvideo[height<=1080]/best[height<=1080]
+  max_requests_per_chunk: 1
+  max_workers: 3
+
+  # Probe the video cheaply, then retain only chronologically distinct board states.
+  board_auto_crop_enabled: true
+  board_crop_tiles: 3
+  board_crop_tile_overlap: 0.14
+  board_crop_padding_fraction: 0.025
+  board_crop_min_area_fraction: 0.16
+  board_crop_axis_density: 0.25
+  board_crop_color_distance: 0.22
+  board_crop_max_luminance: 0.78
+  board_crop_min_score: 0.35
+  board_crop_max_vlm_images: 5
+  board_sampling_mode: change
+  board_uniform_samples: 5
+  # Probe densely enough that a 20 s window can supply up to five distinct board states.
+  board_change_probe_seconds: 4.0
+  board_change_threshold: 0.20
+  board_change_min_gap_seconds: 3.0
+  board_change_max_probe_frames: 48
+
+  # If important mathematical content remains unresolved, keep the source itself in the notes.
+  unresolved_board_snapshots_enabled: true
+  unresolved_board_min_visual_confidence: 0.30
+  unresolved_board_max_per_chunk: 1
+
+  math_ocr:
+    backend: none
+    min_confidence: 0.45
+
+literature:
+  enabled: false
+  directory: ../literature
+  retrieval_top_k: 4
+  chunk_chars: 1800
+
+latex:
+  output_dir: ../tex/functional_analysis_vk_20s
+  compiler: latexmk
+  compile: false
+
+runtime:
+  work_dir: ../work/functional_analysis_vk_20s
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
+  yt_dlp: yt-dlp
