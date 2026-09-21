@@ -199,11 +199,16 @@ The attached board images are DIRECT SENSOR EVIDENCE, not file-name hints. They 
 the board-image index above and represent selected board states from this semantic window. Inspect
 the actual pixels when reconstructing notation, equations, theorem statements, diagrams, and symbols.
 
-Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`) and independent
-`math_ocr_candidates`. Those text channels are FALLIBLE SENSOR HYPOTHESES, not ground truth.
-Compare the actual board images, OCR channels, established notation, neighboring equations, and
-local mathematical consistency. If exact signs/variables remain materially inconsistent across
-sensors, report the content as unresolved instead of choosing the most convenient formula.
+Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`), independent
+`math_ocr_candidates`, and an optional `kind=audio_video` description produced by a separate
+native audio-video model over this same short interval. ALL of these text channels are FALLIBLE
+SENSOR HYPOTHESES, not ground truth. The audio-video description is especially useful for temporal
+or deictic links between speech and board changes, but it may mishear speech or misread mathematics.
+Compare it against raw timestamped ASR and the actual attached board pixels instead of copying it.
+
+Compare all sensor channels, established notation, neighboring equations, and local mathematical
+consistency. If exact signs/variables remain materially inconsistent across sensors, report the
+content as unresolved instead of choosing the most convenient formula.
 
 When you cite high-confidence visual evidence for a formula, preserve its literal variable names,
 operators, signs, roots, subscripts, and constants unless another supplied local source explicitly
