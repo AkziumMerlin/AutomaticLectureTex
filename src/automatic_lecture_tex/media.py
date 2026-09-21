@@ -33,6 +33,55 @@ class MediaSource(ABC):
     def identity(self) -> dict[str, str]:
         raise NotImplementedError
 
+    @abstractmethod
+    def extract_clip(self, start: float, end: float, output_path: Path) -> Path:
+        """Materialize a short local audio-video clip for native multimodal inference."""
+        raise NotImplementedError
+
+    def _transcode_clip(self, input_path: Path, output_path: Path, *, start: float = 0.0, duration: float | None = None) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.is_file() and output_path.stat().st_size > 0:
+            return output_path
+        command = [
+            self.runtime.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+        ]
+        if start > 0:
+            command.extend(["-ss", f"{start:.3f}"])
+        command.extend(["-i", str(input_path)])
+        if duration is not None:
+            command.extend(["-t", f"{duration:.3f}"])
+        command.extend(
+            [
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        )
+        run_checked(command)
+        return output_path
+
     def _normalize_audio(self, input_path: Path, output_wav: Path) -> Path:
         output_wav.parent.mkdir(parents=True, exist_ok=True)
         run_checked(
@@ -66,6 +115,10 @@ class LocalMediaSource(MediaSource):
 
     def prepare_audio(self, output_wav: Path) -> Path:
         return self._normalize_audio(self.path, output_wav)
+
+    def extract_clip(self, start: float, end: float, output_path: Path) -> Path:
+        duration = max(0.1, end - start)
+        return self._transcode_clip(self.path, output_path, start=max(0.0, start), duration=duration)
 
     def extract_frames(self, timestamps: list[float], output_dir: Path) -> list[ExtractedFrame]:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -182,7 +235,7 @@ class YouTubeMediaSource(MediaSource):
                 "--quiet",
                 "--dump-single-json",
                 "-f",
-                self.vision.youtube_video_format,
+                format_string or self.vision.youtube_video_format,
                 self._media_url(),
             ]
         )
@@ -245,6 +298,7 @@ class YouTubeMediaSource(MediaSource):
         end: float,
         directory: Path,
         force_keyframes: bool,
+        format_string: str | None = None,
     ) -> Path:
         template = directory / "segment.%(ext)s"
         section = f"*{start:.3f}-{end:.3f}"
@@ -379,6 +433,25 @@ class YouTubeMediaSource(MediaSource):
                     "all remote frame extraction strategies failed; "
                     f"exact-section={exact_error}; fallback-section={fallback_error}"
                 ) from fallback_error
+
+    def extract_clip(self, start: float, end: float, output_path: Path) -> Path:
+        if output_path.is_file() and output_path.stat().st_size > 0:
+            return output_path
+        safe_start = max(0.0, start)
+        safe_end = max(safe_start + 0.1, end)
+        with tempfile.TemporaryDirectory(prefix="automatic-lecture-tex-omni-") as tmp_name:
+            tmp = Path(tmp_name)
+            segment = self._download_section(
+                start=safe_start,
+                end=safe_end,
+                directory=tmp,
+                force_keyframes=True,
+                format_string=(
+                    "bestvideo[height<=1080]+bestaudio/"
+                    "best[height<=1080]/bestvideo+bestaudio/best"
+                ),
+            )
+            return self._transcode_clip(segment, output_path)
 
     def identity(self) -> dict[str, str]:
         return {"type": "youtube", "url": self.url}
