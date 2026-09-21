@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -15,6 +16,7 @@ from .schemas import (
     SourceStatus,
     Transcript,
     VisualEvidence,
+    VisualKind,
     WindowObservations,
 )
 from .visual_formula_gate import find_formula_gate_violations
@@ -60,6 +62,39 @@ class GeneratedWindowObservations(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
+def _board_scan_images(
+    evidence: list[VisualEvidence],
+    *,
+    limit: int = 5,
+) -> tuple[list[Path], list[str]]:
+    """Collect actual board-scan files in the exact order passed to the multimodal model."""
+
+    images: list[Path] = []
+    labels: list[str] = []
+    seen: set[Path] = set()
+    for item in evidence:
+        if item.kind != VisualKind.BOARD_SCAN:
+            continue
+        for index, raw_path in enumerate(item.frame_paths):
+            path = Path(raw_path)
+            if path in seen or not path.is_file():
+                continue
+            timestamp = (
+                item.frame_timestamps[index]
+                if index < len(item.frame_timestamps)
+                else None
+            )
+            labels.append(
+                f"Image {len(images)}: request_id={item.request_id}, frame_index={index}, "
+                + (f"timestamp={timestamp:.3f}s" if timestamp is not None else "timestamp=unknown")
+            )
+            images.append(path)
+            seen.add(path)
+            if len(images) >= limit:
+                return images, labels
+    return images, labels
+
+
 @dataclass
 class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
     transcript: Transcript
@@ -87,11 +122,13 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
         segment_payload = self._segment_payload(chunk)
         segment_map = {item["id"]: item for item in segment_payload}
         visual_ids = {item.request_id for item in evidence if item.request_id}
+        multimodal_images, multimodal_image_labels = _board_scan_images(evidence)
         visual_json = json.dumps(
-            [item.model_dump(mode="json") for item in evidence],
+            [item.model_dump(mode="json", exclude={"frame_paths"}) for item in evidence],
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        multimodal_image_index = "\n".join(multimodal_image_labels)
         symbols = [item.model_dump(mode="json") for item in kb.symbols if item.active]
         recent_limit = min(30, self.config.knowledge_recent_observations)
         recent_observations = [
@@ -111,8 +148,11 @@ Window id: {chunk.id}
 Raw timestamped ASR segments:
 {json.dumps(segment_payload, ensure_ascii=False, separators=(",", ":"))}
 
-Visual/board evidence aligned with this window:
+Visual/board evidence metadata aligned with this window:
 {visual_json}
+
+Attached board-image index (same order as the attached images):
+{multimodal_image_index or "No direct board images available."}
 
 Known notation established earlier in the lecture:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
@@ -155,11 +195,13 @@ otherwise coherent local argument mathematically nonsensical is NOT sufficient e
 lecturer made that error. Preserve a lecturer mistake only when the erroneous content itself is
 supported coherently by speech, board evidence, repetition, or an explicit later correction.
 
-Visual evidence can contain both VLM OCR (`raw_latex`/`latex`) and independent
-`math_ocr_candidates`. These are FALLIBLE SENSOR HYPOTHESES, not ground truth. The first attached
-image is a selected low-occlusion raw frame; a temporal-median composite may follow as secondary
-context and can combine writing from slightly different moments. Do not infer temporal order from
-the composite itself. Compare OCR channels against established notation, neighboring equations, and
+The attached board images are DIRECT SENSOR EVIDENCE, not file-name hints. They are ordered by
+the board-image index above and represent selected board states from this semantic window. Inspect
+the actual pixels when reconstructing notation, equations, theorem statements, diagrams, and symbols.
+
+Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`) and independent
+`math_ocr_candidates`. Those text channels are FALLIBLE SENSOR HYPOTHESES, not ground truth.
+Compare the actual board images, OCR channels, established notation, neighboring equations, and
 local mathematical consistency. If exact signs/variables remain materially inconsistent across
 sensors, report the content as unresolved instead of choosing the most convenient formula.
 
@@ -216,6 +258,8 @@ Return events in temporal order. Write descriptive strings in language code
             result = self._structured(
                 prompt,
                 GeneratedWindowObservations,
+                images=multimodal_images or None,
+                guided_json=not bool(multimodal_images),
                 operation="knowledge_extract",
                 max_tokens=4096,
             )
