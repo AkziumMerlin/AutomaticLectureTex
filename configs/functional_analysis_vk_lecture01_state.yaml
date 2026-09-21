@@ -129,7 +129,7 @@ literature:
 latex:
   output_dir: ../tex/functional_analysis_vk
   compiler: latexmk
-  compile: true
+  compile: false
 
 runtime:
   work_dir: ../work/functional_analysis_vk
