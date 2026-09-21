@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from .board import build_temporal_board_composite, temporal_sample_offsets
 from .board_crop import generate_board_crops
-from .frame_selection import select_least_occluded_frame
+from .frame_selection import select_board_state_frames, select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
 from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence, VisualKind
@@ -17,6 +17,7 @@ from .vision import (
     dedupe_visual_requests,
     make_chunk_board_scan_request,
     namespace_visual_requests,
+    board_change_probe_times,
     select_rule_based_visual_requests,
     uniform_chunk_sample_times,
 )
@@ -89,7 +90,7 @@ def collect_visual_evidence(
     """Collect visual sensor inputs and OCR evidence.
 
     The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate VLM call. Its
-    uniformly sampled frames are retained as raw multimodal inputs for the note writer and verifier.
+    selected board-state frames are retained as raw multimodal inputs for semantic reconstruction.
     Supplemental local visual requests keep the legacy isolated OCR path. This avoids compressing the
     main board channel into an intermediate text representation before reconstruction.
     """
@@ -130,11 +131,18 @@ def collect_visual_evidence(
     for request in requests:
         is_chunk_board_scan = request.reason == CHUNK_BOARD_SCAN_REASON
         if is_chunk_board_scan:
-            sample_count = min(
-                pipeline.config.vision.board_uniform_samples,
-                pipeline.config.vision.board_crop_max_vlm_images,
-            )
-            raw_times = uniform_chunk_sample_times(chunk, sample_count)
+            if pipeline.config.vision.board_sampling_mode == "change":
+                raw_times = board_change_probe_times(
+                    chunk,
+                    probe_seconds=pipeline.config.vision.board_change_probe_seconds,
+                    max_probe_frames=pipeline.config.vision.board_change_max_probe_frames,
+                )
+            else:
+                sample_count = min(
+                    pipeline.config.vision.board_uniform_samples,
+                    pipeline.config.vision.board_crop_max_vlm_images,
+                )
+                raw_times = uniform_chunk_sample_times(chunk, sample_count)
         else:
             raw_times = _unique_times(
                 [request.timestamp + offset for offset in pipeline.config.vision.frame_offsets_seconds]
@@ -219,7 +227,15 @@ def collect_visual_evidence(
 
         raw_frames = [frames[index] for index in raw_indices]
         if is_chunk_board_scan:
-            raw_views = raw_frames[: pipeline.config.vision.board_crop_max_vlm_images]
+            if pipeline.config.vision.board_sampling_mode == "change":
+                raw_views = select_board_state_frames(
+                    raw_frames,
+                    max_states=pipeline.config.vision.board_crop_max_vlm_images,
+                    change_threshold=pipeline.config.vision.board_change_threshold,
+                    min_gap_seconds=pipeline.config.vision.board_change_min_gap_seconds,
+                )
+            else:
+                raw_views = raw_frames[: pipeline.config.vision.board_crop_max_vlm_images]
         else:
             raw_frames.sort(key=lambda frame: abs(frame.timestamp - request.timestamp))
             for frame in raw_frames:
@@ -316,7 +332,7 @@ def collect_visual_evidence(
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             for request, frames, _board_views, _candidates in prepared_visuals:
                 if request.reason == CHUNK_BOARD_SCAN_REASON:
-                    # The uniform scan is a raw sensor bundle. Do not spend a separate VLM call
+                    # The board-state scan is a raw sensor bundle. Do not spend a separate VLM call
                     # converting it to OCR before the multimodal writer sees the images.
                     futures.append(None)
                     continue
@@ -338,8 +354,9 @@ def collect_visual_evidence(
                         request_id=request.id,
                         kind=VisualKind.BOARD_SCAN,
                         description=(
-                            "Chronologically ordered board states attached directly to the "
-                            "multimodal writer/verifier; no intermediate VLM OCR was performed."
+                            "Chronologically ordered board states selected by the configured "
+                            "host-side sampler and attached directly to reconstruction; no "
+                            "intermediate VLM OCR was performed."
                         ),
                         confidence=1.0,
                         frame_paths=[str(frame.path) for frame in frames],
@@ -362,7 +379,7 @@ def collect_visual_evidence(
                     visual.math_ocr_candidates = candidates
 
                 # Persist one wide board state only as a possible unresolved-content fallback.
-                # The five scan frames themselves remain working sensor inputs and are not figures
+                # The selected scan frames remain working sensor inputs and are not figures
                 # in the final lecture unless a fallback explicitly references this asset.
                 asset_frame: ExtractedFrame | None = None
                 if request.reason == CHUNK_BOARD_SCAN_REASON and frames:

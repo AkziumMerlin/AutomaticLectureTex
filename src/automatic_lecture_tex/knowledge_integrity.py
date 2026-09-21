@@ -123,12 +123,37 @@ Recent canonical mathematical events from the preceding context:
 Currently open semantic episodes:
 {json.dumps(open_episodes, ensure_ascii=False, separators=(",", ":"))}
 
-Your task is to recover what mathematical content was actually communicated in this window.
-The ASR is noisy and may contain phonetic nonsense, broken technical terms, lost punctuation,
-misheard variable names, or malformed formulas. You MAY repair those errors using ALL LOCAL evidence:
-neighboring utterances, mathematical consistency, already-established notation, and board/visual
-evidence. For example, if a formula or technical term is acoustically corrupted but its intended
-reading is strongly determined by the surrounding derivation, reconstruct the intended reading.
+Your task is to recover the intended mathematical content communicated in this window, while
+preserving genuine lecturer corrections and mistakes when they are actually evidenced.
+
+Treat ASR as PHONETIC EVIDENCE, not authoritative wording. It can contain severe substitutions,
+word fragments, invented-looking proper names, missing negations, broken mathematical terminology,
+and verbalized formulas with lost symbols. Do not preserve a nonsensical literal ASR reading merely
+because it is the only transcript string available.
+
+Resolve corrupted ASR using ALL LOCAL evidence together:
+- neighboring utterances before and after the phrase;
+- the current theorem/definition/proof role;
+- mathematical type/notation consistency;
+- already-established symbols and terminology;
+- board/visual evidence when available;
+- standard mathematical knowledge as a DISAMBIGUATION PRIOR.
+
+Standard mathematics may be used to choose the canonical reading of a locally evidenced term,
+formula, theorem name, or short derivation when the surrounding lecture context strongly determines
+it. This includes canonicalizing a phonetically corrupted technical term or proper name and repairing
+an ASR-damaged sign/variable when only one reading is compatible with the local derivation. This is
+reconstruction of supplied evidence, not addition of textbook material.
+
+A garbled proper name must NEVER be expanded into an unrelated specific theorem/person by free
+association. Use a canonical name only when the mathematical statement, role, or surrounding
+discussion identifies it strongly; otherwise describe the result without the name or mark it
+unresolved.
+
+Distinguish ASR corruption from a genuine lecturer mistake. A lone garbled phrase that would make an
+otherwise coherent local argument mathematically nonsensical is NOT sufficient evidence that the
+lecturer made that error. Preserve a lecturer mistake only when the erroneous content itself is
+supported coherently by speech, board evidence, repetition, or an explicit later correction.
 
 Visual evidence can contain both VLM OCR (`raw_latex`/`latex`) and independent
 `math_ocr_candidates`. These are FALLIBLE SENSOR HYPOTHESES, not ground truth. The first attached
@@ -144,12 +169,18 @@ contradicts it. Do not silently turn `v` into `u`, `\\sqrt{{2}}` into `2`, or `\
 `f_i`. If an event materially states a formula/relation, put that relation in `latex` even when the
 event kind is claim or proof_step; this lets the host verify symbol preservation.
 
-However, mathematical knowledge is a disambiguation tool, not a license to complete the lecture.
-Do NOT add a theorem, hypothesis, proof step, definition, formula, or conclusion merely because it
-would be standard textbook material. Do NOT silently fix a genuine mistake made by the lecturer.
-If the lecturer makes an error and later corrects it, preserve the erroneous event and the explicit
-correction/retraction as separate evidence events. If two materially different interpretations are
-plausible from the local evidence, return an `unresolved` event rather than guessing.
+Mathematical knowledge is a disambiguation tool, not a license to complete the lecture. Do NOT add
+a theorem, hypothesis, proof step, definition, formula, or conclusion merely because it would be
+standard textbook material. Do not infer material that has no local speech/board support.
+
+When a short algebraic or logical relation is central to the event, check that the reconstructed
+formula is internally consistent with the immediately surrounding derivation instead of copying a
+broken ASR token sequence. Conversely, do NOT silently repair a genuine lecturer mistake that is
+actually supported by the evidence. If the lecturer makes an error and later corrects it, preserve
+the erroneous event and the explicit correction/retraction as separate evidence events.
+
+If two materially different interpretations remain plausible after using local context, notation,
+visual evidence, and mathematical consistency, return an `unresolved` event rather than guessing.
 
 `source_segment_ids` MUST contain only exact ids from the raw ASR list above. The host derives all
 numeric timestamps from those ids; never invent timestamps. `visual_evidence_ids` may contain only
