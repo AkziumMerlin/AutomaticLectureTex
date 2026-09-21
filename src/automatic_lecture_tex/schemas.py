@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -462,6 +463,36 @@ class LectureState(BaseModel):
     episodes: list[SemanticEpisode] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
     outline: LectureOutline | None = None
+
+
+class StateReviewCandidate(BaseModel):
+    observation_id: str
+    reason: str
+
+
+class StateReviewPlan(BaseModel):
+    candidates: list[StateReviewCandidate] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class StateObservationRevision(BaseModel):
+    action: Literal["keep", "replace", "unresolved"]
+    replacement_text: str | None = None
+    replacement_latex: str | None = None
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> StateObservationRevision:
+        if self.action == "replace" and not (
+            (self.replacement_text or "").strip() or (self.replacement_latex or "").strip()
+        ):
+            raise ValueError("replace state revision requires replacement_text and/or replacement_latex")
+        if self.action != "replace" and (
+            self.replacement_text is not None or self.replacement_latex is not None
+        ):
+            raise ValueError("only replace state revisions may carry replacement content")
+        return self
 
 
 class GlobalBlockCorrection(BaseModel):

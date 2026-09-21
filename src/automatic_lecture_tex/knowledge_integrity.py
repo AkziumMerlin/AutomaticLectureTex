@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,6 +94,28 @@ def _board_scan_images(
             if len(images) >= limit:
                 return images, labels
     return images, labels
+
+
+_EPISTEMIC_AMBIGUITY = re.compile(
+    r"(?:"
+    r"\bвероятно\b|"
+    r"\bпо[- ]видимому\b|"
+    r"\bпредположительно\b|"
+    r"\bскорее всего\b|"
+    r"или,?\s+возможно|"
+    r"возможно,?\s+(?:это|речь|имеется|подразумевается)|"
+    r"не(?:\s+уда[её]тся)?\s+однозначно|"
+    r"неясно,?\s+(?:что|какой|какая|какое)|"
+    r"может быть,?\s+(?:это|речь)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _epistemically_ambiguous_observation(text: str) -> bool:
+    """Reject uncertainty-about-reconstruction, not ordinary mathematical modality."""
+
+    return bool(_EPISTEMIC_AMBIGUITY.search(text or ""))
 
 
 @dataclass
@@ -324,6 +347,12 @@ Return events in temporal order. Write descriptive strings in language code
             valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
             if item.kind == ObservationKind.UNRESOLVED:
                 unresolved.append(f"{item.text} [segments={','.join(valid_segment_ids)}]")
+                continue
+            if _epistemically_ambiguous_observation(item.text):
+                unresolved.append(
+                    "Host ambiguity gate suppressed non-canonical reconstruction: "
+                    f"{item.text} [segments={','.join(valid_segment_ids)}]"
+                )
                 continue
 
             segments = [segment_map[ref] for ref in valid_segment_ids]
