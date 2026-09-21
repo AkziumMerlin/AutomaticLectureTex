@@ -329,13 +329,20 @@ class KnowledgeOrchestrator:
         images: list[Path] | None = None,
         guided_json: bool = True,
     ):
+        kwargs = {
+            "operation": operation,
+            "max_tokens": max_tokens,
+        }
+        # Keep text-only callers compatible with lightweight/test LLM adapters that predate
+        # multimodal kwargs. Only the actual multimodal path needs these extra arguments.
+        if images is not None:
+            kwargs["images"] = images
+        if not guided_json:
+            kwargs["guided_json"] = False
         return self.llm._structured(  # noqa: SLF001
             prompt,
             schema,
-            images=images,
-            operation=operation,
-            max_tokens=max_tokens,
-            guided_json=guided_json,
+            **kwargs,
         )
 
     def extract_observations(
