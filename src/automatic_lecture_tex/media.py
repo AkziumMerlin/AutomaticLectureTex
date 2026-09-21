@@ -235,7 +235,7 @@ class YouTubeMediaSource(MediaSource):
                 "--quiet",
                 "--dump-single-json",
                 "-f",
-                format_string or self.vision.youtube_video_format,
+                self.vision.youtube_video_format,
                 self._media_url(),
             ]
         )
@@ -315,7 +315,7 @@ class YouTubeMediaSource(MediaSource):
         command.extend(
             [
                 "-f",
-                self.vision.youtube_video_format,
+                format_string or self.vision.youtube_video_format,
                 "-o",
                 str(template),
                 self._media_url(),
