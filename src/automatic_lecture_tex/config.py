@@ -90,11 +90,6 @@ class NotesConfig(BaseModel):
     hierarchy_batch_episodes: int = Field(default=24, ge=2, le=100)
     episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
     state_section_max_evidence_chars: int = Field(default=28000, ge=8000, le=120000)
-    state_revision_enabled: bool = False
-    state_revision_apply_threshold: float = Field(default=0.88, ge=0.0, le=1.0)
-    state_revision_max_candidates: int = Field(default=20, ge=1, le=100)
-    state_revision_catalog_chars: int = Field(default=32000, ge=8000, le=120000)
-    state_revision_context_seconds: float = Field(default=60.0, ge=5.0, le=300.0)
     episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)
     episode_transcript_context_seconds: float = Field(
         default=0.0,
