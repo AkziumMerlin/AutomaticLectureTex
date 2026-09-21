@@ -10,12 +10,12 @@ course:
         url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
 
 asr:
-  # State-pipeline experiment: stronger Russian/multilingual CTC acoustic model.
-  backend: gigaam
-  model: multilingual_large_ctc
-  aligner_model: null
+  # State-pipeline experiment: Qwen3-ASR with forced alignment for long-form timestamps.
+  backend: qwen3
+  model: Qwen/Qwen3-ASR-1.7B
+  aligner_model: Qwen/Qwen3-ForcedAligner-0.6B
   language: ru
-  chunk_seconds: 22
+  chunk_seconds: 60
   max_new_tokens: 2048
   dtype: bfloat16
   device: cuda
@@ -25,12 +25,8 @@ asr:
   vad_min_silence_ms: 500
   condition_on_previous_text: true
   hallucination_silence_threshold: 2.0
-  gigaam_fp16_encoder: true
-  gigaam_use_flash: false
-  gigaam_vad_enabled: true
-  gigaam_vad_max_speech_seconds: 22.0
-  gigaam_vad_merge_gap_seconds: 0.35
-  gigaam_vad_pad_seconds: 0.15
+  batch_size: 4
+  segment_target_seconds: 20
   hotwords:
     - функциональный анализ
     - нормированное пространство
