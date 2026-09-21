@@ -17,7 +17,7 @@ from automatic_lecture_tex.schemas import (
 )
 
 
-def test_functional_analysis_state_config_uses_large_ctc_and_change_sampling():
+def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
     config_path = (
         Path(__file__).resolve().parents[1]
         / "configs"
@@ -25,9 +25,9 @@ def test_functional_analysis_state_config_uses_large_ctc_and_change_sampling():
     )
     config = load_config(config_path)
 
-    assert config.asr.backend == "gigaam"
-    assert config.asr.model == "multilingual_large_ctc"
-    assert config.asr.gigaam_vad_enabled is True
+    assert config.asr.backend == "qwen3"
+    assert config.asr.model == "Qwen/Qwen3-ASR-1.7B"
+    assert config.asr.aligner_model == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert config.notes.architecture == "state"
     assert config.notes.global_validation is False
     assert config.vision.board_sampling_mode == "change"
