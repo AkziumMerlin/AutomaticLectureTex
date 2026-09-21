@@ -329,8 +329,8 @@ def assert_balanced_math_delimiters(value: str) -> None:
 
 
 _RAW_SERIALIZATION_DAMAGE = re.compile(
-    r"(?<![\\A-Za-z])(?:mathbb\\{|mathcal\\{|lambda_|varphi_|varepsilon_|"
-    r"neq\\b|quad\\b|qquad\\b|emptyset\\b|ldots\\b|cdots\\b)"
+    r"(?<![\\A-Za-z])(?:mathbb\{|mathcal\{|lambda_|varphi_|varepsilon_|"
+    r"neq\b|quad\b|qquad\b|emptyset\b|ldots\b|cdots\b)"
 )
 
 
