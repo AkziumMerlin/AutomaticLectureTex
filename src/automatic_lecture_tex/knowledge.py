@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import NotesConfig
@@ -318,12 +319,30 @@ class KnowledgeOrchestrator:
     config: NotesConfig
     output_language: str
 
-    def _structured(self, prompt: str, schema, *, operation: str, max_tokens: int | None = None):
+    def _structured(
+        self,
+        prompt: str,
+        schema,
+        *,
+        operation: str,
+        max_tokens: int | None = None,
+        images: list[Path] | None = None,
+        guided_json: bool = True,
+    ):
+        kwargs = {
+            "operation": operation,
+            "max_tokens": max_tokens,
+        }
+        # Keep text-only callers compatible with lightweight/test LLM adapters that predate
+        # multimodal kwargs. Only the actual multimodal path needs these extra arguments.
+        if images is not None:
+            kwargs["images"] = images
+        if not guided_json:
+            kwargs["guided_json"] = False
         return self.llm._structured(  # noqa: SLF001
             prompt,
             schema,
-            operation=operation,
-            max_tokens=max_tokens,
+            **kwargs,
         )
 
     def extract_observations(
