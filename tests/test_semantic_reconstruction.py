@@ -17,6 +17,7 @@ from automatic_lecture_tex.schemas import (
     LectureKnowledgeBase,
     Transcript,
     TranscriptSegment,
+    VisualEvidence,
 )
 from automatic_lecture_tex.util import atomic_json_dump, stable_hash
 
@@ -186,3 +187,45 @@ def test_pipeline_restores_saved_raw_asr_without_rerunning_whisper(tmp_path, mon
     manifest = __import__("json").loads((work / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["transcript_fingerprint"] == raw_fingerprint
     assert not (work / "transcript_reconstruction.json").exists()
+
+
+
+def test_native_av_report_is_auxiliary_evidence_for_semantic_reconstruction():
+    transcript, chunk, kb = _raw_input()
+    llm = _SemanticLLM(
+        {
+            "observations": [
+                {
+                    "kind": "claim",
+                    "text": "Лектор связывает произнесённое указание с формулой на доске.",
+                    "confidence": 0.8,
+                    "source_status": "reconstructed",
+                    "source_segment_ids": ["seg_00001"],
+                    "visual_evidence_ids": ["window_0000_omni_av"],
+                }
+            ],
+            "unresolved": [],
+        }
+    )
+    orchestrator = IntegrityKnowledgeOrchestrator(
+        llm,
+        NotesConfig(),
+        "ru",
+        transcript=transcript,
+    )
+    evidence = [
+        VisualEvidence(
+            request_id="window_0000_omni_av",
+            kind="audio_video",
+            description="CROSS_MODAL: 'здесь' относится к формуле f(x).",
+            confidence=0.5,
+        )
+    ]
+
+    result = orchestrator.extract_observations(chunk, evidence, kb)
+
+    assert len(result.observations) == 1
+    assert "window_0000_omni_av" in result.observations[0].evidence_refs
+    assert "kind=audio_video" in llm.prompt
+    assert "CROSS_MODAL" in llm.prompt
+    assert "FALLIBLE" in llm.prompt

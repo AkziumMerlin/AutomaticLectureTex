@@ -155,3 +155,22 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.vision.board_change_min_gap_seconds == 3.0
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
+
+
+
+def test_functional_analysis_20s_omni_experiment_adds_native_av_sensor():
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state_20s_omni3b.yaml"
+    )
+    config = load_config(config_path)
+
+    assert config.notes.chunk_target_seconds == 20
+    assert config.notes.chunk_overlap_seconds == 5
+    assert config.omni.enabled is True
+    assert config.omni.model == "Qwen/Qwen2.5-Omni-3B"
+    assert config.omni.fps == 2.0
+    assert config.omni.max_new_tokens == 768
+    assert config.vision.board_crop_max_vlm_images == 5
+    assert config.latex.output_dir.name == "functional_analysis_vk_20s_omni3b"

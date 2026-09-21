@@ -56,6 +56,7 @@ class VisualKind(StrEnum):
     DIAGRAM = "diagram"
     SLIDE_TEXT = "slide_text"
     BOARD_SCAN = "board_scan"
+    AUDIO_VIDEO = "audio_video"
     NONE = "none"
 
 

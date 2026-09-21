@@ -10,7 +10,13 @@ from PIL import Image
 from automatic_lecture_tex import asr as asr_module
 from automatic_lecture_tex.asr import GigaAMBackend
 from automatic_lecture_tex.board import build_temporal_board_composite, temporal_sample_offsets
-from automatic_lecture_tex.config import ASRConfig, MathOCRConfig, RuntimeConfig, VisionConfig
+from automatic_lecture_tex.config import (
+    ASRConfig,
+    MathOCRConfig,
+    OmniConfig,
+    RuntimeConfig,
+    VisionConfig,
+)
 from automatic_lecture_tex.schemas import (
     ExtractedFrame,
     LectureChunk,
@@ -18,6 +24,7 @@ from automatic_lecture_tex.schemas import (
     TranscriptSegment,
     VisualEvidence,
 )
+from automatic_lecture_tex import sensory_evidence as sensory_evidence_module
 from automatic_lecture_tex.sensory_evidence import collect_visual_evidence
 
 
@@ -255,3 +262,94 @@ def test_visual_collector_keeps_uniform_scan_as_direct_multimodal_frames(tmp_pat
     assert evidence[0].frame_timestamps == [18.0, 54.0, 90.0, 126.0, 162.0]
     assert len(evidence[0].frame_paths) == 5
     assert all(Path(path).is_file() for path in evidence[0].frame_paths)
+
+
+
+class _FakeOmniSource:
+    def __init__(self) -> None:
+        self.clip_request = None
+
+    def extract_clip(self, start, end, output_path):
+        self.clip_request = (start, end, output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"mp4")
+        return output_path
+
+
+class _FakeOmniBackend:
+    def __init__(self) -> None:
+        self.clip = None
+
+    def analyze(self, clip_path):
+        self.clip = clip_path
+        return (
+            "SPEECH: лектор говорит про слабую сходимость.\n"
+            "BOARD: e_n \\rightharpoonup 0.\n"
+            "CROSS_MODAL: фраза 'отсюда' относится к записанной формуле.\n"
+            "UNCERTAIN: нет."
+        )
+
+
+def test_visual_collector_adds_native_av_evidence_for_same_window(tmp_path, monkeypatch):
+    omni_backend = _FakeOmniBackend()
+    monkeypatch.setattr(
+        sensory_evidence_module,
+        "make_omni_backend",
+        lambda config, *, output_language: omni_backend,
+    )
+    source = _FakeOmniSource()
+    vision = VisionConfig(
+        max_requests_per_chunk=0,
+        temporal_composite_enabled=False,
+        math_ocr=MathOCRConfig(backend="none"),
+    )
+    pipeline = SimpleNamespace(
+        config=SimpleNamespace(
+            notes=SimpleNamespace(
+                visual_chunk_board_scan=False,
+                visual_rule_selector=False,
+                visual_llm_selector=False,
+                max_low_confidence_visual_requests=0,
+                visual_dedupe_seconds=8.0,
+            ),
+            vision=vision,
+            omni=OmniConfig(enabled=True),
+            llm=SimpleNamespace(output_language="ru"),
+            latex=SimpleNamespace(output_dir=tmp_path / "tex"),
+        ),
+        llm=_FakeLLM(),
+    )
+    transcript = Transcript(
+        lecture_id="lecture",
+        language="ru",
+        segments=[
+            TranscriptSegment(id="seg_0", start=10.0, end=30.0, text="слабая сходимость")
+        ],
+    )
+    chunk = LectureChunk(
+        id="window_0001",
+        start=10.0,
+        end=30.0,
+        segment_ids=["seg_0"],
+        text="слабая сходимость",
+    )
+
+    requests, evidence, _elapsed = collect_visual_evidence(
+        pipeline,
+        SimpleNamespace(id="lecture"),
+        chunk,
+        transcript,
+        source,
+        tmp_path / "work",
+        tmp_path / "figures",
+        {},
+    )
+
+    assert requests == []
+    assert len(evidence) == 1
+    assert str(evidence[0].kind) == "audio_video"
+    assert evidence[0].request_id == "window_0001_omni_av"
+    assert "CROSS_MODAL" in (evidence[0].description or "")
+    assert source.clip_request is not None
+    assert source.clip_request[:2] == (10.0, 30.0)
+    assert omni_backend.clip == tmp_path / "work" / "omni_clips" / "window_0001.mp4"

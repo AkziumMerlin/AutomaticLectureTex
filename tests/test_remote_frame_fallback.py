@@ -105,3 +105,37 @@ def test_visual_frame_failure_is_nonfatal(tmp_path):
     assert evidence[0].request_id == requests[0].id
     assert evidence[0].confidence == 0.0
     assert "Visual frame extraction unavailable" in (evidence[0].description or "")
+
+
+
+def test_remote_omni_clip_requests_video_plus_audio_section(tmp_path, monkeypatch):
+    source = YouTubeMediaSource(
+        "https://example.invalid/video",
+        RuntimeConfig(work_dir=tmp_path),
+        VisionConfig(),
+    )
+    captured = {}
+
+    def fake_download_section(**kwargs):
+        captured.update(kwargs)
+        path = kwargs["directory"] / "segment.mkv"
+        path.write_bytes(b"av")
+        return path
+
+    def fake_transcode(input_path, output_path, **kwargs):
+        del kwargs
+        assert input_path.name == "segment.mkv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"mp4")
+        return output_path
+
+    monkeypatch.setattr(source, "_download_section", fake_download_section)
+    monkeypatch.setattr(source, "_transcode_clip", fake_transcode)
+
+    output = source.extract_clip(10.0, 30.0, tmp_path / "omni.mp4")
+
+    assert output.is_file()
+    assert captured["start"] == 10.0
+    assert captured["end"] == 30.0
+    assert captured["force_keyframes"] is True
+    assert "bestaudio" in captured["format_string"]

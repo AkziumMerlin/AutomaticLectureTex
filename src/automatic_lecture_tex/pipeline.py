@@ -75,6 +75,7 @@ class Pipeline:
                 "transcript": transcript.model_dump(mode="json"),
                 "notes": self.config.notes.model_dump(mode="json"),
                 "vision": self.config.vision.model_dump(mode="json"),
+                "omni": self.config.omni.model_dump(mode="json"),
                 "llm": self.config.llm.model_dump(mode="json"),
                 "known_notation": notation,
                 "notes_cache_version": NOTES_CACHE_VERSION,

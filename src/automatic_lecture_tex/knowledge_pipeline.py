@@ -418,6 +418,7 @@ def run_knowledge_pipeline(
                     mode="json", exclude=_DOWNSTREAM_NOTE_FIELDS
                 ),
                 "vision": pipeline.config.vision.model_dump(mode="json"),
+                "omni": pipeline.config.omni.model_dump(mode="json"),
                 "llm": pipeline.config.llm.model_dump(mode="json"),
                 "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
             }

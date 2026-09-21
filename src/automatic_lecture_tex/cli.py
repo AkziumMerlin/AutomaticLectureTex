@@ -72,6 +72,19 @@ def _doctor(cfg) -> int:
                 "Install with: pip install -e '.[whisper]'"
             )
 
+    if cfg.omni.enabled:
+        if importlib.util.find_spec("qwen_omni_utils") is None:
+            problems.append(
+                "Qwen2.5-Omni evidence requires: pip install -e '.[qwen-omni]'"
+            )
+        try:
+            from transformers import Qwen2_5OmniThinkerForConditionalGeneration  # noqa: F401
+        except ImportError:
+            problems.append(
+                "Installed transformers does not provide Qwen2.5-Omni Thinker support; "
+                "install with: pip install -e '.[qwen-omni]'"
+            )
+
     math_ocr = cfg.vision.math_ocr
     if math_ocr.backend == "mathpix":
         if not os.getenv(math_ocr.mathpix_app_id_env) or not os.getenv(math_ocr.mathpix_app_key_env):

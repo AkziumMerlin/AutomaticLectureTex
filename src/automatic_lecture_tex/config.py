@@ -74,6 +74,25 @@ class LLMConfig(BaseModel):
     math_audit_min_equals: int = Field(default=4, ge=1, le=50)
 
 
+class OmniConfig(BaseModel):
+    enabled: bool = False
+    backend: Literal["qwen2_5_omni"] = "qwen2_5_omni"
+    model: str = "Qwen/Qwen2.5-Omni-3B"
+    dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
+    device_map: str = "auto"
+    attn_implementation: Literal["auto", "sdpa", "flash_attention_2"] = "auto"
+    max_new_tokens: int = Field(default=768, ge=64, le=4096)
+    fps: float = Field(default=2.0, ge=0.5, le=8.0)
+    min_pixels: int = Field(default=128 * 28 * 28, ge=28 * 28)
+    max_pixels: int = Field(default=768 * 28 * 28, ge=28 * 28)
+
+    @model_validator(mode="after")
+    def validate_pixels(self) -> OmniConfig:
+        if self.max_pixels < self.min_pixels:
+            raise ValueError("omni.max_pixels must be >= omni.min_pixels")
+        return self
+
+
 class NotesConfig(BaseModel):
     architecture: Literal["linear", "state", "knowledge", "legacy"] = "knowledge"
     chunk_target_seconds: float = Field(default=480.0, gt=0)
@@ -200,6 +219,7 @@ class AppConfig(BaseModel):
     course: CourseConfig
     asr: ASRConfig = Field(default_factory=ASRConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    omni: OmniConfig = Field(default_factory=OmniConfig)
     notes: NotesConfig = Field(default_factory=NotesConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     literature: LiteratureConfig = Field(default_factory=LiteratureConfig)
