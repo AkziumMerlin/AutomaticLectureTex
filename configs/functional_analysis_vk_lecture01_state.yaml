@@ -79,13 +79,6 @@ notes:
   global_validation: false
   state_section_max_evidence_chars: 28000
 
-  # Whole-lecture consistency review followed by targeted multimodal evidence re-checks.
-  state_revision_enabled: true
-  state_revision_apply_threshold: 0.88
-  state_revision_max_candidates: 20
-  state_revision_catalog_chars: 32000
-  state_revision_context_seconds: 60
-
 vision:
   frame_offsets_seconds: [-3, 2, 7]
   temporal_composite_enabled: false
@@ -129,7 +122,7 @@ literature:
 latex:
   output_dir: ../tex/functional_analysis_vk
   compiler: latexmk
-  compile: true
+  compile: false
 
 runtime:
   work_dir: ../work/functional_analysis_vk
