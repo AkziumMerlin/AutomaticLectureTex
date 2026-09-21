@@ -33,10 +33,9 @@ class MediaSource(ABC):
     def identity(self) -> dict[str, str]:
         raise NotImplementedError
 
-    @abstractmethod
     def extract_clip(self, start: float, end: float, output_path: Path) -> Path:
         """Materialize a short local audio-video clip for native multimodal inference."""
-        raise NotImplementedError
+        raise NotImplementedError(f"{type(self).__name__} does not support AV clip extraction")
 
     def _transcode_clip(self, input_path: Path, output_path: Path, *, start: float = 0.0, duration: float | None = None) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
