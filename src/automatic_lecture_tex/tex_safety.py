@@ -61,7 +61,8 @@ _TEXT_COMMAND = re.compile(r"\\text\{[^{}]*\}")
 _COMMAND_NAMES = (
     "alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|tau|"
     "Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|leqslant|geqslant|ell|"
-    "subset|subseteq|cup|cap|bigcup|bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt"
+    "subset|subseteq|cup|cap|bigcup|bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt|"
+    "mathbb|mathcal|quad|qquad|forall|exists|emptyset|ldots|cdots"
 )
 _BAD_TAB_COMMAND = re.compile(rf"\\t({_COMMAND_NAMES})\b")
 _BARE_COMMAND_WORD = re.compile(rf"(?<![\\A-Za-z])({_COMMAND_NAMES})\b")
@@ -114,6 +115,7 @@ def canonicalize_math_fragment(value: str) -> str:
     for source, replacement in _MATH_ONLY_UNICODE.items():
         result = result.replace(source, replacement)
     result = _BAD_TAB_COMMAND.sub(lambda match: "\\" + match.group(1), result)
+    result = _TEXT_WRAPPED_SYMBOL.sub(lambda match: match.group(1), result)
     result = result.replace(r"\_", "_")
     result = _BARE_COMMAND_WORD.sub(lambda match: "\\" + match.group(1), result)
     return result
@@ -150,6 +152,59 @@ def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
 
 
 _SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\(?:leq|geq))\\\)slant")
+
+_BARE_TEXT_NAMED_SET = re.compile(
+    r"(?<![\\A-Za-z])(mathbb|mathcal)\\{([^{}\\n]+)\\}"
+)
+_BARE_TEXT_INDEXED_COMMAND = re.compile(
+    r"(?<![\\A-Za-z])(lambda|varphi|varepsilon)(_[A-Za-z0-9{}]+)"
+)
+_BARE_TEXT_UNAMBIGUOUS = re.compile(
+    r"(?<![\\A-Za-z])(neq|quad|qquad|emptyset|ldots|cdots)\\b"
+)
+_BARE_TEXT_QUANTIFIER = re.compile(
+    r"(?<![\\A-Za-z])(forall|exists)\\s+([A-Za-z][A-Za-z0-9_{}]*)"
+)
+_TEXT_WRAPPED_SYMBOL = re.compile(
+    r"\\text\\{(\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|"
+    r"tau|Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|emptyset))\\}"
+)
+
+
+def _wrap_serialized_math_in_prose(value: str, *, dollars: bool) -> str:
+    def wrap(math: str) -> str:
+        return "$" + math + "$" if dollars else r"\\(" + math + r"\\)"
+
+    result = _BARE_TEXT_NAMED_SET.sub(
+        lambda match: "\\" + match.group(1) + "{" + match.group(2) + "}",
+        value,
+    )
+    result = _BARE_TEXT_INDEXED_COMMAND.sub(
+        lambda match: "\\" + match.group(1) + match.group(2),
+        result,
+    )
+    result = _BARE_TEXT_UNAMBIGUOUS.sub(
+        lambda match: "\\" + match.group(1),
+        result,
+    )
+    result = _BARE_TEXT_QUANTIFIER.sub(
+        lambda match: "\\" + match.group(1) + " " + match.group(2),
+        result,
+    )
+
+    # Wrap only the command-like fragments introduced above; existing LaTeX commands are handled by
+    # _wrap_bare_commands below.
+    result = re.sub(
+        r"(?<![$\\])\\(mathbb|mathcal)\\{([^{}\\n]+)\\}",
+        lambda match: wrap("\\" + match.group(1) + "{" + match.group(2) + "}"),
+        result,
+    )
+    result = re.sub(
+        r"(?<![$\\])\\(lambda|varphi|varepsilon)(_[A-Za-z0-9{}]+)",
+        lambda match: wrap("\\" + match.group(1) + match.group(2)),
+        result,
+    )
+    return result
 
 
 def _repair_unmatched_display_lines(value: str) -> str:
@@ -211,7 +266,8 @@ def normalize_math_spans(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            prose = _wrap_unicode_math_in_prose(part, dollars=False)
+            prose = _wrap_serialized_math_in_prose(part, dollars=False)
+            prose = _wrap_unicode_math_in_prose(prose, dollars=False)
             prose = _wrap_bare_commands(prose, dollars=False)
             result.append(prose)
     return "".join(result)
@@ -235,7 +291,8 @@ def normalize_heading_math(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            prose = _wrap_unicode_math_in_prose(part, dollars=True)
+            prose = _wrap_serialized_math_in_prose(part, dollars=True)
+            prose = _wrap_unicode_math_in_prose(prose, dollars=True)
             prose = _wrap_bare_commands(prose, dollars=True)
             result.append(prose)
     return "".join(result)
@@ -268,3 +325,47 @@ def assert_balanced_math_delimiters(value: str) -> None:
         raise ValueError("unbalanced \\( ... \\) math delimiter")
     if clean.count(r"\[") != clean.count(r"\]"):
         raise ValueError("unbalanced \\[ ... \\] math delimiter")
+
+
+
+_RAW_SERIALIZATION_DAMAGE = re.compile(
+    r"(?<![\\A-Za-z])(?:mathbb\\{|mathcal\\{|lambda_|varphi_|varepsilon_|"
+    r"neq\\b|quad\\b|qquad\\b|emptyset\\b|ldots\\b|cdots\\b)"
+)
+
+
+def assert_balanced_braces(value: str) -> None:
+    depth = 0
+    backslashes = 0
+    for char in strip_control_chars(value):
+        if char == "\\":
+            backslashes += 1
+            continue
+        escaped = backslashes % 2 == 1
+        backslashes = 0
+        if escaped:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("unmatched closing TeX brace")
+    if depth:
+        raise ValueError("unbalanced TeX braces")
+
+
+def assert_no_serialization_damage(value: str) -> None:
+    match = _RAW_SERIALIZATION_DAMAGE.search(strip_control_chars(value))
+    if match:
+        raise ValueError(
+            f"raw command-like token survived TeX normalization: {match.group(0)!r}"
+        )
+
+
+def validate_tex_source(value: str) -> None:
+    """Fail closed on deterministic TeX serialization damage before compilation."""
+
+    assert_balanced_math_delimiters(value)
+    assert_balanced_braces(value)
+    assert_no_serialization_damage(value)
