@@ -37,7 +37,6 @@ from .knowledge import (
 )
 from .llm import LectureModelClient
 from .media import copy_asset
-from .state_revision import run_global_state_revision
 from .schemas import (
     ChunkNotes,
     EpisodeHierarchyPlan,
@@ -66,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 2
+STATE_PIPELINE_VERSION = 1
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -75,11 +74,6 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "episode_synthesis_max_evidence_chars",
     "episode_symbol_context_limit",
     "state_section_max_evidence_chars",
-    "state_revision_enabled",
-    "state_revision_apply_threshold",
-    "state_revision_max_candidates",
-    "state_revision_catalog_chars",
-    "state_revision_context_seconds",
 }
 
 
@@ -389,7 +383,6 @@ def run_knowledge_pipeline(
 ) -> LectureIR:
     notes_started = time.perf_counter()
     pipeline.llm.reset_usage()
-    state_mode = pipeline.config.notes.architecture == "state"
     orchestrator = KnowledgeOrchestrator(
         pipeline.llm,
         pipeline.config.notes,
@@ -503,31 +496,6 @@ def run_knowledge_pipeline(
 
     # A technical window never closes an episode. End-of-lecture is the only unconditional close.
     close_open_episodes(kb)
-
-    state_revision_seconds = 0.0
-    state_revision_stats = {
-        "enabled": False,
-        "candidates": 0,
-        "kept": 0,
-        "replaced": 0,
-        "unresolved": 0,
-    }
-    if state_mode:
-        revision_started = time.perf_counter()
-        kb, state_revision_stats = run_global_state_revision(
-            orchestrator,
-            kb,
-            transcript,
-            work,
-            force=force,
-        )
-        state_revision_seconds = time.perf_counter() - revision_started
-        atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
-        atomic_json_dump(
-            work / "lecture_state.json",
-            make_lecture_state(kb).model_dump(mode="json"),
-        )
-
     kb_fingerprint = stable_hash(
         {
             "kb": kb.model_dump(mode="json"),
@@ -590,6 +558,7 @@ def run_knowledge_pipeline(
             make_lecture_state(kb, outline=outline).model_dump(mode="json"),
         )
 
+    state_mode = pipeline.config.notes.architecture == "state"
     state_section_cache_hits = 0
     state_section_batches_total = 0
     state_synthesis_seconds = 0.0
@@ -801,8 +770,6 @@ def run_knowledge_pipeline(
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
-            "state_revision_seconds": round(state_revision_seconds, 3),
-            "state_revision": state_revision_stats,
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "windows_total": len(chunks),
             "windows_processed": processed_windows,
