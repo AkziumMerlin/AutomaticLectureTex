@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import NotesConfig
@@ -318,12 +319,23 @@ class KnowledgeOrchestrator:
     config: NotesConfig
     output_language: str
 
-    def _structured(self, prompt: str, schema, *, operation: str, max_tokens: int | None = None):
+    def _structured(
+        self,
+        prompt: str,
+        schema,
+        *,
+        operation: str,
+        max_tokens: int | None = None,
+        images: list[Path] | None = None,
+        guided_json: bool = True,
+    ):
         return self.llm._structured(  # noqa: SLF001
             prompt,
             schema,
+            images=images,
             operation=operation,
             max_tokens=max_tokens,
+            guided_json=guided_json,
         )
 
     def extract_observations(
