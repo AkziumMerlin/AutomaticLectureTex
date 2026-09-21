@@ -154,26 +154,26 @@ def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
 _SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\(?:leq|geq))\\\)slant")
 
 _BARE_TEXT_NAMED_SET = re.compile(
-    r"(?<![\\A-Za-z])(mathbb|mathcal)\\{([^{}\\n]+)\\}"
+    r"(?<![\\A-Za-z])(mathbb|mathcal)\{([^{}\n]+)\}"
 )
 _BARE_TEXT_INDEXED_COMMAND = re.compile(
     r"(?<![\\A-Za-z])(lambda|varphi|varepsilon)(_[A-Za-z0-9{}]+)"
 )
 _BARE_TEXT_UNAMBIGUOUS = re.compile(
-    r"(?<![\\A-Za-z])(neq|quad|qquad|emptyset|ldots|cdots)\\b"
+    r"(?<![\\A-Za-z])(neq|quad|qquad|emptyset|ldots|cdots)\b"
 )
 _BARE_TEXT_QUANTIFIER = re.compile(
-    r"(?<![\\A-Za-z])(forall|exists)\\s+([A-Za-z][A-Za-z0-9_{}]*)"
+    r"(?<![\\A-Za-z])(forall|exists)\s+([A-Za-z][A-Za-z0-9_{}]*)"
 )
 _TEXT_WRAPPED_SYMBOL = re.compile(
-    r"\\text\\{(\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|"
-    r"tau|Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|emptyset))\\}"
+    r"\\text\{(\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|"
+    r"tau|Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|emptyset))\}"
 )
 
 
 def _wrap_serialized_math_in_prose(value: str, *, dollars: bool) -> str:
     def wrap(math: str) -> str:
-        return "$" + math + "$" if dollars else r"\\(" + math + r"\\)"
+        return "$" + math + "$" if dollars else r"\(" + math + r"\)"
 
     result = _BARE_TEXT_NAMED_SET.sub(
         lambda match: "\\" + match.group(1) + "{" + match.group(2) + "}",
@@ -195,7 +195,7 @@ def _wrap_serialized_math_in_prose(value: str, *, dollars: bool) -> str:
     # Wrap only the command-like fragments introduced above; existing LaTeX commands are handled by
     # _wrap_bare_commands below.
     result = re.sub(
-        r"(?<![$\\])\\(mathbb|mathcal)\\{([^{}\\n]+)\\}",
+        r"(?<![$\\])\\(mathbb|mathcal)\{([^{}\n]+)\}",
         lambda match: wrap("\\" + match.group(1) + "{" + match.group(2) + "}"),
         result,
     )
