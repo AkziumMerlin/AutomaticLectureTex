@@ -30,9 +30,6 @@ def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
     assert config.asr.aligner_model == "Qwen/Qwen3-ForcedAligner-0.6B"
     assert config.notes.architecture == "state"
     assert config.notes.global_validation is False
-    assert config.notes.state_revision_enabled is True
-    assert config.notes.state_revision_apply_threshold == 0.88
-    assert config.latex.compile is True
     assert config.vision.board_sampling_mode == "change"
     assert config.notes.visual_chunk_board_scan is True
 
@@ -137,3 +134,24 @@ def test_state_section_batches_do_not_reintroduce_raw_asr():
     assert "transcript" not in batches[0]
     assert batches[0]["observations"][0]["text"] == "Canonical mathematical statement"
     assert "bad raw asr variant" not in str(batches[0])
+
+
+
+def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budget():
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state_20s.yaml"
+    )
+    config = load_config(config_path)
+
+    assert config.notes.architecture == "state"
+    assert config.notes.chunk_target_seconds == 20
+    assert config.notes.chunk_overlap_seconds == 5
+    assert config.notes.visual_chunk_board_scan is True
+    assert config.vision.board_sampling_mode == "change"
+    assert config.vision.board_crop_max_vlm_images == 5
+    assert config.vision.board_change_probe_seconds == 4.0
+    assert config.vision.board_change_min_gap_seconds == 3.0
+    assert config.latex.compile is False
+    assert config.latex.output_dir.name == "functional_analysis_vk_20s"

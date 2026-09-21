@@ -59,8 +59,10 @@ llm:
 
 notes:
   architecture: state
-  chunk_target_seconds: 180
-  chunk_overlap_seconds: 30
+  # Fine-grained reconstruction ablation: approximately one local semantic window per 20 seconds.
+  # Windows still respect Qwen forced-alignment segment boundaries.
+  chunk_target_seconds: 20
+  chunk_overlap_seconds: 5
   # One direct board-state channel per semantic window; state timestamps are selected by
   # deterministic visual change rather than fixed uniform sampling.
   visual_chunk_board_scan: true
@@ -99,9 +101,10 @@ vision:
   board_crop_max_vlm_images: 5
   board_sampling_mode: change
   board_uniform_samples: 5
-  board_change_probe_seconds: 8.0
+  # Probe densely enough that a 20 s window can supply up to five distinct board states.
+  board_change_probe_seconds: 4.0
   board_change_threshold: 0.20
-  board_change_min_gap_seconds: 6.0
+  board_change_min_gap_seconds: 3.0
   board_change_max_probe_frames: 48
 
   # If important mathematical content remains unresolved, keep the source itself in the notes.
@@ -120,11 +123,13 @@ literature:
   chunk_chars: 1800
 
 latex:
-  output_dir: ../tex/functional_analysis_vk
+  output_dir: ../tex/functional_analysis_vk_20s
   compiler: latexmk
   compile: false
 
 runtime:
+  # Reuse normalized audio + Qwen transcript from the baseline run; the changed notes/vision
+  # fingerprint still forces semantic-window reconstruction to rerun.
   work_dir: ../work/functional_analysis_vk
   ffmpeg: ffmpeg
   ffprobe: ffprobe
