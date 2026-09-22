@@ -117,6 +117,23 @@ class NotesConfig(BaseModel):
         return self
 
 
+class FormulaDetectionConfig(BaseModel):
+    enabled: bool = False
+    backend: Literal["none", "yolov8"] = "none"
+    model_path: Path | None = None
+    confidence: float = Field(default=0.25, ge=0.0, le=1.0)
+    iou: float = Field(default=0.45, ge=0.0, le=1.0)
+    image_size: int = Field(default=1280, ge=320, le=2048)
+    device: Literal["cuda", "cpu"] = "cuda"
+    max_crops_per_state: int = Field(default=6, ge=1, le=32)
+    max_crops_per_chunk: int = Field(default=8, ge=1, le=64)
+    min_width_px: int = Field(default=36, ge=4, le=2048)
+    min_height_px: int = Field(default=18, ge=4, le=2048)
+    padding_fraction: float = Field(default=0.08, ge=0.0, le=0.50)
+    contact_sheet_enabled: bool = True
+    contact_sheet_columns: int = Field(default=2, ge=1, le=4)
+
+
 class MathOCRConfig(BaseModel):
     backend: Literal["none", "mathpix", "unimernet", "latexocr"] = "none"
     min_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
@@ -165,6 +182,7 @@ class VisionConfig(BaseModel):
     unresolved_board_max_per_chunk: int = Field(default=1, ge=0, le=4)
     unresolved_board_width_fraction: float = Field(default=0.88, ge=0.30, le=1.0)
 
+    formula_detection: FormulaDetectionConfig = Field(default_factory=FormulaDetectionConfig)
     math_ocr: MathOCRConfig = Field(default_factory=MathOCRConfig)
 
     @model_validator(mode="after")
@@ -228,4 +246,7 @@ def load_config(path: str | Path) -> AppConfig:
     unimernet_config = cfg.vision.math_ocr.unimernet_config_path
     if unimernet_config is not None and not unimernet_config.is_absolute():
         cfg.vision.math_ocr.unimernet_config_path = (base / unimernet_config).resolve()
+    formula_model = cfg.vision.formula_detection.model_path
+    if formula_model is not None and not formula_model.is_absolute():
+        cfg.vision.formula_detection.model_path = (base / formula_model).resolve()
     return cfg
