@@ -24,13 +24,57 @@ _MAX_CONTEXT_RE = re.compile(
     r"maximum context length is\s+(\d+)\s+tokens",
     re.IGNORECASE,
 )
+_MAX_MODEL_LEN_RE = re.compile(r"max_model_len\s*=\s*(\d+)", re.IGNORECASE)
+_MAX_TOTAL_TOKENS_RE = re.compile(r"max_total_tokens\s*=\s*(\d+)", re.IGNORECASE)
+
+
+def _backend_output_token_ceiling(error: Exception) -> int | None:
+    """Extract an advertised backend token ceiling from common OpenAI-compatible errors."""
+
+    message = str(error)
+    values: list[int] = []
+    for pattern in (_MAX_CONTEXT_RE, _MAX_MODEL_LEN_RE, _MAX_TOTAL_TOKENS_RE):
+        match = pattern.search(message)
+        if match is not None:
+            values.append(int(match.group(1)))
+    return min(values) if values else None
 
 
 def _is_context_overflow_error(error: Exception) -> bool:
-    """Recognize a backend context-window overflow without trusting its input-token lower bound."""
+    """Recognize both context overflow and hard output-budget rejection from vLLM-like servers."""
 
     message = str(error)
-    return bool(_MAX_CONTEXT_RE.search(message) and "requested" in message and "output tokens" in message)
+    classic_context_overflow = bool(
+        _MAX_CONTEXT_RE.search(message)
+        and "requested" in message
+        and "output tokens" in message
+    )
+    hard_max_tokens_rejection = bool(
+        "max_tokens" in message
+        and "cannot be greater than" in message
+        and _backend_output_token_ceiling(error) is not None
+    )
+    return classic_context_overflow or hard_max_tokens_rejection
+
+
+def _next_context_output_budget(
+    error: Exception,
+    *,
+    current_max_tokens: int,
+    last_accepted_max_tokens: int | None,
+) -> int | None:
+    """Choose a smaller output budget after a backend context/output-limit rejection."""
+
+    candidates = [current_max_tokens // 2]
+    server_ceiling = _backend_output_token_ceiling(error)
+    if server_ceiling is not None:
+        candidates.append(server_ceiling)
+    if last_accepted_max_tokens is not None:
+        candidates.append(last_accepted_max_tokens)
+    next_max_tokens = min(candidates)
+    if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
+        return None
+    return next_max_tokens
 
 
 
@@ -177,14 +221,12 @@ class LectureModelClient(BaseLectureModelClient):
                 except BadRequestError as exc:
                     if not _is_context_overflow_error(exc):
                         raise
-                    if (
-                        last_accepted_max_tokens is not None
-                        and last_accepted_max_tokens < current_max_tokens
-                    ):
-                        next_max_tokens = last_accepted_max_tokens
-                    else:
-                        next_max_tokens = current_max_tokens // 2
-                    if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
+                    next_max_tokens = _next_context_output_budget(
+                        exc,
+                        current_max_tokens=current_max_tokens,
+                        last_accepted_max_tokens=last_accepted_max_tokens,
+                    )
+                    if next_max_tokens is None:
                         raise
                     context_output_ceiling = (
                         next_max_tokens
