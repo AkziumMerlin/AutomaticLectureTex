@@ -443,6 +443,7 @@ def test_state_section_writer_splits_episode_batch_after_structured_json_failure
             start=child_section.start,
             end=child_section.end,
             section_title=child_section.title,
+            blocks=[],
             unresolved=[f"wrote:{episode_ids[0]}"],
         )
 
