@@ -25,7 +25,18 @@ qwen-asr = [
 qwen-asr-hf = ["accelerate>=1.2", "torch>=2.6", "transformers>=5.13.0"]
 whisper = ["faster-whisper>=1.1.0"]
 gigaam = ["gigaam @ git+https://github.com/salute-developers/GigaAM.git"]
-unimernet = ["unimernet[full]"]
+unimernet = [
+  "torch>=2.10,<2.11",
+  "torchvision>=0.25,<0.26",
+  "unimernet>=0.2.3,<0.3",
+]
+formula-vision = [
+  "torch>=2.10,<2.11",
+  "torchvision>=0.25,<0.26",
+  "unimernet>=0.2.3,<0.3",
+  "ultralytics>=8.3,<9",
+  "huggingface-hub>=0.35,<1",
+]
 latexocr = [
   "torch>=2.10,<2.11",
   "torchvision>=0.25,<0.26",
