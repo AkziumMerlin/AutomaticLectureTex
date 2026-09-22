@@ -268,47 +268,8 @@ def _state_section_batches(
 
     max_chars = int(config.state_section_max_evidence_chars)
     batches: list[dict[str, Any]] = []
-    current: list[str] = []
-    for episode_id in episode_ids:
-        candidate_ids = [*current, episode_id]
-        child = section.model_copy(
-            update={
-                "episode_ids": candidate_ids,
-                "claim_ids": [],
-                "evidence_ids": [],
-                "anchor_ids": [],
-                "subsections": [],
-            }
-        )
-        payload = _state_section_payload(kb, child, transcript, config)
-        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if current and len(serialized) > max_chars:
-            committed = section.model_copy(
-                update={
-                    "episode_ids": current,
-                    "claim_ids": [],
-                    "evidence_ids": [],
-                    "anchor_ids": [],
-                    "subsections": [],
-                }
-            )
-            batches.append(_state_section_payload(kb, committed, transcript, config))
-            current = [episode_id]
-        else:
-            current = candidate_ids
 
-    if current:
-        committed = section.model_copy(
-            update={
-                "episode_ids": current,
-                "claim_ids": [],
-                "evidence_ids": [],
-                "anchor_ids": [],
-                "subsections": [],
-            }
-        )
-        payload = _state_section_payload(kb, committed, transcript, config)
-
+    def append_bounded(payload: dict[str, Any]) -> None:
         pending = [payload]
         while pending:
             candidate = pending.pop(0)
@@ -336,7 +297,7 @@ def _state_section_batches(
 
             left, right = split
             logger.info(
-                "[%s] pre-splitting oversized single-episode state evidence "
+                "[%s] pre-splitting oversized state evidence "
                 "(%d chars, %d observations) into %d + %d observations",
                 section.id,
                 len(serialized),
@@ -345,6 +306,47 @@ def _state_section_batches(
                 len(right.get("observations", [])),
             )
             pending[0:0] = [left, right]
+
+    current: list[str] = []
+    for episode_id in episode_ids:
+        candidate_ids = [*current, episode_id]
+        child = section.model_copy(
+            update={
+                "episode_ids": candidate_ids,
+                "claim_ids": [],
+                "evidence_ids": [],
+                "anchor_ids": [],
+                "subsections": [],
+            }
+        )
+        payload = _state_section_payload(kb, child, transcript, config)
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if current and len(serialized) > max_chars:
+            committed = section.model_copy(
+                update={
+                    "episode_ids": current,
+                    "claim_ids": [],
+                    "evidence_ids": [],
+                    "anchor_ids": [],
+                    "subsections": [],
+                }
+            )
+            append_bounded(_state_section_payload(kb, committed, transcript, config))
+            current = [episode_id]
+        else:
+            current = candidate_ids
+
+    if current:
+        committed = section.model_copy(
+            update={
+                "episode_ids": current,
+                "claim_ids": [],
+                "evidence_ids": [],
+                "anchor_ids": [],
+                "subsections": [],
+            }
+        )
+        append_bounded(_state_section_payload(kb, committed, transcript, config))
 
     for index, payload in enumerate(batches):
         payload["batch"] = {"index": index, "count": len(batches)}
