@@ -97,6 +97,49 @@ def _prefer_board_views(
     return selected[:limit]
 
 
+def _select_diverse_formula_crops(
+    crops: list[DetectedFormulaCrop],
+    *,
+    limit: int,
+) -> list[DetectedFormulaCrop]:
+    """Spend crop budget across board states before adding same-state extras."""
+
+    if limit <= 0 or not crops:
+        return []
+    groups: dict[int, list[DetectedFormulaCrop]] = {}
+    for crop in crops:
+        key = round(crop.frame.timestamp * 1000)
+        groups.setdefault(key, []).append(crop)
+    for values in groups.values():
+        values.sort(key=lambda item: item.confidence, reverse=True)
+
+    selected: list[DetectedFormulaCrop] = []
+    selected_ids: set[str] = set()
+    # First pass: one strongest formula per chronological board state.
+    for key in sorted(groups):
+        crop = groups[key][0]
+        selected.append(crop)
+        selected_ids.add(crop.id)
+        if len(selected) >= limit:
+            return selected
+
+    # Second pass: fill remaining capacity with the strongest unused detections globally.
+    remaining = sorted(
+        (crop for crop in crops if crop.id not in selected_ids),
+        key=lambda item: item.confidence,
+        reverse=True,
+    )
+    selected.extend(remaining[: max(0, limit - len(selected))])
+    return sorted(
+        selected,
+        key=lambda item: (
+            item.frame.timestamp,
+            item.bbox[1],
+            item.bbox[0],
+        ),
+    )
+
+
 def _subsample_ocr_frames(
     frames: list[ExtractedFrame],
     *,
@@ -391,18 +434,9 @@ def collect_visual_evidence(
 
             if formula_crops:
                 max_crops = pipeline.config.vision.formula_detection.max_crops_per_chunk
-                strongest = sorted(
+                formula_crops = _select_diverse_formula_crops(
                     formula_crops,
-                    key=lambda item: item.confidence,
-                    reverse=True,
-                )[:max_crops]
-                formula_crops = sorted(
-                    strongest,
-                    key=lambda item: (
-                        item.frame.timestamp,
-                        item.bbox[1],
-                        item.bbox[0],
-                    ),
+                    limit=max_crops,
                 )
                 if pipeline.config.vision.formula_detection.contact_sheet_enabled:
                     formula_contact_sheet = build_formula_contact_sheet(
@@ -444,17 +478,9 @@ def collect_visual_evidence(
                 and pipeline.config.vision.math_ocr.board_scan_enabled
             ):
                 if formula_crops:
-                    selected_crops = sorted(
+                    selected_crops = _select_diverse_formula_crops(
                         formula_crops,
-                        key=lambda item: item.confidence,
-                        reverse=True,
-                    )[: pipeline.config.vision.math_ocr.board_scan_max_images]
-                    selected_crops.sort(
-                        key=lambda item: (
-                            item.frame.timestamp,
-                            item.bbox[1],
-                            item.bbox[0],
-                        )
+                        limit=pipeline.config.vision.math_ocr.board_scan_max_images,
                     )
                     ocr_inputs = [(item.id, item.frame) for item in selected_crops]
                 else:
