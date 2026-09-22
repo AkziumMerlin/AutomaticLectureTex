@@ -67,32 +67,102 @@ def _board_scan_images(
     *,
     limit: int = 5,
 ) -> tuple[list[Path], list[str]]:
-    """Collect actual board-scan files in the exact order passed to the multimodal model."""
+    """Choose complementary board context and formula-detail images for the VLM."""
 
     images: list[Path] = []
     labels: list[str] = []
     seen: set[Path] = set()
+
+    def append(path: Path, label: str) -> None:
+        if len(images) >= limit or path in seen or not path.is_file():
+            return
+        images.append(path)
+        labels.append(f"Image {len(images) - 1}: {label}")
+        seen.add(path)
+
     for item in evidence:
         if item.kind != VisualKind.BOARD_SCAN:
             continue
+
+        board_frames: list[tuple[Path, float | None, int]] = []
         for index, raw_path in enumerate(item.frame_paths):
-            path = Path(raw_path)
-            if path in seen or not path.is_file():
-                continue
             timestamp = (
                 item.frame_timestamps[index]
                 if index < len(item.frame_timestamps)
                 else None
             )
-            labels.append(
-                f"Image {len(images)}: request_id={item.request_id}, frame_index={index}, "
-                + (f"timestamp={timestamp:.3f}s" if timestamp is not None else "timestamp=unknown")
+            board_frames.append((Path(raw_path), timestamp, index))
+
+        # Preserve global context first and the latest distinct board state second. The latter is
+        # important because a newly written formula can occupy only a tiny fraction of the board.
+        if board_frames:
+            first_path, first_ts, first_index = board_frames[0]
+            append(
+                first_path,
+                f"board_state request_id={item.request_id}, frame_index={first_index}, "
+                + (f"timestamp={first_ts:.3f}s" if first_ts is not None else "timestamp=unknown"),
             )
-            images.append(path)
-            seen.add(path)
+        if len(board_frames) > 1:
+            last_path, last_ts, last_index = board_frames[-1]
+            append(
+                last_path,
+                f"latest_board_state request_id={item.request_id}, frame_index={last_index}, "
+                + (f"timestamp={last_ts:.3f}s" if last_ts is not None else "timestamp=unknown"),
+            )
+
+        if item.formula_contact_sheet_path:
+            crop_ids = ",".join(crop.id for crop in item.formula_crops)
+            append(
+                Path(item.formula_contact_sheet_path),
+                f"formula_contact_sheet request_id={item.request_id}, crop_ids=[{crop_ids}]",
+            )
+
+        strongest_crops = sorted(
+            item.formula_crops,
+            key=lambda crop: crop.detector_confidence,
+            reverse=True,
+        )
+        for crop in strongest_crops:
+            append(
+                Path(crop.image_path),
+                f"formula_crop id={crop.id}, timestamp={crop.timestamp:.3f}s, "
+                f"bbox={crop.bbox}, detector_confidence={crop.detector_confidence:.3f}",
+            )
             if len(images) >= limit:
-                return images, labels
+                break
+
+        # Fill any spare slots with intermediate board states for temporal context.
+        for path, timestamp, index in board_frames[1:-1]:
+            append(
+                path,
+                f"board_state request_id={item.request_id}, frame_index={index}, "
+                + (
+                    f"timestamp={timestamp:.3f}s"
+                    if timestamp is not None
+                    else "timestamp=unknown"
+                ),
+            )
+            if len(images) >= limit:
+                break
+
+        if len(images) >= limit:
+            break
+
     return images, labels
+
+
+def _visual_metadata_payload(evidence: list[VisualEvidence]) -> list[dict]:
+    """Serialize sensor metadata without leaking local image paths into the prompt."""
+
+    payloads: list[dict] = []
+    for item in evidence:
+        payload = item.model_dump(mode="json")
+        payload.pop("frame_paths", None)
+        payload.pop("formula_contact_sheet_path", None)
+        for crop in payload.get("formula_crops", []):
+            crop.pop("image_path", None)
+        payloads.append(payload)
+    return payloads
 
 
 @dataclass
@@ -124,7 +194,7 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
         visual_ids = {item.request_id for item in evidence if item.request_id}
         multimodal_images, multimodal_image_labels = _board_scan_images(evidence)
         visual_json = json.dumps(
-            [item.model_dump(mode="json", exclude={"frame_paths"}) for item in evidence],
+            _visual_metadata_payload(evidence),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -199,11 +269,18 @@ The attached board images are DIRECT SENSOR EVIDENCE, not file-name hints. They 
 the board-image index above and represent selected board states from this semantic window. Inspect
 the actual pixels when reconstructing notation, equations, theorem statements, diagrams, and symbols.
 
-Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`) and independent
-`math_ocr_candidates`. Those text channels are FALLIBLE SENSOR HYPOTHESES, not ground truth.
-Compare the actual board images, OCR channels, established notation, neighboring equations, and
-local mathematical consistency. If exact signs/variables remain materially inconsistent across
-sensors, report the content as unresolved instead of choosing the most convenient formula.
+Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`), detected
+`formula_crops`, and independent `math_ocr_candidates`. Those text channels are FALLIBLE SENSOR
+HYPOTHESES, not ground truth. A UniMERNet candidate tied to a formula `source_id` is a specialized
+glyph-level transcription hypothesis: give it more weight than phonetic ASR for exact operators,
+indices, roots and variable names, but verify it against the ATTACHED crop pixels before accepting
+it. The crop image remains the direct sensor source. ASR is primarily phonetic evidence and standard
+mathematics is only a final disambiguation prior, never a license to complete missing content.
+
+Compare the actual board/full-state images, the corresponding formula crops, OCR channels,
+established notation, neighboring equations, and local mathematical consistency. If exact
+signs/variables remain materially inconsistent across sensors, report the content as unresolved
+instead of choosing the most convenient formula.
 
 When you cite high-confidence visual evidence for a formula, preserve its literal variable names,
 operators, signs, roots, subscripts, and constants unless another supplied local source explicitly
