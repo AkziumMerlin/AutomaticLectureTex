@@ -143,6 +143,7 @@ class MathOCRConfig(BaseModel):
     mathpix_app_id_env: str = "MATHPIX_APP_ID"
     mathpix_app_key_env: str = "MATHPIX_APP_KEY"
     unimernet_config_path: Path | None = None
+    unimernet_python_path: Path | None = None
 
 
 class VisionConfig(BaseModel):
@@ -249,4 +250,7 @@ def load_config(path: str | Path) -> AppConfig:
     formula_model = cfg.vision.formula_detection.model_path
     if formula_model is not None and not formula_model.is_absolute():
         cfg.vision.formula_detection.model_path = (base / formula_model).resolve()
+    unimernet_python = cfg.vision.math_ocr.unimernet_python_path
+    if unimernet_python is not None and not unimernet_python.is_absolute():
+        cfg.vision.math_ocr.unimernet_python_path = (base / unimernet_python).resolve()
     return cfg
