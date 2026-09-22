@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from pydantic import BaseModel
 
 from automatic_lecture_tex import llm_robust
+from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.llm_robust import LectureModelClient
 
 
@@ -105,7 +106,7 @@ def test_balanced_malformed_json_does_not_infer_truncation() -> None:
     assert all(item is not None for item in completions.response_formats)
 
 
-def test_structured_clamps_to_vllm_reported_max_tokens_ceiling(monkeypatch) -> None:
+def test_structured_delegates_vllm_context_limit_to_upstream_split(monkeypatch) -> None:
     class FakeBadRequestError(Exception):
         pass
 
@@ -121,15 +122,24 @@ def test_structured_clamps_to_vllm_reported_max_tokens_ceiling(monkeypatch) -> N
             _response('{"value":"cut', finish_reason="length", completion_tokens=6144),
             _response('{"value":"still cut', finish_reason="length", completion_tokens=12288),
             error,
-            _response('{"value":"complete"}', finish_reason="stop", completion_tokens=20),
         ],
         retries=2,
     )
 
-    result = client._structured("prompt", Payload, max_tokens=6144, operation="test")
+    try:
+        client._structured(
+            "prompt",
+            Payload,
+            max_tokens=6144,
+            operation="state_section_write",
+            split_on_context_limit=True,
+        )
+    except StructuredTaskTooLargeError:
+        pass
+    else:
+        raise AssertionError("backend context ceiling must be delegated to upstream splitting")
 
-    assert result.value == "complete"
-    assert completions.max_tokens == [6144, 12288, 24576, 20000]
+    assert completions.max_tokens == [6144, 12288, 24576]
 
 
 def test_structurally_truncated_json_is_not_locally_completed() -> None:
