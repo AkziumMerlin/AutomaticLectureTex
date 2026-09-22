@@ -66,6 +66,10 @@ notation whenever it can be determined. If something remains ambiguous, record t
 rather than inventing a correction. Return strict JSON only when a JSON schema is supplied."""
 
 
+class StructuredTaskTooLargeError(RuntimeError):
+    """A structured task cannot fit in one backend request and must be split upstream."""
+
+
 class LectureModelClient:
     _USAGE_KEYS = (
         "requests",

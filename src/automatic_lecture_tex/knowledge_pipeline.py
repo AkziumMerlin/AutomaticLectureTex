@@ -35,7 +35,7 @@ from .knowledge import (
     make_lecture_state,
     merge_window_observations,
 )
-from .llm import LectureModelClient
+from .llm import LectureModelClient, StructuredTaskTooLargeError
 from .media import copy_asset
 from .schemas import (
     ChunkNotes,
@@ -320,6 +320,7 @@ Rules:
         operation="state_section_write",
         max_tokens=max_tokens,
         guided_json=guided_json,
+        split_oversized_task=True,
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
@@ -363,6 +364,51 @@ def _state_section_for_episode_ids(
     )
 
 
+def _split_state_section_evidence_by_observations(
+    evidence: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Split one semantic episode without falling back to raw ASR or recomputing state."""
+
+    observations = list(evidence.get("observations", []))
+    if len(observations) <= 1:
+        return None
+
+    midpoint = len(observations) // 2
+
+    def build(selected: list[dict[str, Any]]) -> dict[str, Any]:
+        selected_ids = {str(item.get("id", "")) for item in selected if item.get("id")}
+        claims = [
+            item
+            for item in evidence.get("claims", [])
+            if not item.get("evidence_ids")
+            or selected_ids.intersection(str(value) for value in item.get("evidence_ids", []))
+        ]
+        claim_ids = {str(item.get("id", "")) for item in claims if item.get("id")}
+
+        episodes = []
+        for item in evidence.get("episodes", []):
+            episode = dict(item)
+            episode["observation_ids"] = [
+                value
+                for value in episode.get("observation_ids", [])
+                if str(value) in selected_ids
+            ]
+            episode["claim_ids"] = [
+                value
+                for value in episode.get("claim_ids", [])
+                if str(value) in claim_ids
+            ]
+            episodes.append(episode)
+
+        child = dict(evidence)
+        child["episodes"] = episodes
+        child["claims"] = claims
+        child["observations"] = selected
+        return child
+
+    return build(observations[:midpoint]), build(observations[midpoint:])
+
+
 def _write_state_section_batch_resilient(
     orchestrator: KnowledgeOrchestrator,
     section: OutlineSection,
@@ -374,13 +420,7 @@ def _write_state_section_batch_resilient(
     transcript: Transcript,
     config,
 ) -> ChunkNotes:
-    """Keep malformed final-writer JSON local to the smallest possible episode batch.
-
-    The model client already retries malformed/truncated structured output. If those retries are
-    exhausted, split the current state-section evidence by immutable episode boundaries and write
-    each half independently. This changes serialization granularity only; canonical state is never
-    recomputed or edited.
-    """
+    """Recursively split final-writer work that cannot fit in one structured request."""
 
     try:
         return _write_state_section_batch(
@@ -390,89 +430,150 @@ def _write_state_section_batch_resilient(
             outline_context=outline_context,
             previous_context=previous_context,
         )
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
             str(item["id"])
             for item in evidence.get("episodes", [])
             if item.get("id")
         ]
-        if len(episode_ids) <= 1:
+
+        if len(episode_ids) > 1:
+            midpoint = len(episode_ids) // 2
+            left_ids = episode_ids[:midpoint]
+            right_ids = episode_ids[midpoint:]
             logger.warning(
-                "[%s] state-section leaf remained invalid after structured retries; "
-                "retrying once without guided JSON: %s",
+                "[%s] state-section task did not fit or failed structured retries; "
+                "splitting %d episodes into %d + %d",
+                section.id,
+                len(episode_ids),
+                len(left_ids),
+                len(right_ids),
+            )
+
+            left_section = _state_section_for_episode_ids(section, left_ids)
+            right_section = _state_section_for_episode_ids(section, right_ids)
+            left_evidence = _state_section_payload(kb, left_section, transcript, config)
+            right_evidence = _state_section_payload(kb, right_section, transcript, config)
+
+            left_notes = _write_state_section_batch_resilient(
+                orchestrator,
+                left_section,
+                left_evidence,
+                outline_context=outline_context,
+                previous_context=previous_context,
+                kb=kb,
+                transcript=transcript,
+                config=config,
+            )
+            right_previous = [
+                *previous_context,
+                *previous_block_context([left_notes]),
+            ][-2:]
+            right_notes = _write_state_section_batch_resilient(
+                orchestrator,
+                right_section,
+                right_evidence,
+                outline_context=outline_context,
+                previous_context=right_previous,
+                kb=kb,
+                transcript=transcript,
+                config=config,
+            )
+            return _merge_state_section_batches(section, [left_notes, right_notes])
+
+        observation_split = _split_state_section_evidence_by_observations(evidence)
+        if observation_split is not None:
+            left_evidence, right_evidence = observation_split
+            left_count = len(left_evidence.get("observations", []))
+            right_count = len(right_evidence.get("observations", []))
+            logger.warning(
+                "[%s] single-episode state-section task still too large/invalid; "
+                "splitting canonical observations into %d + %d",
+                section.id,
+                left_count,
+                right_count,
+            )
+            left_notes = _write_state_section_batch_resilient(
+                orchestrator,
+                section,
+                left_evidence,
+                outline_context=outline_context,
+                previous_context=previous_context,
+                kb=kb,
+                transcript=transcript,
+                config=config,
+            )
+            right_previous = [
+                *previous_context,
+                *previous_block_context([left_notes]),
+            ][-2:]
+            right_notes = _write_state_section_batch_resilient(
+                orchestrator,
+                section,
+                right_evidence,
+                outline_context=outline_context,
+                previous_context=right_previous,
+                kb=kb,
+                transcript=transcript,
+                config=config,
+            )
+            return _merge_state_section_batches(section, [left_notes, right_notes])
+
+        if isinstance(exc, StructuredTaskTooLargeError):
+            logger.warning(
+                "[%s] state-section task cannot be split further after backend context limit: %s",
                 section.id,
                 exc,
             )
-            try:
-                return _write_state_section_batch(
-                    orchestrator,
-                    section,
-                    evidence,
-                    outline_context=outline_context,
-                    previous_context=previous_context,
-                    guided_json=False,
-                    max_tokens=8192,
-                )
-            except (json.JSONDecodeError, ValidationError) as leaf_exc:
-                logger.warning(
-                    "[%s] state-section leaf unresolved after unguided retry: %s",
-                    section.id,
-                    leaf_exc,
-                )
-                return ChunkNotes(
-                    chunk_id=section.id,
-                    start=section.start,
-                    end=section.end,
-                    section_title=section.title.replace("$", ""),
-                    blocks=[],
-                    unresolved=[
-                        "State-section writer could not serialize one canonical episode after "
-                        f"structured retries: {type(leaf_exc).__name__}: {leaf_exc}"
-                    ],
-                )
+            return ChunkNotes(
+                chunk_id=section.id,
+                start=section.start,
+                end=section.end,
+                section_title=section.title.replace("$", ""),
+                blocks=[],
+                unresolved=[
+                    "State-section writer reached the backend context limit after recursive "
+                    "episode/observation splitting."
+                ],
+            )
 
-        midpoint = len(episode_ids) // 2
-        left_ids = episode_ids[:midpoint]
-        right_ids = episode_ids[midpoint:]
         logger.warning(
-            "[%s] state-section structured output failed after client retries; "
-            "splitting %d episodes into %d + %d",
+            "[%s] state-section leaf remained invalid after structured retries; "
+            "retrying once without guided JSON: %s",
             section.id,
-            len(episode_ids),
-            len(left_ids),
-            len(right_ids),
+            exc,
         )
-
-        left_section = _state_section_for_episode_ids(section, left_ids)
-        right_section = _state_section_for_episode_ids(section, right_ids)
-        left_evidence = _state_section_payload(kb, left_section, transcript, config)
-        right_evidence = _state_section_payload(kb, right_section, transcript, config)
-
-        left_notes = _write_state_section_batch_resilient(
-            orchestrator,
-            left_section,
-            left_evidence,
-            outline_context=outline_context,
-            previous_context=previous_context,
-            kb=kb,
-            transcript=transcript,
-            config=config,
-        )
-        right_previous = [
-            *previous_context,
-            *previous_block_context([left_notes]),
-        ][-2:]
-        right_notes = _write_state_section_batch_resilient(
-            orchestrator,
-            right_section,
-            right_evidence,
-            outline_context=outline_context,
-            previous_context=right_previous,
-            kb=kb,
-            transcript=transcript,
-            config=config,
-        )
-        return _merge_state_section_batches(section, [left_notes, right_notes])
+        try:
+            return _write_state_section_batch(
+                orchestrator,
+                section,
+                evidence,
+                outline_context=outline_context,
+                previous_context=previous_context,
+                guided_json=False,
+                max_tokens=8192,
+            )
+        except (
+            json.JSONDecodeError,
+            ValidationError,
+            StructuredTaskTooLargeError,
+        ) as leaf_exc:
+            logger.warning(
+                "[%s] state-section leaf unresolved after unguided retry: %s",
+                section.id,
+                leaf_exc,
+            )
+            return ChunkNotes(
+                chunk_id=section.id,
+                start=section.start,
+                end=section.end,
+                section_title=section.title.replace("$", ""),
+                blocks=[],
+                unresolved=[
+                    "State-section writer could not serialize the smallest canonical batch after "
+                    f"structured retries: {type(leaf_exc).__name__}: {leaf_exc}"
+                ],
+            )
 
 
 def _merge_state_section_batches(

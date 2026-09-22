@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from pydantic_core import ValidationError
 
 from .llm import LectureModelClient as BaseLectureModelClient
-from .llm import SYSTEM
+from .llm import SYSTEM, StructuredTaskTooLargeError
 from .util import strip_thinking_and_fences
 
 T = TypeVar("T", bound=BaseModel)
@@ -24,14 +24,36 @@ _MAX_CONTEXT_RE = re.compile(
     r"maximum context length is\s+(\d+)\s+tokens",
     re.IGNORECASE,
 )
+_EXPLICIT_MAX_TOKENS_CAP_RE = re.compile(
+    r"max_tokens\s*=\s*\d+\s+cannot be greater than.*?"
+    r"(?:max_model_len\s*=\s*)?(?:max_total_tokens\s*=\s*)?(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _explicit_max_tokens_ceiling(error: Exception) -> int | None:
+    """Extract an output-token ceiling explicitly reported by an OpenAI-compatible backend."""
+
+    match = _EXPLICIT_MAX_TOKENS_CAP_RE.search(str(error))
+    if match is None:
+        return None
+    ceiling = int(match.group(1))
+    return ceiling if ceiling > 0 else None
 
 
 def _is_context_overflow_error(error: Exception) -> bool:
-    """Recognize a backend context-window overflow without trusting its input-token lower bound."""
+    """Recognize backend context/output-budget rejections across common server formats."""
+
+    if _explicit_max_tokens_ceiling(error) is not None:
+        return True
 
     message = str(error)
-    return bool(_MAX_CONTEXT_RE.search(message) and "requested" in message and "output tokens" in message)
-
+    lowered = message.lower()
+    return bool(
+        _MAX_CONTEXT_RE.search(message)
+        and ("requested" in lowered or "request fewer" in lowered)
+        and ("output tokens" in lowered or "completion tokens" in lowered)
+    )
 
 
 def _json_structure_incomplete(raw: str) -> bool:
@@ -106,6 +128,7 @@ class LectureModelClient(BaseLectureModelClient):
         *,
         guided_json: bool = True,
         operation: str = "structured",
+        split_oversized_task: bool = False,
     ) -> T:
         schema_instruction = "\nJSON schema:\n" + json.dumps(
             schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -177,6 +200,23 @@ class LectureModelClient(BaseLectureModelClient):
                 except BadRequestError as exc:
                     if not _is_context_overflow_error(exc):
                         raise
+                    if split_oversized_task:
+                        logger.warning(
+                            "[%s] structured task exceeded backend context/output budget at "
+                            "max_tokens=%d; delegating split to caller",
+                            operation,
+                            current_max_tokens,
+                        )
+                        raise StructuredTaskTooLargeError(
+                            f"{operation} cannot fit in one backend request at "
+                            f"max_tokens={current_max_tokens}: {exc}"
+                        ) from exc
+
+                    # Preserve the historical fallback for legacy context-overflow messages.
+                    # Explicit vLLM max_total_tokens errors are only special for callers that opted
+                    # into semantics-preserving upstream splitting above.
+                    if _explicit_max_tokens_ceiling(exc) is not None:
+                        raise
                     if (
                         last_accepted_max_tokens is not None
                         and last_accepted_max_tokens < current_max_tokens
@@ -184,6 +224,7 @@ class LectureModelClient(BaseLectureModelClient):
                         next_max_tokens = last_accepted_max_tokens
                     else:
                         next_max_tokens = current_max_tokens // 2
+
                     if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
                         raise
                     context_output_ceiling = (
@@ -222,6 +263,18 @@ class LectureModelClient(BaseLectureModelClient):
                     and _looks_like_truncated_json(raw, exc)
                 )
                 truncated = backend_truncated or inferred_truncated
+                if split_oversized_task and truncated:
+                    logger.warning(
+                        "[%s] structured output was truncated at max_tokens=%d; "
+                        "delegating task split to caller",
+                        operation,
+                        current_max_tokens,
+                    )
+                    raise StructuredTaskTooLargeError(
+                        f"{operation} structured output was truncated at "
+                        f"max_tokens={current_max_tokens}"
+                    ) from exc
+
                 previous_truncated = truncated
                 guided_failure = (
                     use_guided_json

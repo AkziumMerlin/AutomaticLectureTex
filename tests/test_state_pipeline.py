@@ -4,7 +4,9 @@ from pathlib import Path
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.knowledge import make_lecture_state
+from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import (
+    _split_state_section_evidence_by_observations,
     _state_section_batches,
     _write_state_section_batch_resilient,
 )
@@ -162,6 +164,142 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
 
+
+
+
+def test_single_episode_evidence_can_split_by_canonical_observations():
+    evidence = {
+        "section": {"id": "section_0"},
+        "episodes": [
+            {
+                "id": "episode_0",
+                "observation_ids": ["o0", "o1", "o2", "o3"],
+                "claim_ids": ["c0", "c1"],
+            }
+        ],
+        "observations": [
+            {"id": "o0", "start": 0.0},
+            {"id": "o1", "start": 1.0},
+            {"id": "o2", "start": 2.0},
+            {"id": "o3", "start": 3.0},
+        ],
+        "claims": [
+            {"id": "c0", "evidence_ids": ["o0", "o1"]},
+            {"id": "c1", "evidence_ids": ["o2", "o3"]},
+        ],
+        "symbols": [{"id": "s0", "symbol": "x"}],
+    }
+
+    split = _split_state_section_evidence_by_observations(evidence)
+
+    assert split is not None
+    left, right = split
+    assert [item["id"] for item in left["observations"]] == ["o0", "o1"]
+    assert [item["id"] for item in right["observations"]] == ["o2", "o3"]
+    assert [item["id"] for item in left["claims"]] == ["c0"]
+    assert [item["id"] for item in right["claims"]] == ["c1"]
+    assert left["episodes"][0]["observation_ids"] == ["o0", "o1"]
+    assert right["episodes"][0]["observation_ids"] == ["o2", "o3"]
+    assert left["symbols"] == right["symbols"] == evidence["symbols"]
+
+
+def test_state_section_writer_splits_episode_batch_after_context_limit(monkeypatch):
+    observations = [
+        LectureObservation(
+            id=f"obs_{index}",
+            window_id=f"window_{index}",
+            start=float(index),
+            end=float(index + 1),
+            kind=ObservationKind.CLAIM,
+            text=f"Claim {index}",
+            source_status=SourceStatus.OBSERVED,
+            evidence_refs=[f"seg_{index}"],
+            episode_id=f"episode_{index}",
+        )
+        for index in range(2)
+    ]
+    episodes = [
+        SemanticEpisode(
+            id=f"episode_{index}",
+            title=f"Episode {index}",
+            start=float(index),
+            end=float(index + 1),
+            status=EpisodeStatus.CLOSED,
+            observation_ids=[f"obs_{index}"],
+        )
+        for index in range(2)
+    ]
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        episodes=episodes,
+    )
+    section = OutlineSection(
+        id="section_0",
+        title="Topic",
+        start=0.0,
+        end=2.0,
+        episode_ids=["episode_0", "episode_1"],
+    )
+    transcript = Transcript(
+        lecture_id="lecture",
+        language="ru",
+        segments=[
+            TranscriptSegment(id=f"seg_{index}", start=index, end=index + 1, text=f"raw {index}")
+            for index in range(2)
+        ],
+    )
+    config = NotesConfig(
+        architecture="state",
+        chunk_target_seconds=20,
+        chunk_overlap_seconds=5,
+    )
+    evidence = knowledge_pipeline_module._state_section_payload(
+        kb,
+        section,
+        transcript,
+        config,
+    )
+    calls = []
+
+    def fake_write(orchestrator, child_section, child_evidence, **kwargs):
+        del orchestrator, kwargs
+        episode_ids = [item["id"] for item in child_evidence["episodes"]]
+        calls.append(episode_ids)
+        if len(episode_ids) > 1:
+            raise StructuredTaskTooLargeError("backend context limit")
+        return ChunkNotes(
+            chunk_id=child_section.id,
+            start=child_section.start,
+            end=child_section.end,
+            section_title=child_section.title,
+            unresolved=[f"wrote:{episode_ids[0]}"],
+        )
+
+    monkeypatch.setattr(
+        knowledge_pipeline_module,
+        "_write_state_section_batch",
+        fake_write,
+    )
+
+    result = _write_state_section_batch_resilient(
+        object(),
+        section,
+        evidence,
+        outline_context=[],
+        previous_context=[],
+        kb=kb,
+        transcript=transcript,
+        config=config,
+    )
+
+    assert calls == [
+        ["episode_0", "episode_1"],
+        ["episode_0"],
+        ["episode_1"],
+    ]
+    assert result.unresolved == ["wrote:episode_0", "wrote:episode_1"]
 
 
 def test_state_section_writer_splits_episode_batch_after_structured_json_failure(

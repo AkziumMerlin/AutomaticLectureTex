@@ -328,6 +328,7 @@ class KnowledgeOrchestrator:
         max_tokens: int | None = None,
         images: list[Path] | None = None,
         guided_json: bool = True,
+        split_oversized_task: bool = False,
     ):
         kwargs = {
             "operation": operation,
@@ -339,6 +340,8 @@ class KnowledgeOrchestrator:
             kwargs["images"] = images
         if not guided_json:
             kwargs["guided_json"] = False
+        if split_oversized_task:
+            kwargs["split_oversized_task"] = True
         return self.llm._structured(  # noqa: SLF001
             prompt,
             schema,
