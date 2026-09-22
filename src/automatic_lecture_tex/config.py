@@ -122,6 +122,7 @@ class MathOCRConfig(BaseModel):
     min_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
     board_scan_enabled: bool = False
     board_scan_max_images: int = Field(default=3, ge=1, le=8)
+    device: Literal["cuda", "cpu"] = "cuda"
     mathpix_app_id_env: str = "MATHPIX_APP_ID"
     mathpix_app_key_env: str = "MATHPIX_APP_KEY"
     unimernet_config_path: Path | None = None
