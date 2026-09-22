@@ -338,6 +338,10 @@ def collect_visual_evidence(
             ocr_image = raw_views[0].path
 
         board_views: list[ExtractedFrame] = []
+        formula_crops: list[DetectedFormulaCrop] = []
+        formula_contact_sheet: Path | None = None
+        fallback_ocr_frames: list[ExtractedFrame] = []
+
         if is_chunk_board_scan:
             display_frames: list[ExtractedFrame] = []
             for index, frame in enumerate(raw_views):
@@ -352,6 +356,7 @@ def collect_visual_evidence(
                         if crop_result is not None and crop_result.frames:
                             selected = crop_result.frames[0]
                             board_views.append(selected)
+                            fallback_ocr_frames.extend(crop_result.frames[1:])
                     except Exception as exc:
                         logger.warning(
                             "[%s] board auto-crop failed for %s state %d; using raw frame: %s",
@@ -360,10 +365,52 @@ def collect_visual_evidence(
                             index,
                             exc,
                         )
+
                 display_frames.append(selected)
+                if formula_detector is not None:
+                    try:
+                        formula_crops.extend(
+                            formula_detector.detect(
+                                selected,
+                                frame_dir / "formula_crops" / f"state_{index:02d}",
+                                id_prefix=f"{request.id}_s{index:02d}",
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] formula detection failed for %s state %d: %s",
+                            lecture.id,
+                            request.id,
+                            index,
+                            exc,
+                        )
+
             display_frames = display_frames[: pipeline.config.vision.board_crop_max_vlm_images]
             if display_frames:
                 ocr_image = display_frames[0].path
+
+            if formula_crops:
+                max_crops = pipeline.config.vision.formula_detection.max_crops_per_chunk
+                strongest = sorted(
+                    formula_crops,
+                    key=lambda item: item.confidence,
+                    reverse=True,
+                )[:max_crops]
+                formula_crops = sorted(
+                    strongest,
+                    key=lambda item: (
+                        item.frame.timestamp,
+                        item.bbox[1],
+                        item.bbox[0],
+                    ),
+                )
+                if pipeline.config.vision.formula_detection.contact_sheet_enabled:
+                    formula_contact_sheet = build_formula_contact_sheet(
+                        formula_crops,
+                        frame_dir / "formula_crops" / "contact_sheet.jpg",
+                        columns=pipeline.config.vision.formula_detection.contact_sheet_columns,
+                        max_items=max_crops,
+                    )
         else:
             if raw_views and pipeline.config.vision.board_auto_crop_enabled:
                 try:
@@ -374,7 +421,6 @@ def collect_visual_evidence(
                     )
                     if crop_result is not None:
                         board_views = crop_result.frames
-                        # Specialized OCR benefits from the board-only full crop as well.
                         if board_views:
                             ocr_image = board_views[0].path
                 except Exception as exc:
@@ -397,13 +443,33 @@ def collect_visual_evidence(
                 is_chunk_board_scan
                 and pipeline.config.vision.math_ocr.board_scan_enabled
             ):
-                ocr_frames = _subsample_ocr_frames(
-                    display_frames,
-                    limit=pipeline.config.vision.math_ocr.board_scan_max_images,
-                )
+                if formula_crops:
+                    selected_crops = sorted(
+                        formula_crops,
+                        key=lambda item: item.confidence,
+                        reverse=True,
+                    )[: pipeline.config.vision.math_ocr.board_scan_max_images]
+                    selected_crops.sort(
+                        key=lambda item: (
+                            item.frame.timestamp,
+                            item.bbox[1],
+                            item.bbox[0],
+                        )
+                    )
+                    ocr_inputs = [(item.id, item.frame) for item in selected_crops]
+                else:
+                    fallback = fallback_ocr_frames or display_frames
+                    selected_frames = _subsample_ocr_frames(
+                        fallback,
+                        limit=pipeline.config.vision.math_ocr.board_scan_max_images,
+                    )
+                    ocr_inputs = [
+                        (f"{request.id}_fallback_{index:02d}", frame)
+                        for index, frame in enumerate(selected_frames)
+                    ]
                 candidates = _run_math_ocr(
                     ocr_backend,
-                    ocr_frames,
+                    ocr_inputs,
                     min_confidence=pipeline.config.vision.math_ocr.min_confidence,
                     lecture_id=lecture.id,
                     request_id=request.id,
@@ -411,19 +477,40 @@ def collect_visual_evidence(
             elif not is_chunk_board_scan and ocr_image is not None:
                 candidates = _run_math_ocr(
                     ocr_backend,
-                    [ExtractedFrame(timestamp=request.timestamp, path=ocr_image)],
+                    [
+                        (
+                            f"{request.id}_local",
+                            ExtractedFrame(timestamp=request.timestamp, path=ocr_image),
+                        )
+                    ],
                     min_confidence=pipeline.config.vision.math_ocr.min_confidence,
                     lecture_id=lecture.id,
                     request_id=request.id,
                 )
 
-        prepared_visuals.append((request, display_frames, board_views, candidates))
+        prepared_visuals.append(
+            (
+                request,
+                display_frames,
+                board_views,
+                candidates,
+                formula_crops,
+                formula_contact_sheet,
+            )
+        )
 
     if prepared_visuals:
         workers = min(pipeline.config.vision.max_workers, len(prepared_visuals))
         futures: list[Future[VisualEvidence] | None] = []
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            for request, frames, _board_views, _candidates in prepared_visuals:
+            for (
+                request,
+                frames,
+                _board_views,
+                _candidates,
+                _formula_crops,
+                _formula_contact_sheet,
+            ) in prepared_visuals:
                 if request.reason == CHUNK_BOARD_SCAN_REASON:
                     # The board-state scan is a raw sensor bundle. Do not spend a separate VLM call
                     # converting it to OCR before the multimodal writer sees the images.
@@ -439,9 +526,14 @@ def collect_visual_evidence(
                     )
                 )
 
-            for (request, frames, board_views, candidates), future in zip(
-                prepared_visuals, futures, strict=True
-            ):
+            for (
+                request,
+                frames,
+                board_views,
+                candidates,
+                formula_crops,
+                formula_contact_sheet,
+            ), future in zip(prepared_visuals, futures, strict=True):
                 if future is None:
                     visual = VisualEvidence(
                         request_id=request.id,
@@ -456,6 +548,21 @@ def collect_visual_evidence(
                         frame_paths=[str(frame.path) for frame in frames],
                         frame_timestamps=[frame.timestamp for frame in frames],
                         math_ocr_candidates=candidates,
+                        formula_crops=[
+                            FormulaVisualCrop(
+                                id=item.id,
+                                timestamp=item.frame.timestamp,
+                                bbox=item.bbox,
+                                detector_confidence=item.confidence,
+                                image_path=str(item.frame.path),
+                            )
+                            for item in formula_crops
+                        ],
+                        formula_contact_sheet_path=(
+                            str(formula_contact_sheet)
+                            if formula_contact_sheet is not None
+                            else None
+                        ),
                     )
                 else:
                     try:
