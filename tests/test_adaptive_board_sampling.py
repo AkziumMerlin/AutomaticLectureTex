@@ -107,3 +107,33 @@ def test_board_state_selector_spreads_budget_across_all_detected_changes(tmp_pat
     assert timestamps[0] == 0.0
     assert timestamps[-1] == 80.0
     assert timestamps == sorted(timestamps)
+
+
+def test_board_state_selector_keeps_sparse_new_formula_on_latest_probe(tmp_path):
+    first_path = tmp_path / "board_before.png"
+    latest_path = tmp_path / "board_after.png"
+
+    Image.new("RGB", (320, 180), "black").save(first_path)
+    latest = Image.new("RGB", (320, 180), "black")
+    draw = ImageDraw.Draw(latest)
+    # A small newly written relation occupies only a tiny fraction of the whole board.
+    draw.line((230, 145, 300, 145), fill="white", width=2)
+    draw.line((250, 137, 250, 153), fill="white", width=2)
+    latest.save(latest_path)
+
+    score = board_state_change_score(first_path, latest_path)
+    assert score > 0.0
+
+    selected = select_board_state_frames(
+        [
+            ExtractedFrame(timestamp=0.0, path=first_path),
+            ExtractedFrame(timestamp=20.0, path=latest_path),
+        ],
+        max_states=5,
+        # The ordinary threshold is deliberately above the measured sparse change. The latest-state
+        # safeguard should still retain it at the half-threshold writing floor.
+        change_threshold=score * 1.5,
+        min_gap_seconds=1.0,
+    )
+
+    assert [frame.timestamp for frame in selected] == [0.0, 20.0]
