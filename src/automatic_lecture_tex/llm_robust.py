@@ -212,19 +212,18 @@ class LectureModelClient(BaseLectureModelClient):
                             f"max_tokens={current_max_tokens}: {exc}"
                         ) from exc
 
-                    explicit_ceiling = _explicit_max_tokens_ceiling(exc)
-                    if explicit_ceiling is not None and explicit_ceiling < current_max_tokens:
-                        next_max_tokens = explicit_ceiling
-                        recovery = "backend-reported"
-                    elif (
+                    # Preserve the historical fallback for legacy context-overflow messages.
+                    # Explicit vLLM max_total_tokens errors are only special for callers that opted
+                    # into semantics-preserving upstream splitting above.
+                    if _explicit_max_tokens_ceiling(exc) is not None:
+                        raise
+                    if (
                         last_accepted_max_tokens is not None
                         and last_accepted_max_tokens < current_max_tokens
                     ):
                         next_max_tokens = last_accepted_max_tokens
-                        recovery = "previously-accepted"
                     else:
                         next_max_tokens = current_max_tokens // 2
-                        recovery = "geometric"
 
                     if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
                         raise
@@ -234,11 +233,10 @@ class LectureModelClient(BaseLectureModelClient):
                         else min(context_output_ceiling, next_max_tokens)
                     )
                     logger.warning(
-                        "[%s] backend rejected max_tokens=%d; retrying with %s ceiling "
-                        "max_tokens=%d",
+                        "[%s] backend rejected max_tokens=%d for context overflow; "
+                        "retrying with geometric/previously-accepted ceiling max_tokens=%d",
                         operation,
                         current_max_tokens,
-                        recovery,
                         context_output_ceiling,
                     )
                     current_max_tokens = context_output_ceiling
