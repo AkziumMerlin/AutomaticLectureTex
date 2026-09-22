@@ -25,6 +25,7 @@ jobs:
             src/automatic_lecture_tex/config.py \
             src/automatic_lecture_tex/conservative_validation.py \
             src/automatic_lecture_tex/episode_synthesis_resilient.py \
+            src/automatic_lecture_tex/formula_detection.py \
             src/automatic_lecture_tex/frame_selection.py \
             src/automatic_lecture_tex/generated_notes.py \
             src/automatic_lecture_tex/gigaam_vad.py \
@@ -40,13 +41,18 @@ jobs:
             src/automatic_lecture_tex/schemas.py \
             src/automatic_lecture_tex/sensory_evidence.py \
             src/automatic_lecture_tex/tex_safety.py \
+            src/automatic_lecture_tex/unimernet_worker.py \
             src/automatic_lecture_tex/visual_formula_gate.py \
+            tests/test_adaptive_board_sampling.py \
             tests/test_evidence_preservation.py \
+            tests/test_formula_detection.py \
             tests/test_generated_notes.py \
             tests/test_integrity_fixes.py \
+            tests/test_knowledge_integrity_prompt.py \
             tests/test_knowledge_reconstruction_resilience.py \
             tests/test_linear_config.py \
             tests/test_linear_pipeline.py \
+            tests/test_math_ocr.py \
             tests/test_remote_frame_fallback.py \
             tests/test_semantic_reconstruction.py \
             tests/test_sensory_evidence.py \
