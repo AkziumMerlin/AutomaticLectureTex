@@ -139,10 +139,11 @@ def collect_visual_evidence(
 ) -> tuple[list, list[VisualEvidence], float]:
     """Collect visual sensor inputs and OCR evidence.
 
-    The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate VLM call. Its
-    selected board-state frames are retained as raw multimodal inputs for semantic reconstruction.
-    Supplemental local visual requests keep the legacy isolated OCR path. This avoids compressing the
-    main board channel into an intermediate text representation before reconstruction.
+    The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate general VLM
+    call. Its selected board-state frames remain raw multimodal inputs for semantic reconstruction,
+    while an optional specialized image-to-LaTeX backend may attach literal formula candidates.
+    Supplemental local visual requests keep the legacy isolated VLM OCR path. This preserves the
+    raw board channel instead of replacing it with an intermediate textual interpretation.
     """
 
     scan_requests = []
