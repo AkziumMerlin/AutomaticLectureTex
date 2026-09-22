@@ -9,4 +9,5 @@ build/
 work/
 tex/
 literature/
+models/
 .env
