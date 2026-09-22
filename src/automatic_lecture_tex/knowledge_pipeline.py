@@ -281,6 +281,8 @@ def _write_state_section_batch(
     *,
     outline_context: list[dict[str, Any]],
     previous_context: list[dict[str, Any]],
+    guided_json: bool = True,
+    max_tokens: int = 6144,
 ) -> ChunkNotes:
     prompt = f"""Write one contiguous part of a FINAL lecture-note section from an already assembled
 persistent LectureState. All local evidence extraction, episode tracking, notation tracking and
@@ -316,7 +318,8 @@ Rules:
         prompt,
         GeneratedChunkNotes,
         operation="state_section_write",
-        max_tokens=6144,
+        max_tokens=max_tokens,
+        guided_json=guided_json,
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
@@ -343,6 +346,133 @@ Rules:
     notes.blocks = kept
     notes.unresolved = list(dict.fromkeys(notes.unresolved))
     return notes
+
+
+def _state_section_for_episode_ids(
+    section: OutlineSection,
+    episode_ids: list[str],
+) -> OutlineSection:
+    return section.model_copy(
+        update={
+            "episode_ids": list(episode_ids),
+            "claim_ids": [],
+            "evidence_ids": [],
+            "anchor_ids": [],
+            "subsections": [],
+        }
+    )
+
+
+def _write_state_section_batch_resilient(
+    orchestrator: KnowledgeOrchestrator,
+    section: OutlineSection,
+    evidence: dict[str, Any],
+    *,
+    outline_context: list[dict[str, Any]],
+    previous_context: list[dict[str, Any]],
+    kb: LectureKnowledgeBase,
+    transcript: Transcript,
+    config,
+) -> ChunkNotes:
+    """Keep malformed final-writer JSON local to the smallest possible episode batch.
+
+    The model client already retries malformed/truncated structured output. If those retries are
+    exhausted, split the current state-section evidence by immutable episode boundaries and write
+    each half independently. This changes serialization granularity only; canonical state is never
+    recomputed or edited.
+    """
+
+    try:
+        return _write_state_section_batch(
+            orchestrator,
+            section,
+            evidence,
+            outline_context=outline_context,
+            previous_context=previous_context,
+        )
+    except (json.JSONDecodeError, ValidationError) as exc:
+        episode_ids = [
+            str(item["id"])
+            for item in evidence.get("episodes", [])
+            if item.get("id")
+        ]
+        if len(episode_ids) <= 1:
+            logger.warning(
+                "[%s] state-section leaf remained invalid after structured retries; "
+                "retrying once without guided JSON: %s",
+                section.id,
+                exc,
+            )
+            try:
+                return _write_state_section_batch(
+                    orchestrator,
+                    section,
+                    evidence,
+                    outline_context=outline_context,
+                    previous_context=previous_context,
+                    guided_json=False,
+                    max_tokens=8192,
+                )
+            except (json.JSONDecodeError, ValidationError) as leaf_exc:
+                logger.warning(
+                    "[%s] state-section leaf unresolved after unguided retry: %s",
+                    section.id,
+                    leaf_exc,
+                )
+                return ChunkNotes(
+                    chunk_id=section.id,
+                    start=section.start,
+                    end=section.end,
+                    section_title=section.title.replace("$", ""),
+                    blocks=[],
+                    unresolved=[
+                        "State-section writer could not serialize one canonical episode after "
+                        f"structured retries: {type(leaf_exc).__name__}: {leaf_exc}"
+                    ],
+                )
+
+        midpoint = len(episode_ids) // 2
+        left_ids = episode_ids[:midpoint]
+        right_ids = episode_ids[midpoint:]
+        logger.warning(
+            "[%s] state-section structured output failed after client retries; "
+            "splitting %d episodes into %d + %d",
+            section.id,
+            len(episode_ids),
+            len(left_ids),
+            len(right_ids),
+        )
+
+        left_section = _state_section_for_episode_ids(section, left_ids)
+        right_section = _state_section_for_episode_ids(section, right_ids)
+        left_evidence = _state_section_payload(kb, left_section, transcript, config)
+        right_evidence = _state_section_payload(kb, right_section, transcript, config)
+
+        left_notes = _write_state_section_batch_resilient(
+            orchestrator,
+            left_section,
+            left_evidence,
+            outline_context=outline_context,
+            previous_context=previous_context,
+            kb=kb,
+            transcript=transcript,
+            config=config,
+        )
+        right_previous = [
+            *previous_context,
+            *previous_block_context([left_notes]),
+        ][-2:]
+        right_notes = _write_state_section_batch_resilient(
+            orchestrator,
+            right_section,
+            right_evidence,
+            outline_context=outline_context,
+            previous_context=right_previous,
+            kb=kb,
+            transcript=transcript,
+            config=config,
+        )
+        return _merge_state_section_batches(section, [left_notes, right_notes])
 
 
 def _merge_state_section_batches(
@@ -600,12 +730,15 @@ def run_knowledge_pipeline(
                     continue
 
                 started = time.perf_counter()
-                notes = _write_state_section_batch(
+                notes = _write_state_section_batch_resilient(
                     orchestrator,
                     section,
                     evidence_payload,
                     outline_context=outline_context,
                     previous_context=previous_context,
+                    kb=kb,
+                    transcript=transcript,
+                    config=pipeline.config.notes,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
                 atomic_json_dump(

@@ -79,7 +79,7 @@ notes:
   # No linear global editor/reconciliation. Final blocks are written only after LectureState,
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
-  state_section_max_evidence_chars: 28000
+  state_section_max_evidence_chars: 14000
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
