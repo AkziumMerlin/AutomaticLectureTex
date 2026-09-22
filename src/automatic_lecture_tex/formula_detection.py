@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from .config import FormulaDetectionConfig
 from .schemas import ExtractedFrame
@@ -56,8 +56,27 @@ class FormulaDetector:
         *,
         id_prefix: str,
     ) -> list[DetectedFormulaCrop]:
+        detector_source = frame.path
+        if self.config.normalize_dark_board:
+            with Image.open(frame.path) as raw:
+                gray = raw.convert("L")
+                histogram = gray.histogram()
+                midpoint = sum(histogram) / 2
+                running = 0
+                median = 255
+                for value, count in enumerate(histogram):
+                    running += count
+                    if running >= midpoint:
+                        median = value
+                        break
+                if median < self.config.dark_board_threshold:
+                    normalized = ImageOps.autocontrast(ImageOps.invert(gray)).convert("RGB")
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    detector_source = output_dir / "_mfd_normalized.jpg"
+                    normalized.save(detector_source, quality=95)
+
         result = self._model.predict(
-            source=str(frame.path),
+            source=str(detector_source),
             conf=self.config.confidence,
             iou=self.config.iou,
             imgsz=self.config.image_size,
