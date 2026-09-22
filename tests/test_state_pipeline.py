@@ -6,6 +6,7 @@ from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import (
+    _split_state_section_evidence_by_observations,
     _state_section_batches,
     _write_state_section_batch_resilient,
 )
@@ -163,6 +164,43 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
 
+
+
+
+def test_single_episode_evidence_can_split_by_canonical_observations():
+    evidence = {
+        "section": {"id": "section_0"},
+        "episodes": [
+            {
+                "id": "episode_0",
+                "observation_ids": ["o0", "o1", "o2", "o3"],
+                "claim_ids": ["c0", "c1"],
+            }
+        ],
+        "observations": [
+            {"id": "o0", "start": 0.0},
+            {"id": "o1", "start": 1.0},
+            {"id": "o2", "start": 2.0},
+            {"id": "o3", "start": 3.0},
+        ],
+        "claims": [
+            {"id": "c0", "evidence_ids": ["o0", "o1"]},
+            {"id": "c1", "evidence_ids": ["o2", "o3"]},
+        ],
+        "symbols": [{"id": "s0", "symbol": "x"}],
+    }
+
+    split = _split_state_section_evidence_by_observations(evidence)
+
+    assert split is not None
+    left, right = split
+    assert [item["id"] for item in left["observations"]] == ["o0", "o1"]
+    assert [item["id"] for item in right["observations"]] == ["o2", "o3"]
+    assert [item["id"] for item in left["claims"]] == ["c0"]
+    assert [item["id"] for item in right["claims"]] == ["c1"]
+    assert left["episodes"][0]["observation_ids"] == ["o0", "o1"]
+    assert right["episodes"][0]["observation_ids"] == ["o2", "o3"]
+    assert left["symbols"] == right["symbols"] == evidence["symbols"]
 
 
 def test_state_section_writer_splits_episode_batch_after_context_limit(monkeypatch):
