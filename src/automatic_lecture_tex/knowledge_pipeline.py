@@ -35,7 +35,7 @@ from .knowledge import (
     make_lecture_state,
     merge_window_observations,
 )
-from .llm import LectureModelClient
+from .llm import LectureModelClient, StructuredTaskTooLargeError
 from .media import copy_asset
 from .schemas import (
     ChunkNotes,
@@ -320,6 +320,7 @@ Rules:
         operation="state_section_write",
         max_tokens=max_tokens,
         guided_json=guided_json,
+        split_on_context_limit=True,
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
@@ -374,10 +375,11 @@ def _write_state_section_batch_resilient(
     transcript: Transcript,
     config,
 ) -> ChunkNotes:
-    """Keep malformed final-writer JSON local to the smallest possible episode batch.
+    """Keep oversized or malformed final-writer work local to the smallest episode batch.
 
-    The model client already retries malformed/truncated structured output. If those retries are
-    exhausted, split the current state-section evidence by immutable episode boundaries and write
+    The model client retries malformed/truncated structured output while one request still has room.
+    If the task hits the backend context/output ceiling, or structured retries are exhausted, split
+    the current state-section evidence by immutable episode boundaries and write
     each half independently. This changes serialization granularity only; canonical state is never
     recomputed or edited.
     """
@@ -390,7 +392,7 @@ def _write_state_section_batch_resilient(
             outline_context=outline_context,
             previous_context=previous_context,
         )
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
             str(item["id"])
             for item in evidence.get("episodes", [])
@@ -413,7 +415,11 @@ def _write_state_section_batch_resilient(
                     guided_json=False,
                     max_tokens=8192,
                 )
-            except (json.JSONDecodeError, ValidationError) as leaf_exc:
+            except (
+                json.JSONDecodeError,
+                ValidationError,
+                StructuredTaskTooLargeError,
+            ) as leaf_exc:
                 logger.warning(
                     "[%s] state-section leaf unresolved after unguided retry: %s",
                     section.id,
@@ -435,7 +441,7 @@ def _write_state_section_batch_resilient(
         left_ids = episode_ids[:midpoint]
         right_ids = episode_ids[midpoint:]
         logger.warning(
-            "[%s] state-section structured output failed after client retries; "
+            "[%s] state-section task did not fit or failed structured retries; "
             "splitting %d episodes into %d + %d",
             section.id,
             len(episode_ids),
