@@ -21,6 +21,38 @@ class MathOCRBackend(ABC):
         raise NotImplementedError
 
 
+class LatexOCRBackend(MathOCRBackend):
+    """Local pix2tex/LaTeX-OCR backend.
+
+    This backend is intentionally formula-only. It is used as a literal glyph/transcription
+    sensor; semantic interpretation remains the responsibility of the multimodal reconstruction
+    stage.
+    """
+
+    def __init__(self, config: MathOCRConfig) -> None:
+        self.config = config
+        try:
+            from pix2tex.cli import LatexOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "LaTeX-OCR backend requires pix2tex. Install with "
+                "pip install 'automatic-lecture-tex[latexocr]'"
+            ) from exc
+        self.model = LatexOCR()
+
+    def recognize(self, image_path: Path) -> MathOCRCandidate | None:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise RuntimeError("LaTeX-OCR backend requires Pillow") from exc
+
+        with Image.open(image_path) as image:
+            text = str(self.model(image.convert("RGB")) or "").strip()[:_MAX_OCR_TEXT_CHARS]
+        if not text:
+            return None
+        return MathOCRCandidate(backend="latexocr", text=text)
+
+
 class MathpixBackend(MathOCRBackend):
     def __init__(self, config: MathOCRConfig) -> None:
         self.config = config
@@ -118,4 +150,6 @@ def make_math_ocr_backend(config: MathOCRConfig) -> MathOCRBackend | None:
         return MathpixBackend(config)
     if config.backend == "unimernet":
         return UniMERNetBackend(config)
+    if config.backend == "latexocr":
+        return LatexOCRBackend(config)
     raise ValueError(f"unsupported math OCR backend: {config.backend}")
