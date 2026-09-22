@@ -16,6 +16,27 @@ from .schemas import MathOCRCandidate
 _MAX_OCR_TEXT_CHARS = 8000
 
 
+def _normalize_formula_image(image, config: MathOCRConfig):
+    if not config.normalize_dark_formula:
+        return image.convert("RGB")
+
+    from PIL import ImageOps
+
+    gray = image.convert("L")
+    histogram = gray.histogram()
+    midpoint = sum(histogram) / 2
+    running = 0
+    median = 255
+    for value, count in enumerate(histogram):
+        running += count
+        if running >= midpoint:
+            median = value
+            break
+    if median < config.dark_formula_threshold:
+        gray = ImageOps.invert(gray)
+    return ImageOps.autocontrast(gray).convert("RGB")
+
+
 class MathOCRBackend(ABC):
     @abstractmethod
     def recognize(self, image_path: Path) -> MathOCRCandidate | None:
@@ -64,7 +85,8 @@ class LatexOCRBackend(MathOCRBackend):
             raise RuntimeError("LaTeX-OCR backend requires Pillow") from exc
 
         with Image.open(image_path) as image:
-            text = str(self.model(image.convert("RGB")) or "").strip()[:_MAX_OCR_TEXT_CHARS]
+            prepared = _normalize_formula_image(image, self.config)
+            text = str(self.model(prepared) or "").strip()[:_MAX_OCR_TEXT_CHARS]
         if not text:
             return None
         return MathOCRCandidate(backend="latexocr", text=text)
@@ -155,6 +177,13 @@ class UniMERNetBackend(MathOCRBackend):
                 str(self.config.unimernet_config_path),
                 "--device",
                 self.config.device,
+                "--dark-formula-threshold",
+                str(self.config.dark_formula_threshold),
+                *(
+                    ["--normalize-dark-formula"]
+                    if self.config.normalize_dark_formula
+                    else []
+                ),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -250,7 +279,8 @@ class UniMERNetBackend(MathOCRBackend):
         assert self.torch is not None
         assert self.model is not None
 
-        raw_image = self.Image.open(image_path).convert("RGB")
+        with self.Image.open(image_path) as raw:
+            raw_image = _normalize_formula_image(raw, self.config)
         image = self.processor(raw_image).unsqueeze(0).to(self.device)
         with self.torch.inference_mode():
             output = self.model.generate({"image": image})
