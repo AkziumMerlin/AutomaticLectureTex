@@ -135,6 +135,7 @@ vision:
     board_scan_max_images: 8
     device: cuda
     unimernet_config_path: ../models/formula/unimernet_small/automatic_lecture_tex.yaml
+    unimernet_python_path: ../models/formula/unimernet-env/bin/python
 
 literature:
   enabled: false
