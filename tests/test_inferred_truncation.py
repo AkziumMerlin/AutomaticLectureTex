@@ -106,22 +106,10 @@ def test_balanced_malformed_json_does_not_infer_truncation() -> None:
     assert all(item is not None for item in completions.response_formats)
 
 
-def test_structured_delegates_vllm_context_limit_to_upstream_split(monkeypatch) -> None:
-    class FakeBadRequestError(Exception):
-        pass
-
-    monkeypatch.setattr(llm_robust, "BadRequestError", FakeBadRequestError)
-    error = FakeBadRequestError(
-        "Error code: 400 - {'error': {'message': "
-        "'max_tokens=24576 cannot be greater than "
-        "max_model_len=max_total_tokens=20000. Please request fewer output tokens. "
-        "(parameter=max_tokens, value=24576)', 'type': 'BadRequestError'}}"
-    )
+def test_state_writer_delegates_first_truncation_to_upstream_split() -> None:
     client, completions = _client(
         [
             _response('{"value":"cut', finish_reason="length", completion_tokens=6144),
-            _response('{"value":"still cut', finish_reason="length", completion_tokens=12288),
-            error,
         ],
         retries=2,
     )
@@ -132,14 +120,43 @@ def test_structured_delegates_vllm_context_limit_to_upstream_split(monkeypatch) 
             Payload,
             max_tokens=6144,
             operation="state_section_write",
-            split_on_context_limit=True,
+            split_oversized_task=True,
+        )
+    except StructuredTaskTooLargeError:
+        pass
+    else:
+        raise AssertionError("state writer truncation must be delegated to upstream splitting")
+
+    assert completions.max_tokens == [6144]
+
+
+def test_state_writer_delegates_vllm_context_limit_to_upstream_split(monkeypatch) -> None:
+    class FakeBadRequestError(Exception):
+        pass
+
+    monkeypatch.setattr(llm_robust, "BadRequestError", FakeBadRequestError)
+    error = FakeBadRequestError(
+        "Error code: 400 - {'error': {'message': "
+        "'max_tokens=24576 cannot be greater than "
+        "max_model_len=max_total_tokens=20000. Please request fewer output tokens. "
+        "(parameter=max_tokens, value=24576)', 'type': 'BadRequestError'}}"
+    )
+    client, completions = _client([error], retries=2)
+
+    try:
+        client._structured(
+            "prompt",
+            Payload,
+            max_tokens=24576,
+            operation="state_section_write",
+            split_oversized_task=True,
         )
     except StructuredTaskTooLargeError:
         pass
     else:
         raise AssertionError("backend context ceiling must be delegated to upstream splitting")
 
-    assert completions.max_tokens == [6144, 12288, 24576]
+    assert completions.max_tokens == [24576]
 
 
 def test_structurally_truncated_json_is_not_locally_completed() -> None:
