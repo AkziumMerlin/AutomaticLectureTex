@@ -40,6 +40,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Persistent UniMERNet JSONL inference worker.")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--normalize-dark-formula", action="store_true")
+    parser.add_argument("--dark-formula-threshold", type=int, default=128)
     args = parser.parse_args()
 
     torch, Image, device, model, processor = _load_processor(args.config, args.device)
@@ -57,7 +59,26 @@ def main() -> None:
 
             image_path = Path(request["image"])
             with contextlib.redirect_stdout(sys.stderr):
-                raw_image = Image.open(image_path).convert("RGB")
+                from PIL import ImageOps
+
+                with Image.open(image_path) as raw:
+                    gray = raw.convert("L")
+                    if args.normalize_dark_formula:
+                        histogram = gray.histogram()
+                        midpoint = sum(histogram) / 2
+                        running = 0
+                        median = 255
+                        for value, count in enumerate(histogram):
+                            running += count
+                            if running >= midpoint:
+                                median = value
+                                break
+                        if median < args.dark_formula_threshold:
+                            gray = ImageOps.invert(gray)
+                        raw_image = ImageOps.autocontrast(gray).convert("RGB")
+                    else:
+                        raw_image = raw.convert("RGB")
+
                 image = processor(raw_image).unsqueeze(0).to(device)
                 with torch.inference_mode():
                     output = model.generate({"image": image})
