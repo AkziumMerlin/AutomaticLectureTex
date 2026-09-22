@@ -135,12 +135,17 @@ class UniMERNetBackend(MathOCRBackend):
                 "pip install 'unimernet[full]'"
             ) from exc
 
+        if config.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "UniMERNet OCR is configured for CUDA, but torch.cuda.is_available() is False."
+            )
+
         self.torch = torch
         self.Image = Image
         args = argparse.Namespace(cfg_path=str(config.unimernet_config_path), options=None)
         cfg = Config(args)
         task = tasks.setup_task(cfg)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(config.device)
         self.model = task.build_model(cfg).to(self.device)
         self.model.eval()
         self.processor = load_processor(
