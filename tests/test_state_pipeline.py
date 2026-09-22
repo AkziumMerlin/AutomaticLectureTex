@@ -145,6 +145,60 @@ def test_state_section_batches_do_not_reintroduce_raw_asr():
 
 
 
+def test_state_section_batches_split_oversized_single_episode_by_observations():
+    observations = [
+        LectureObservation(
+            id=f"obs_{index}",
+            window_id="window_0",
+            start=float(index),
+            end=float(index + 1),
+            kind=ObservationKind.CLAIM,
+            text=("canonical evidence " + str(index) + " ") * 120,
+            source_status=SourceStatus.OBSERVED,
+            episode_id="episode_0",
+        )
+        for index in range(4)
+    ]
+    episode = SemanticEpisode(
+        id="episode_0",
+        title="Long proof",
+        start=0.0,
+        end=4.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=[item.id for item in observations],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        episodes=[episode],
+    )
+    section = OutlineSection(
+        id="section_0",
+        title="Topic",
+        start=0.0,
+        end=4.0,
+        episode_ids=["episode_0"],
+    )
+    transcript = Transcript(lecture_id="lecture", language="ru", segments=[])
+
+    class Config:
+        state_section_max_evidence_chars = 5000
+        boundary_context_seconds = 0.0
+
+    batches = _state_section_batches(kb, section, transcript, Config())
+
+    assert len(batches) > 1
+    assert [
+        item["id"]
+        for batch in batches
+        for item in batch["observations"]
+    ] == [item.id for item in observations]
+    assert all(batch["episodes"][0]["id"] == "episode_0" for batch in batches)
+    assert [batch["batch"]["index"] for batch in batches] == list(range(len(batches)))
+    assert all(batch["batch"]["count"] == len(batches) for batch in batches)
+
+
 def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budget():
     config_path = (
         Path(__file__).resolve().parents[1]
