@@ -215,6 +215,9 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.vision.board_crop_max_vlm_images == 5
     assert config.vision.board_change_probe_seconds == 4.0
     assert config.vision.board_change_min_gap_seconds == 3.0
+    assert config.vision.math_ocr.backend == "latexocr"
+    assert config.vision.math_ocr.board_scan_enabled is True
+    assert config.vision.math_ocr.board_scan_max_images == 3
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
 
