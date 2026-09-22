@@ -210,6 +210,52 @@ def _state_section_payload(
     return payload
 
 
+def _split_state_section_evidence_by_observations(
+    evidence: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Split one semantic episode without falling back to raw ASR or recomputing state."""
+
+    observations = list(evidence.get("observations", []))
+    if len(observations) <= 1:
+        return None
+
+    midpoint = len(observations) // 2
+
+    def build(selected: list[dict[str, Any]]) -> dict[str, Any]:
+        selected_ids = {str(item.get("id", "")) for item in selected if item.get("id")}
+        claims = [
+            item
+            for item in evidence.get("claims", [])
+            if not item.get("evidence_ids")
+            or selected_ids.intersection(str(value) for value in item.get("evidence_ids", []))
+        ]
+        claim_ids = {str(item.get("id", "")) for item in claims if item.get("id")}
+
+        episodes = []
+        for item in evidence.get("episodes", []):
+            episode = dict(item)
+            episode["observation_ids"] = [
+                value
+                for value in episode.get("observation_ids", [])
+                if str(value) in selected_ids
+            ]
+            episode["claim_ids"] = [
+                value
+                for value in episode.get("claim_ids", [])
+                if str(value) in claim_ids
+            ]
+            episodes.append(episode)
+
+        child = dict(evidence)
+        child["episodes"] = episodes
+        child["claims"] = claims
+        child["observations"] = selected
+        return child
+
+    return build(observations[:midpoint]), build(observations[midpoint:])
+
+
+
 def _state_section_batches(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
@@ -222,6 +268,45 @@ def _state_section_batches(
 
     max_chars = int(config.state_section_max_evidence_chars)
     batches: list[dict[str, Any]] = []
+
+    def append_bounded(payload: dict[str, Any]) -> None:
+        pending = [payload]
+        while pending:
+            candidate = pending.pop(0)
+            serialized = json.dumps(
+                candidate,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(serialized) <= max_chars:
+                batches.append(candidate)
+                continue
+
+            split = _split_state_section_evidence_by_observations(candidate)
+            if split is None:
+                logger.warning(
+                    "[%s] smallest state-section evidence leaf still exceeds "
+                    "notes.state_section_max_evidence_chars=%d (%d chars); "
+                    "passing leaf to resilient writer",
+                    section.id,
+                    max_chars,
+                    len(serialized),
+                )
+                batches.append(candidate)
+                continue
+
+            left, right = split
+            logger.info(
+                "[%s] pre-splitting oversized state evidence "
+                "(%d chars, %d observations) into %d + %d observations",
+                section.id,
+                len(serialized),
+                len(candidate.get("observations", [])),
+                len(left.get("observations", [])),
+                len(right.get("observations", [])),
+            )
+            pending[0:0] = [left, right]
+
     current: list[str] = []
     for episode_id in episode_ids:
         candidate_ids = [*current, episode_id]
@@ -246,7 +331,7 @@ def _state_section_batches(
                     "subsections": [],
                 }
             )
-            batches.append(_state_section_payload(kb, committed, transcript, config))
+            append_bounded(_state_section_payload(kb, committed, transcript, config))
             current = [episode_id]
         else:
             current = candidate_ids
@@ -261,13 +346,7 @@ def _state_section_batches(
                 "subsections": [],
             }
         )
-        payload = _state_section_payload(kb, committed, transcript, config)
-        if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) > max_chars:
-            raise ValueError(
-                f"single state-section episode batch exceeds "
-                f"notes.state_section_max_evidence_chars={max_chars}"
-            )
-        batches.append(payload)
+        append_bounded(_state_section_payload(kb, committed, transcript, config))
 
     for index, payload in enumerate(batches):
         payload["batch"] = {"index": index, "count": len(batches)}
@@ -363,50 +442,6 @@ def _state_section_for_episode_ids(
         }
     )
 
-
-def _split_state_section_evidence_by_observations(
-    evidence: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Split one semantic episode without falling back to raw ASR or recomputing state."""
-
-    observations = list(evidence.get("observations", []))
-    if len(observations) <= 1:
-        return None
-
-    midpoint = len(observations) // 2
-
-    def build(selected: list[dict[str, Any]]) -> dict[str, Any]:
-        selected_ids = {str(item.get("id", "")) for item in selected if item.get("id")}
-        claims = [
-            item
-            for item in evidence.get("claims", [])
-            if not item.get("evidence_ids")
-            or selected_ids.intersection(str(value) for value in item.get("evidence_ids", []))
-        ]
-        claim_ids = {str(item.get("id", "")) for item in claims if item.get("id")}
-
-        episodes = []
-        for item in evidence.get("episodes", []):
-            episode = dict(item)
-            episode["observation_ids"] = [
-                value
-                for value in episode.get("observation_ids", [])
-                if str(value) in selected_ids
-            ]
-            episode["claim_ids"] = [
-                value
-                for value in episode.get("claim_ids", [])
-                if str(value) in claim_ids
-            ]
-            episodes.append(episode)
-
-        child = dict(evidence)
-        child["episodes"] = episodes
-        child["claims"] = claims
-        child["observations"] = selected
-        return child
-
-    return build(observations[:midpoint]), build(observations[midpoint:])
 
 
 def _write_state_section_batch_resilient(
