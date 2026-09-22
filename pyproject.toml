@@ -32,6 +32,7 @@ dev = ["pytest>=8.3", "ruff>=0.9"]
 all = [
   "qwen-asr>=0.0.6,<0.1",
   "faster-whisper>=1.1.0",
+  "pix2tex>=0.1.4",
   "pymupdf>=1.25",
 ]
 
