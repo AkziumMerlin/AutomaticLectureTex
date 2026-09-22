@@ -21,17 +21,39 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_CONTEXT_RE = re.compile(
-    r"maximum context length is\s+(\d+)\s+tokens",
+    r"maximum context length is\\s+(\\d+)\\s+tokens",
+    re.IGNORECASE,
+)
+_EXPLICIT_MAX_TOKENS_CAP_RE = re.compile(
+    r"max_tokens\\s*=\\s*\\d+\\s+cannot be greater than.*?"
+    r"(?:max_model_len\\s*=\\s*)?(?:max_total_tokens\\s*=\\s*)?(\\d+)",
     re.IGNORECASE,
 )
 
 
+def _explicit_max_tokens_ceiling(error: Exception) -> int | None:
+    """Extract an output-token ceiling explicitly reported by an OpenAI-compatible backend."""
+
+    match = _EXPLICIT_MAX_TOKENS_CAP_RE.search(str(error))
+    if match is None:
+        return None
+    ceiling = int(match.group(1))
+    return ceiling if ceiling > 0 else None
+
+
 def _is_context_overflow_error(error: Exception) -> bool:
-    """Recognize a backend context-window overflow without trusting its input-token lower bound."""
+    """Recognize backend context/output-budget rejections across common server formats."""
+
+    if _explicit_max_tokens_ceiling(error) is not None:
+        return True
 
     message = str(error)
-    return bool(_MAX_CONTEXT_RE.search(message) and "requested" in message and "output tokens" in message)
-
+    lowered = message.lower()
+    return bool(
+        _MAX_CONTEXT_RE.search(message)
+        and ("requested" in lowered or "request fewer" in lowered)
+        and ("output tokens" in lowered or "completion tokens" in lowered)
+    )
 
 
 def _json_structure_incomplete(raw: str) -> bool:
@@ -177,13 +199,21 @@ class LectureModelClient(BaseLectureModelClient):
                 except BadRequestError as exc:
                     if not _is_context_overflow_error(exc):
                         raise
-                    if (
+
+                    explicit_ceiling = _explicit_max_tokens_ceiling(exc)
+                    if explicit_ceiling is not None and explicit_ceiling < current_max_tokens:
+                        next_max_tokens = explicit_ceiling
+                        recovery = "backend-reported"
+                    elif (
                         last_accepted_max_tokens is not None
                         and last_accepted_max_tokens < current_max_tokens
                     ):
                         next_max_tokens = last_accepted_max_tokens
+                        recovery = "previously-accepted"
                     else:
                         next_max_tokens = current_max_tokens // 2
+                        recovery = "geometric"
+
                     if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
                         raise
                     context_output_ceiling = (
@@ -192,10 +222,11 @@ class LectureModelClient(BaseLectureModelClient):
                         else min(context_output_ceiling, next_max_tokens)
                     )
                     logger.warning(
-                        "[%s] backend rejected max_tokens=%d for context overflow; "
-                        "retrying with geometric/previously-accepted ceiling max_tokens=%d",
+                        "[%s] backend rejected max_tokens=%d; retrying with %s ceiling "
+                        "max_tokens=%d",
                         operation,
                         current_max_tokens,
+                        recovery,
                         context_output_ceiling,
                     )
                     current_max_tokens = context_output_ceiling
