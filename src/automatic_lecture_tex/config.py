@@ -132,6 +132,8 @@ class FormulaDetectionConfig(BaseModel):
     padding_fraction: float = Field(default=0.08, ge=0.0, le=0.50)
     contact_sheet_enabled: bool = True
     contact_sheet_columns: int = Field(default=2, ge=1, le=4)
+    normalize_dark_board: bool = True
+    dark_board_threshold: int = Field(default=128, ge=0, le=255)
 
 
 class MathOCRConfig(BaseModel):
@@ -144,6 +146,8 @@ class MathOCRConfig(BaseModel):
     mathpix_app_key_env: str = "MATHPIX_APP_KEY"
     unimernet_config_path: Path | None = None
     unimernet_python_path: Path | None = None
+    normalize_dark_formula: bool = True
+    dark_formula_threshold: int = Field(default=128, ge=0, le=255)
 
 
 class VisionConfig(BaseModel):
