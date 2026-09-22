@@ -384,6 +384,12 @@ Timestamped transcript:
 Visual evidence:
 {visual_json}
 
+Specialized `math_ocr_candidates` are literal image-to-LaTeX hypotheses attached to specific
+board timestamps. Use them to disambiguate glyphs, operators, indices and signs, especially when
+ASR is unreliable. They are not semantic facts: do not invent a theorem/identity merely because
+an OCR candidate looks mathematically plausible. Cross-check them against the raw board frames,
+audio context and neighboring observations; preserve unresolved disagreement explicitly.
+
 Known symbol registry:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
