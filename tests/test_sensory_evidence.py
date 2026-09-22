@@ -14,8 +14,8 @@ from automatic_lecture_tex.board import build_temporal_board_composite, temporal
 from automatic_lecture_tex.config import ASRConfig, MathOCRConfig, RuntimeConfig, VisionConfig
 from automatic_lecture_tex.schemas import (
     ExtractedFrame,
-    MathOCRCandidate,
     LectureChunk,
+    MathOCRCandidate,
     Transcript,
     TranscriptSegment,
     VisualEvidence,
