@@ -264,17 +264,24 @@ not satisfactory.
 
 ### Formula vision models
 
-For board-formula detection plus UniMERNet recognition, install the optional stack and download only
-the required weights:
+For board-formula detection plus UniMERNet recognition, install the host-side detector, download only
+the required weights, and create an isolated UniMERNet worker environment:
 
 ```bash
 pip install -e '.[formula-vision]'
 python scripts/download_formula_models.py
+bash scripts/create_unimernet_worker_env.sh
 ```
 
 The downloader stores the MFD YOLO weights and `unimernet_small` under `models/formula/`, verifies
 their SHA256 checksums, and generates the UniMERNet inference YAML consumed by the example state
-configuration. Model weights are external artifacts and are not committed to this repository.
+configuration. The worker environment lives under `models/formula/unimernet-env/`. It is isolated
+because UniMERNet 0.2.3 requires an older Transformers release than Qwen-ASR. Set
+`PYTORCH_INDEX_URL` before running the setup script if a CUDA wheel index other than the default
+CUDA 12.8 index is required.
+
+Model weights and the worker environment are external artifacts and are not committed to this
+repository.
 
 The board pipeline keeps ASR, raw board pixels, detected formula crops, and UniMERNet predictions as
 separate evidence channels. UniMERNet is preferred for glyph-level transcription, but the multimodal
