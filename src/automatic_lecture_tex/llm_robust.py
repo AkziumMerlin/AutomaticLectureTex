@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from pydantic_core import ValidationError
 
 from .llm import LectureModelClient as BaseLectureModelClient
-from .llm import SYSTEM
+from .llm import SYSTEM, StructuredTaskTooLargeError
 from .util import strip_thinking_and_fences
 
 T = TypeVar("T", bound=BaseModel)
@@ -128,6 +128,7 @@ class LectureModelClient(BaseLectureModelClient):
         *,
         guided_json: bool = True,
         operation: str = "structured",
+        split_on_context_limit: bool = False,
     ) -> T:
         schema_instruction = "\nJSON schema:\n" + json.dumps(
             schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -199,6 +200,17 @@ class LectureModelClient(BaseLectureModelClient):
                 except BadRequestError as exc:
                     if not _is_context_overflow_error(exc):
                         raise
+                    if split_on_context_limit:
+                        logger.warning(
+                            "[%s] structured task exceeded backend context/output budget at "
+                            "max_tokens=%d; delegating split to caller",
+                            operation,
+                            current_max_tokens,
+                        )
+                        raise StructuredTaskTooLargeError(
+                            f"{operation} cannot fit in one backend request at "
+                            f"max_tokens={current_max_tokens}: {exc}"
+                        ) from exc
 
                     explicit_ceiling = _explicit_max_tokens_ceiling(exc)
                     if explicit_ceiling is not None and explicit_ceiling < current_max_tokens:
