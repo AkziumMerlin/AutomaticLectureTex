@@ -6,9 +6,8 @@ from automatic_lecture_tex.frame_selection import (
     board_state_change_score,
     select_board_state_frames,
 )
-from automatic_lecture_tex.schemas import ExtractedFrame
+from automatic_lecture_tex.schemas import ExtractedFrame, LectureChunk
 from automatic_lecture_tex.vision import board_change_probe_times
-from automatic_lecture_tex.schemas import LectureChunk
 
 
 def _image(path: Path, *, changed: bool) -> None:
