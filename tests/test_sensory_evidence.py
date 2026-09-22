@@ -8,12 +8,14 @@ import numpy as np
 from PIL import Image
 
 from automatic_lecture_tex import asr as asr_module
+from automatic_lecture_tex import sensory_evidence as sensory_evidence_module
 from automatic_lecture_tex.asr import GigaAMBackend
 from automatic_lecture_tex.board import build_temporal_board_composite, temporal_sample_offsets
 from automatic_lecture_tex.config import ASRConfig, MathOCRConfig, RuntimeConfig, VisionConfig
 from automatic_lecture_tex.schemas import (
     ExtractedFrame,
     LectureChunk,
+    MathOCRCandidate,
     Transcript,
     TranscriptSegment,
     VisualEvidence,
@@ -255,3 +257,79 @@ def test_visual_collector_keeps_uniform_scan_as_direct_multimodal_frames(tmp_pat
     assert evidence[0].frame_timestamps == [18.0, 54.0, 90.0, 126.0, 162.0]
     assert len(evidence[0].frame_paths) == 5
     assert all(Path(path).is_file() for path in evidence[0].frame_paths)
+
+
+class _FakeMathOCR:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def recognize(self, image_path):
+        self.calls.append(Path(image_path))
+        return MathOCRCandidate(
+            backend="latexocr",
+            text=rf"x_{{{len(self.calls)}}}=1",
+        )
+
+
+def test_board_scan_runs_specialized_latex_ocr_without_extra_vlm_call(tmp_path, monkeypatch):
+    llm = _FakeLLM()
+    ocr = _FakeMathOCR()
+    monkeypatch.setattr(sensory_evidence_module, "_math_ocr_backend", lambda _pipeline: ocr)
+
+    vision = VisionConfig(
+        board_uniform_samples=5,
+        board_crop_max_vlm_images=5,
+        board_auto_crop_enabled=False,
+        temporal_composite_enabled=False,
+        math_ocr=MathOCRConfig(
+            backend="latexocr",
+            board_scan_enabled=True,
+            board_scan_max_images=3,
+        ),
+    )
+    pipeline = SimpleNamespace(
+        config=SimpleNamespace(
+            notes=SimpleNamespace(
+                visual_chunk_board_scan=True,
+                visual_rule_selector=False,
+                visual_llm_selector=False,
+                max_low_confidence_visual_requests=0,
+                visual_dedupe_seconds=8.0,
+            ),
+            vision=vision,
+            latex=SimpleNamespace(output_dir=tmp_path / "tex"),
+        ),
+        llm=llm,
+    )
+    transcript = Transcript(lecture_id="lecture", language="ru", segments=[])
+    chunk = LectureChunk(
+        id="chunk_0000",
+        start=0,
+        end=180,
+        segment_ids=[],
+        text="",
+    )
+
+    _requests, evidence, _elapsed = collect_visual_evidence(
+        pipeline,
+        SimpleNamespace(id="lecture"),
+        chunk,
+        transcript,
+        _FakeSource(),
+        tmp_path / "work",
+        tmp_path / "tex" / "figures",
+        {},
+    )
+
+    assert llm.calls == []
+    assert len(ocr.calls) == 3
+    assert [item.timestamp for item in evidence[0].math_ocr_candidates] == [
+        18.0,
+        90.0,
+        162.0,
+    ]
+    assert [item.text for item in evidence[0].math_ocr_candidates] == [
+        "x_{1}=1",
+        "x_{2}=1",
+        "x_{3}=1",
+    ]

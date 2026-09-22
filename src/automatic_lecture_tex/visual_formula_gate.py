@@ -71,7 +71,9 @@ def _visual_formulas(evidence: VisualEvidence, min_confidence: float) -> list[st
         return []
     values = [evidence.latex, evidence.raw_latex]
     for candidate in evidence.math_ocr_candidates:
-        if candidate.confidence is None or candidate.confidence >= min_confidence:
+        # Uncalibrated local OCR is useful reconstruction evidence but must not become a hard
+        # rejection gate. Only backends that report an actual confidence can veto generated math.
+        if candidate.confidence is not None and candidate.confidence >= min_confidence:
             values.append(candidate.text)
     result: list[str] = []
     for value in values:

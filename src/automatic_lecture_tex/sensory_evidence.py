@@ -77,6 +77,56 @@ def _prefer_board_views(
     return selected[:limit]
 
 
+def _subsample_ocr_frames(
+    frames: list[ExtractedFrame],
+    *,
+    limit: int,
+) -> list[ExtractedFrame]:
+    """Keep chronological coverage while bounding expensive specialized OCR calls."""
+
+    if limit <= 0 or not frames:
+        return []
+    if len(frames) <= limit:
+        return list(frames)
+    if limit == 1:
+        return [frames[-1]]
+
+    indices = [
+        round(index * (len(frames) - 1) / (limit - 1))
+        for index in range(limit)
+    ]
+    return [frames[index] for index in dict.fromkeys(indices)]
+
+
+def _run_math_ocr(
+    backend,
+    frames: list[ExtractedFrame],
+    *,
+    min_confidence: float,
+    lecture_id: str,
+    request_id: str,
+) -> list[MathOCRCandidate]:
+    candidates: list[MathOCRCandidate] = []
+    for frame in frames:
+        try:
+            candidate = backend.recognize(frame.path)
+        except Exception as exc:
+            logger.warning(
+                "[%s] specialized math OCR failed for %s at %.3fs: %s",
+                lecture_id,
+                request_id,
+                frame.timestamp,
+                exc,
+            )
+            continue
+        if candidate is None:
+            continue
+        if candidate.confidence is not None and candidate.confidence < min_confidence:
+            continue
+        candidates.append(candidate.model_copy(update={"timestamp": frame.timestamp}))
+    return candidates
+
+
 def collect_visual_evidence(
     pipeline: Pipeline,
     lecture: LectureConfig,
@@ -89,10 +139,11 @@ def collect_visual_evidence(
 ) -> tuple[list, list[VisualEvidence], float]:
     """Collect visual sensor inputs and OCR evidence.
 
-    The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate VLM call. Its
-    selected board-state frames are retained as raw multimodal inputs for semantic reconstruction.
-    Supplemental local visual requests keep the legacy isolated OCR path. This avoids compressing the
-    main board channel into an intermediate text representation before reconstruction.
+    The mandatory whole-chunk board scan is deliberately *not* OCR'd by a separate general VLM
+    call. Its selected board-state frames remain raw multimodal inputs for semantic reconstruction,
+    while an optional specialized image-to-LaTeX backend may attach literal formula candidates.
+    Supplemental local visual requests keep the legacy isolated VLM OCR path. This preserves the
+    raw board channel instead of replacing it with an intermediate textual interpretation.
     """
 
     scan_requests = []
@@ -308,20 +359,29 @@ def collect_visual_evidence(
             )
 
         candidates: list[MathOCRCandidate] = []
-        if not is_chunk_board_scan and ocr_backend is not None and ocr_image is not None:
-            try:
-                candidate = ocr_backend.recognize(ocr_image)
-                if candidate is not None and (
-                    candidate.confidence is None
-                    or candidate.confidence >= pipeline.config.vision.math_ocr.min_confidence
-                ):
-                    candidates.append(candidate)
-            except Exception as exc:
-                logger.warning(
-                    "[%s] specialized math OCR failed for %s: %s",
-                    lecture.id,
-                    request.id,
-                    exc,
+        if ocr_backend is not None:
+            if (
+                is_chunk_board_scan
+                and pipeline.config.vision.math_ocr.board_scan_enabled
+            ):
+                ocr_frames = _subsample_ocr_frames(
+                    display_frames,
+                    limit=pipeline.config.vision.math_ocr.board_scan_max_images,
+                )
+                candidates = _run_math_ocr(
+                    ocr_backend,
+                    ocr_frames,
+                    min_confidence=pipeline.config.vision.math_ocr.min_confidence,
+                    lecture_id=lecture.id,
+                    request_id=request.id,
+                )
+            elif not is_chunk_board_scan and ocr_image is not None:
+                candidates = _run_math_ocr(
+                    ocr_backend,
+                    [ExtractedFrame(timestamp=request.timestamp, path=ocr_image)],
+                    min_confidence=pipeline.config.vision.math_ocr.min_confidence,
+                    lecture_id=lecture.id,
+                    request_id=request.id,
                 )
 
         prepared_visuals.append((request, display_frames, board_views, candidates))
@@ -355,12 +415,14 @@ def collect_visual_evidence(
                         kind=VisualKind.BOARD_SCAN,
                         description=(
                             "Chronologically ordered board states selected by the configured "
-                            "host-side sampler and attached directly to reconstruction; no "
-                            "intermediate VLM OCR was performed."
+                            "host-side sampler and attached directly to reconstruction. "
+                            "Specialized formula OCR candidates, when present, are literal "
+                            "transcription hypotheses rather than semantic corrections."
                         ),
                         confidence=1.0,
                         frame_paths=[str(frame.path) for frame in frames],
                         frame_timestamps=[frame.timestamp for frame in frames],
+                        math_ocr_candidates=candidates,
                     )
                 else:
                     try:

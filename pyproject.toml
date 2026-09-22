@@ -26,11 +26,13 @@ qwen-asr-hf = ["accelerate>=1.2", "torch>=2.6", "transformers>=5.13.0"]
 whisper = ["faster-whisper>=1.1.0"]
 gigaam = ["gigaam @ git+https://github.com/salute-developers/GigaAM.git"]
 unimernet = ["unimernet[full]"]
+latexocr = ["pix2tex>=0.1.4"]
 review = ["pymupdf>=1.25"]
 dev = ["pytest>=8.3", "ruff>=0.9"]
 all = [
   "qwen-asr>=0.0.6,<0.1",
   "faster-whisper>=1.1.0",
+  "pix2tex>=0.1.4",
   "pymupdf>=1.25",
 ]
 

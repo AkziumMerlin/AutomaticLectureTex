@@ -113,8 +113,11 @@ vision:
   unresolved_board_max_per_chunk: 1
 
   math_ocr:
-    backend: none
+    # Dedicated image-to-LaTeX sensor for exact symbols/signs on selected board states.
+    backend: latexocr
     min_confidence: 0.45
+    board_scan_enabled: true
+    board_scan_max_images: 3
 
 literature:
   enabled: false
