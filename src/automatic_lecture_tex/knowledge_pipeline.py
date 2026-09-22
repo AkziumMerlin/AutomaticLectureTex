@@ -320,7 +320,7 @@ Rules:
         operation="state_section_write",
         max_tokens=max_tokens,
         guided_json=guided_json,
-        split_on_context_limit=True,
+        split_oversized_task=True,
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
