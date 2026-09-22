@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import shutil
 from pathlib import Path
 
 import yaml
@@ -129,12 +130,11 @@ def main() -> None:
         hf_hub_download(
             repo_id=MFD_REPO,
             filename=MFD_FILE,
-            local_dir=root,
         )
     )
     mfd_target = mfd_dir / "yolo_v8_ft.pt"
     if mfd_download.resolve() != mfd_target.resolve():
-        mfd_target.write_bytes(mfd_download.read_bytes())
+        shutil.copy2(mfd_download, mfd_target)
     _verify(mfd_target, MFD_SHA256)
 
     config_path = _write_unimernet_config(unimernet_dir)
