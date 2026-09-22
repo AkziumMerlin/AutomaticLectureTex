@@ -218,6 +218,7 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.vision.math_ocr.backend == "latexocr"
     assert config.vision.math_ocr.board_scan_enabled is True
     assert config.vision.math_ocr.board_scan_max_images == 3
+    assert config.vision.math_ocr.device == "cuda"
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
 

@@ -32,13 +32,29 @@ class LatexOCRBackend(MathOCRBackend):
     def __init__(self, config: MathOCRConfig) -> None:
         self.config = config
         try:
+            import torch
             from pix2tex.cli import LatexOCR
         except ImportError as exc:
             raise RuntimeError(
                 "LaTeX-OCR backend requires pix2tex. Install with "
                 "pip install 'automatic-lecture-tex[latexocr]'"
             ) from exc
-        self.model = LatexOCR()
+
+        if config.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "LaTeX-OCR is configured for CUDA, but torch.cuda.is_available() is False. "
+                "Fix the PyTorch/CUDA installation or set vision.math_ocr.device=cpu explicitly."
+            )
+
+        # pix2tex's Python API defaults to no_cuda=True when LatexOCR() is called without
+        # arguments, so always pass the device choice explicitly.
+        arguments = argparse.Namespace(
+            config="settings/config.yaml",
+            checkpoint="checkpoints/weights.pth",
+            no_cuda=config.device == "cpu",
+            no_resize=False,
+        )
+        self.model = LatexOCR(arguments)
 
     def recognize(self, image_path: Path) -> MathOCRCandidate | None:
         try:
