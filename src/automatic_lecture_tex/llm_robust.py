@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_CONTEXT_RE = re.compile(
-    r"maximum context length is\\s+(\\d+)\\s+tokens",
+    r"maximum context length is\s+(\d+)\s+tokens",
     re.IGNORECASE,
 )
 _EXPLICIT_MAX_TOKENS_CAP_RE = re.compile(
-    r"max_tokens\\s*=\\s*\\d+\\s+cannot be greater than.*?"
-    r"(?:max_model_len\\s*=\\s*)?(?:max_total_tokens\\s*=\\s*)?(\\d+)",
+    r"max_tokens\s*=\s*\d+\s+cannot be greater than.*?"
+    r"(?:max_model_len\s*=\s*)?(?:max_total_tokens\s*=\s*)?(\d+)",
     re.IGNORECASE,
 )
 
