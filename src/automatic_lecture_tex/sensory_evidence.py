@@ -8,10 +8,21 @@ from typing import TYPE_CHECKING, Any
 
 from .board import build_temporal_board_composite, temporal_sample_offsets
 from .board_crop import generate_board_crops
+from .formula_detection import (
+    DetectedFormulaCrop,
+    build_formula_contact_sheet,
+    make_formula_detector,
+)
 from .frame_selection import select_board_state_frames, select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
 from .media import copy_asset
-from .schemas import ExtractedFrame, MathOCRCandidate, VisualEvidence, VisualKind
+from .schemas import (
+    ExtractedFrame,
+    FormulaVisualCrop,
+    MathOCRCandidate,
+    VisualEvidence,
+    VisualKind,
+)
 from .vision import (
     CHUNK_BOARD_SCAN_REASON,
     dedupe_visual_requests,
@@ -48,6 +59,15 @@ def _math_ocr_backend(pipeline: Pipeline):
         pipeline._math_ocr_backend = make_math_ocr_backend(pipeline.config.vision.math_ocr)
         pipeline._math_ocr_backend_initialized = True
     return pipeline._math_ocr_backend
+
+
+def _formula_detector(pipeline: Pipeline):
+    if not getattr(pipeline, "_formula_detector_initialized", False):
+        pipeline._formula_detector = make_formula_detector(
+            pipeline.config.vision.formula_detection
+        )
+        pipeline._formula_detector_initialized = True
+    return pipeline._formula_detector
 
 
 def _append_unique(frames: list[ExtractedFrame], frame: ExtractedFrame) -> None:
@@ -100,21 +120,22 @@ def _subsample_ocr_frames(
 
 def _run_math_ocr(
     backend,
-    frames: list[ExtractedFrame],
+    inputs: list[tuple[str, ExtractedFrame]],
     *,
     min_confidence: float,
     lecture_id: str,
     request_id: str,
 ) -> list[MathOCRCandidate]:
     candidates: list[MathOCRCandidate] = []
-    for frame in frames:
+    for source_id, frame in inputs:
         try:
             candidate = backend.recognize(frame.path)
         except Exception as exc:
             logger.warning(
-                "[%s] specialized math OCR failed for %s at %.3fs: %s",
+                "[%s] specialized math OCR failed for %s/%s at %.3fs: %s",
                 lecture_id,
                 request_id,
+                source_id,
                 frame.timestamp,
                 exc,
             )
@@ -123,7 +144,11 @@ def _run_math_ocr(
             continue
         if candidate.confidence is not None and candidate.confidence < min_confidence:
             continue
-        candidates.append(candidate.model_copy(update={"timestamp": frame.timestamp}))
+        candidates.append(
+            candidate.model_copy(
+                update={"timestamp": frame.timestamp, "source_id": source_id}
+            )
+        )
     return candidates
 
 
@@ -174,9 +199,17 @@ def collect_visual_evidence(
 
     started = time.perf_counter()
     ocr_backend = _math_ocr_backend(pipeline)
+    formula_detector = _formula_detector(pipeline)
     evidence: list[VisualEvidence] = []
     prepared_visuals: list[
-        tuple[Any, list[ExtractedFrame], list[ExtractedFrame], list[MathOCRCandidate]]
+        tuple[
+            Any,
+            list[ExtractedFrame],
+            list[ExtractedFrame],
+            list[MathOCRCandidate],
+            list[DetectedFormulaCrop],
+            Path | None,
+        ]
     ] = []
 
     for request in requests:
