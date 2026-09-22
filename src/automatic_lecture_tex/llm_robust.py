@@ -128,7 +128,7 @@ class LectureModelClient(BaseLectureModelClient):
         *,
         guided_json: bool = True,
         operation: str = "structured",
-        split_on_context_limit: bool = False,
+        split_oversized_task: bool = False,
     ) -> T:
         schema_instruction = "\nJSON schema:\n" + json.dumps(
             schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -200,7 +200,7 @@ class LectureModelClient(BaseLectureModelClient):
                 except BadRequestError as exc:
                     if not _is_context_overflow_error(exc):
                         raise
-                    if split_on_context_limit:
+                    if split_oversized_task:
                         logger.warning(
                             "[%s] structured task exceeded backend context/output budget at "
                             "max_tokens=%d; delegating split to caller",
@@ -265,6 +265,18 @@ class LectureModelClient(BaseLectureModelClient):
                     and _looks_like_truncated_json(raw, exc)
                 )
                 truncated = backend_truncated or inferred_truncated
+                if split_oversized_task and truncated:
+                    logger.warning(
+                        "[%s] structured output was truncated at max_tokens=%d; "
+                        "delegating task split to caller",
+                        operation,
+                        current_max_tokens,
+                    )
+                    raise StructuredTaskTooLargeError(
+                        f"{operation} structured output was truncated at "
+                        f"max_tokens={current_max_tokens}"
+                    ) from exc
+
                 previous_truncated = truncated
                 guided_failure = (
                     use_guided_json
