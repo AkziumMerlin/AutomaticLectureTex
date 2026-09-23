@@ -491,6 +491,7 @@ in language code `{self.output_language}`.
             EpisodeTrackingUpdate,
             operation="episode_track",
             max_tokens=3072,
+            split_oversized_task=True,
         )
 
     def plan_episode_hierarchy(
