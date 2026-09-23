@@ -101,9 +101,14 @@ class _FakeWorkerProcess:
 
 
 def test_unimernet_uses_persistent_isolated_worker(tmp_path, monkeypatch):
-    python_path = tmp_path / "unimernet-python"
-    config_path = tmp_path / "unimernet.yaml"
+    formula_root = tmp_path / "models" / "formula"
+    python_path = formula_root / "unimernet-env" / "bin" / "python"
+    config_path = formula_root / "unimernet_small" / "unimernet.yaml"
+    source_root = formula_root / "UniMERNet-src"
     image_path = tmp_path / "formula.png"
+    python_path.parent.mkdir(parents=True)
+    config_path.parent.mkdir(parents=True)
+    source_root.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
     config_path.write_text("", encoding="utf-8")
     image_path.write_bytes(b"image")
@@ -139,6 +144,7 @@ def test_unimernet_uses_persistent_isolated_worker(tmp_path, monkeypatch):
     assert candidate.text == r"\frac{x}{y}"
     assert str(python_path) == captured["preflight_args"][0]
     assert "import pathlib, sys, unimernet, unimernet.tasks" in captured["preflight_args"][2]
+    assert str(source_root) in captured["preflight_kwargs"]["env"]["PYTHONPATH"]
     assert str(python_path) == captured["args"][0]
     assert "--config" in captured["args"]
     assert any('"image"' in item for item in process.stdin.writes)
