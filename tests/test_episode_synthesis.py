@@ -106,8 +106,16 @@ class _HierarchyOrchestrator:
         self.output_language = "ru"
         self.prompts = []
 
-    def _structured(self, prompt, schema, *, operation, max_tokens=None):
-        self.prompts.append((operation, prompt, max_tokens))
+    def _structured(
+        self,
+        prompt,
+        schema,
+        *,
+        operation,
+        max_tokens=None,
+        split_oversized_task=False,
+    ):
+        self.prompts.append((operation, prompt, max_tokens, split_oversized_task))
         return EpisodeHierarchyPlan()
 
 
@@ -119,7 +127,10 @@ def test_hierarchy_planning_is_batched():
 
     assert plan.boundaries == []
     assert len(orchestrator.prompts) == 3
-    assert all(operation == "episode_hierarchy" for operation, _, _ in orchestrator.prompts)
+    assert all(
+        operation == "episode_hierarchy" and split
+        for operation, _, _, split in orchestrator.prompts
+    )
 
 
 def test_outline_sections_are_assembled_without_llm_rewrite():
