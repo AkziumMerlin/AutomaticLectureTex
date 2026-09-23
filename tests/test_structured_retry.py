@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from pydantic import BaseModel
 
 from automatic_lecture_tex.llm import LectureModelClient
+from automatic_lecture_tex.llm_robust import _is_input_context_overflow_error
 
 
 class Payload(BaseModel):
@@ -116,3 +117,11 @@ def test_non_guided_retry_keeps_schema_instruction() -> None:
     assert result.value == "complete"
     retry_text = completions.messages[1][1]["content"][0]["text"]
     assert "JSON schema:" in retry_text
+
+
+def test_vllm_input_length_overflow_is_recognized() -> None:
+    error = RuntimeError(
+        "Input length (20524) exceeds model's maximum context length (20000)."
+    )
+
+    assert _is_input_context_overflow_error(error) is True
