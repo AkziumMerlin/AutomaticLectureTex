@@ -342,11 +342,28 @@ class KnowledgeOrchestrator:
             kwargs["guided_json"] = False
         if split_oversized_task:
             kwargs["split_oversized_task"] = True
-        return self.llm._structured(  # noqa: SLF001
-            prompt,
-            schema,
-            **kwargs,
-        )
+        try:
+            return self.llm._structured(  # noqa: SLF001
+                prompt,
+                schema,
+                **kwargs,
+            )
+        except TypeError as exc:
+            # Keep lightweight/test adapters that predate semantic splitting usable. The production
+            # robust client accepts this keyword; retry without it only for the exact legacy
+            # signature mismatch.
+            if (
+                split_oversized_task
+                and "split_oversized_task" in str(exc)
+                and "unexpected keyword" in str(exc)
+            ):
+                kwargs.pop("split_oversized_task", None)
+                return self.llm._structured(  # noqa: SLF001
+                    prompt,
+                    schema,
+                    **kwargs,
+                )
+            raise
 
     def extract_observations(
         self,
