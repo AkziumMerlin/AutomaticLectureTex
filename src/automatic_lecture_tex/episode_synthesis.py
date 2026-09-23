@@ -4,7 +4,10 @@ import json
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from .generated_notes import GeneratedChunkNotes
+from .llm import StructuredTaskTooLargeError
 from .schemas import (
     ChunkNotes,
     ClaimStatus,
@@ -106,11 +109,7 @@ def plan_episode_hierarchy_bounded(
     orchestrator: KnowledgeOrchestrator,
     kb: LectureKnowledgeBase,
 ) -> EpisodeHierarchyPlan:
-    """Plan topic/subtopic boundaries in bounded episode batches.
-
-    Only current-batch episode ids are accepted in each response. A small read-only prefix of the
-    previous batch gives continuity without making the request grow with lecture length.
-    """
+    """Plan hierarchy in bounded episode batches with recursive semantic splitting."""
 
     episodes = sorted(
         [item for item in kb.episodes if item.observation_ids],
@@ -121,12 +120,14 @@ def plan_episode_hierarchy_bounded(
 
     boundaries = []
     unresolved: list[str] = []
-    batch_size = orchestrator.config.hierarchy_batch_episodes
     seen_boundaries: set[tuple[str, str]] = set()
 
-    for start in range(0, len(episodes), batch_size):
-        batch = episodes[start : start + batch_size]
-        previous = episodes[max(0, start - 2) : start]
+    def process(
+        batch: list[SemanticEpisode],
+        previous: list[SemanticEpisode],
+    ) -> None:
+        if not batch:
+            return
         allowed_ids = {item.id for item in batch}
         prompt = f"""Build hierarchy boundaries for ONE bounded batch of an already fixed sequence
 of semantic lecture episodes. Episodes are immutable leaves: never invent, remove, reorder, resize,
@@ -134,7 +135,7 @@ or rewrite them. Return boundaries only before episode ids from CURRENT BATCH.
 
 Previous context (read-only; do not return boundaries for these ids):
 {json.dumps(
-    [_episode_summary(kb, item) for item in previous],
+    [_episode_summary(kb, item) for item in previous[-2:]],
     ensure_ascii=False,
     separators=(",", ":"),
 )}
@@ -152,12 +153,28 @@ and its immediate properties. The first current episode may continue the previou
 case return no topic boundary before it. Do not add textbook topics absent from the evidence.
 Write titles in language code `{orchestrator.output_language}`.
 """
-        partial = orchestrator._structured(
-            prompt,
-            EpisodeHierarchyPlan,
-            operation="episode_hierarchy",
-            max_tokens=2048,
-        )
+        try:
+            partial = orchestrator._structured(
+                prompt,
+                EpisodeHierarchyPlan,
+                operation="episode_hierarchy",
+                max_tokens=2048,
+                split_oversized_task=True,
+            )
+        except (StructuredTaskTooLargeError, json.JSONDecodeError, ValidationError) as exc:
+            if len(batch) <= 1:
+                unresolved.append(
+                    "Hierarchy planning failed for indivisible episode "
+                    f"{batch[0].id}: {type(exc).__name__}: {exc}"
+                )
+                return
+            midpoint = len(batch) // 2
+            left = batch[:midpoint]
+            right = batch[midpoint:]
+            process(left, previous)
+            process(right, [*previous, *left][-2:])
+            return
+
         for boundary in partial.boundaries:
             if boundary.before_episode_id not in allowed_ids:
                 unresolved.append(
@@ -170,10 +187,15 @@ Write titles in language code `{orchestrator.output_language}`.
                 continue
             seen_boundaries.add(key)
             boundaries.append(boundary)
-        unresolved = _merge_unique(unresolved, partial.unresolved)
+        unresolved[:] = _merge_unique(unresolved, partial.unresolved)
+
+    batch_size = orchestrator.config.hierarchy_batch_episodes
+    for start in range(0, len(episodes), batch_size):
+        batch = episodes[start : start + batch_size]
+        previous = episodes[max(0, start - 2) : start]
+        process(batch, previous)
 
     return EpisodeHierarchyPlan(boundaries=boundaries, unresolved=unresolved)
-
 
 def _episode_payload_for_observation_ids(
     kb: LectureKnowledgeBase,
@@ -363,6 +385,7 @@ Rules:
         GeneratedChunkNotes,
         operation="episode_write",
         max_tokens=4096,
+        split_oversized_task=True,
     )
     notes = generated.to_chunk_notes()
     batch = evidence["batch"]
@@ -430,6 +453,7 @@ outer section/theorem/proof/definition wrappers are not. Write reasons in langua
         MathAudit,
         operation="episode_validation",
         max_tokens=2048,
+        split_oversized_task=True,
     )
 
 

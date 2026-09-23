@@ -199,7 +199,21 @@ class IntegrityKnowledgeOrchestrator(KnowledgeOrchestrator):
             separators=(",", ":"),
         )
         multimodal_image_index = "\n".join(multimodal_image_labels)
-        symbols = [item.model_dump(mode="json") for item in kb.symbols if item.active]
+        open_episode_ids = {
+            item.id for item in kb.episodes if item.status == EpisodeStatus.OPEN
+        }
+        active_symbols = [item for item in kb.symbols if item.active]
+        symbol_context_limit = max(24, 2 * self.config.episode_symbol_context_limit)
+        open_symbols = [
+            item for item in active_symbols if item.episode_id in open_episode_ids
+        ][-symbol_context_limit:]
+        open_symbol_ids = {item.id for item in open_symbols}
+        recent_symbols = [
+            item for item in active_symbols if item.id not in open_symbol_ids
+        ][-max(0, symbol_context_limit - len(open_symbols)) :]
+        symbols = [
+            item.model_dump(mode="json") for item in [*recent_symbols, *open_symbols]
+        ]
         recent_limit = min(30, self.config.knowledge_recent_observations)
         recent_observations = [
             item.model_dump(mode="json") for item in kb.observations[-recent_limit:]
@@ -339,6 +353,7 @@ Return events in temporal order. Write descriptive strings in language code
                 guided_json=not bool(multimodal_images),
                 operation="knowledge_extract",
                 max_tokens=4096,
+                split_oversized_task=True,
             )
             invalid_refs = sorted(
                 {

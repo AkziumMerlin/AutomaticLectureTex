@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from .llm import StructuredTaskTooLargeError
 from .episode_synthesis import (
     apply_episode_validation,
     episode_evidence_batches as _base_evidence_batches,
@@ -21,7 +22,11 @@ logger = logging.getLogger(__name__)
 
 EPISODE_SYNTHESIS_CACHE_VERSION = 5
 MAX_OBSERVATIONS_PER_SYNTHESIS_CALL = 6
-_STRUCTURED_ERRORS = (json.JSONDecodeError, ValidationError)
+_STRUCTURED_ERRORS = (
+    json.JSONDecodeError,
+    ValidationError,
+    StructuredTaskTooLargeError,
+)
 _REQUIRED_COVERAGE_KINDS = {
     "definition",
     "claim",

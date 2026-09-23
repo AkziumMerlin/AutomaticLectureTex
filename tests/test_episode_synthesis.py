@@ -1,6 +1,7 @@
 import json
 
 from automatic_lecture_tex.config import NotesConfig
+from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.episode_synthesis import (
     assemble_outline_sections,
     episode_evidence_batches,
@@ -106,8 +107,16 @@ class _HierarchyOrchestrator:
         self.output_language = "ru"
         self.prompts = []
 
-    def _structured(self, prompt, schema, *, operation, max_tokens=None):
-        self.prompts.append((operation, prompt, max_tokens))
+    def _structured(
+        self,
+        prompt,
+        schema,
+        *,
+        operation,
+        max_tokens=None,
+        split_oversized_task=False,
+    ):
+        self.prompts.append((operation, prompt, max_tokens, split_oversized_task))
         return EpisodeHierarchyPlan()
 
 
@@ -119,7 +128,10 @@ def test_hierarchy_planning_is_batched():
 
     assert plan.boundaries == []
     assert len(orchestrator.prompts) == 3
-    assert all(operation == "episode_hierarchy" for operation, _, _ in orchestrator.prompts)
+    assert all(
+        operation == "episode_hierarchy" and split
+        for operation, _, _, split in orchestrator.prompts
+    )
 
 
 def test_outline_sections_are_assembled_without_llm_rewrite():
@@ -147,3 +159,39 @@ def test_outline_sections_are_assembled_without_llm_rewrite():
 
     assert [block.latex for block in sections[0].blocks] == ["first", "second"]
     assert sections[0].section_title == "Topic"
+
+
+class _SplittingHierarchyOrchestrator:
+    def __init__(self):
+        self.config = NotesConfig(hierarchy_batch_episodes=4)
+        self.output_language = "ru"
+        self.batch_sizes = []
+
+    def _structured(
+        self,
+        prompt,
+        schema,
+        *,
+        operation,
+        max_tokens=None,
+        split_oversized_task=False,
+    ):
+        del max_tokens
+        assert operation == "episode_hierarchy"
+        assert split_oversized_task is True
+        current = prompt.split("Current batch:\n", 1)[1].split("\n\nUse ", 1)[0]
+        payload = json.loads(current)
+        self.batch_sizes.append(len(payload))
+        if len(payload) > 1:
+            raise StructuredTaskTooLargeError("input context overflow")
+        return schema.model_validate({})
+
+
+def test_hierarchy_context_overflow_recursively_splits_episode_leaves():
+    kb = _kb_with_episodes(4)
+    orchestrator = _SplittingHierarchyOrchestrator()
+
+    plan = plan_episode_hierarchy_bounded(orchestrator, kb)
+
+    assert plan.unresolved == []
+    assert orchestrator.batch_sizes == [4, 2, 1, 1, 2, 1, 1]

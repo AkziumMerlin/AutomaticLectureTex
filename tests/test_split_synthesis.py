@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from automatic_lecture_tex import episode_synthesis_resilient as resilient
+from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.schemas import ChunkNotes, MathAudit, NoteBlock, SemanticEpisode
 
 
@@ -200,3 +201,32 @@ def test_proactive_split_caps_every_actual_write_call(monkeypatch) -> None:
     assert max(call_sizes) <= resilient.MAX_OBSERVATIONS_PER_SYNTHESIS_CALL
     assert len(notes.blocks) == 14
     assert resilient.synthesis_stats_snapshot()["proactive_splits"] >= 3
+
+
+def test_episode_context_overflow_recursively_splits_and_merges(monkeypatch) -> None:
+    calls = []
+
+    def fake_write(orchestrator, episode, evidence, previous_context):
+        del orchestrator, episode, previous_context
+        calls.append([item["id"] for item in evidence["observations"]])
+        if len(evidence["observations"]) > 1:
+            raise StructuredTaskTooLargeError("input context overflow")
+        observation = evidence["observations"][0]
+        return ChunkNotes(
+            chunk_id="leaf",
+            section_title="Episode",
+            blocks=[
+                NoteBlock(
+                    type="paragraph",
+                    latex=observation["text"],
+                    source_evidence_ids=[observation["id"]],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(resilient, "_write_once", fake_write)
+
+    notes = resilient.write_episode_batch(_orchestrator(), _episode(), _evidence(2), [])
+
+    assert calls == [["obs_0", "obs_1"], ["obs_0"], ["obs_1"]]
+    assert [block.latex for block in notes.blocks] == ["fact 0", "fact 1"]

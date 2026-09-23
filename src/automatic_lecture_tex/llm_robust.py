@@ -24,6 +24,10 @@ _MAX_CONTEXT_RE = re.compile(
     r"maximum context length is\s+(\d+)\s+tokens",
     re.IGNORECASE,
 )
+_INPUT_CONTEXT_RE = re.compile(
+    r"input length\s*\((\d+)\)\s*exceeds\s*(?:the\s+)?model(?:'s)?\s+maximum\s+context\s+length\s*\((\d+)\)",
+    re.IGNORECASE,
+)
 _EXPLICIT_MAX_TOKENS_CAP_RE = re.compile(
     r"max_tokens\s*=\s*\d+\s+cannot be greater than.*?"
     r"(?:max_model_len\s*=\s*)?(?:max_total_tokens\s*=\s*)?(\d+)",
@@ -41,9 +45,26 @@ def _explicit_max_tokens_ceiling(error: Exception) -> int | None:
     return ceiling if ceiling > 0 else None
 
 
+def _is_input_context_overflow_error(error: Exception) -> bool:
+    """Recognize requests whose input itself is already larger than the model context."""
+
+    message = str(error)
+    lowered = message.lower()
+    return bool(
+        _INPUT_CONTEXT_RE.search(message)
+        or (
+            "input length" in lowered
+            and "exceeds" in lowered
+            and "maximum context length" in lowered
+        )
+    )
+
+
 def _is_context_overflow_error(error: Exception) -> bool:
     """Recognize backend context/output-budget rejections across common server formats."""
 
+    if _is_input_context_overflow_error(error):
+        return True
     if _explicit_max_tokens_ceiling(error) is not None:
         return True
 
@@ -200,6 +221,7 @@ class LectureModelClient(BaseLectureModelClient):
                 except BadRequestError as exc:
                     if not _is_context_overflow_error(exc):
                         raise
+                    input_overflow = _is_input_context_overflow_error(exc)
                     if split_oversized_task:
                         logger.warning(
                             "[%s] structured task exceeded backend context/output budget at "
@@ -211,6 +233,12 @@ class LectureModelClient(BaseLectureModelClient):
                             f"{operation} cannot fit in one backend request at "
                             f"max_tokens={current_max_tokens}: {exc}"
                         ) from exc
+
+                    # Reducing completion max_tokens cannot repair an input that already exceeds
+                    # the model context. Callers that can split semantically should opt into
+                    # split_oversized_task; legacy callers get the original backend failure.
+                    if input_overflow:
+                        raise
 
                     # Preserve the historical fallback for legacy context-overflow messages.
                     # Explicit vLLM max_total_tokens errors are only special for callers that opted
