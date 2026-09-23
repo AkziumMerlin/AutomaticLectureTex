@@ -455,11 +455,12 @@ Write descriptive strings in language code `{self.output_language}`.
             item.model_dump(mode="json")
             for item in kb.episodes[-8:]
         ]
+        symbol_limit = max(24, self.config.episode_symbol_context_limit)
         active_symbols = [
             item.model_dump(mode="json")
             for item in kb.symbols
             if item.active
-        ][-80:]
+        ][-symbol_limit:]
         prompt = f"""Track semantic episodes in a university lecture. The host owns all evidence
 and will assign EVERY canonical observation to an episode. Your job is only to place semantic
 boundaries and describe typed symbols; never create claims or document sections.
