@@ -167,6 +167,20 @@ def _load_window_artifact(path: Path, fingerprint: str):
         if payload.get("fingerprint") != fingerprint:
             return None
         batch = WindowObservations.model_validate(payload["observations"])
+        ids = [item.id for item in batch.observations]
+        expected_ids = [
+            f"obs_{batch.window_id}_{index:03d}"
+            for index in range(len(batch.observations))
+        ]
+        # Legacy artifacts could contain model-generated, duplicated, or gapped ids. Episode
+        # tracking references make those caches unsafe to repair after the fact, so recompute only
+        # the affected windows while keeping already canonical caches.
+        if ids != expected_ids or len(ids) != len(set(ids)):
+            logger.info(
+                "[%s] invalidating legacy window cache with non-canonical observation ids",
+                batch.window_id,
+            )
+            return None
         tracking = EpisodeTrackingUpdate.model_validate(payload["episode_update"])
         return payload, batch, tracking
     except (json.JSONDecodeError, KeyError, ValidationError):

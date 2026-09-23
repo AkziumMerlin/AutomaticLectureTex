@@ -25,11 +25,13 @@ from .visual_formula_gate import find_formula_gate_violations
 class GeneratedLectureObservation(BaseModel):
     """LLM-facing semantic event with host-derived temporal provenance."""
 
-    id: str = ""
     kind: ObservationKind
     text: str = Field(min_length=1)
     latex: str | None = None
+    # Existing canonical target from previous windows only. Same-response references use the
+    # zero-based target_local_index and are resolved by the host after validation.
     target_observation_id: str | None = None
+    target_local_index: int | None = Field(default=None, ge=0)
     confidence: float = Field(ge=0.0, le=1.0)
     source_status: SourceStatus
     source_segment_ids: list[str] = Field(min_length=1)
@@ -51,9 +53,13 @@ class GeneratedLectureObservation(BaseModel):
         return cleaned
 
     @model_validator(mode="after")
-    def require_equation_latex(self) -> GeneratedLectureObservation:
+    def validate_event(self) -> GeneratedLectureObservation:
         if self.kind == ObservationKind.EQUATION and not (self.latex or "").strip():
             raise ValueError("equation observations must include exact latex in addition to prose")
+        if self.target_observation_id is not None and self.target_local_index is not None:
+            raise ValueError(
+                "use either target_observation_id or target_local_index, not both"
+            )
         return self
 
 
@@ -325,6 +331,9 @@ Use event kinds as follows:
   communicated in this window;
 - correction: an explicit correction of an earlier statement/sign/symbol/derivation;
 - retraction: an explicit withdrawal of earlier content;
+For correction/retraction targets, use `target_observation_id` ONLY for an exact canonical id shown
+in Recent canonical mathematical events. If the target is an earlier event in THIS SAME response,
+use its zero-based `target_local_index` instead. The host owns canonical ids; never invent one.
 - transition: a genuine semantic transition in the lecture;
 - unresolved: locally ambiguous content that cannot be reconstructed safely.
 
@@ -392,14 +401,19 @@ Return events in temporal order. Write descriptive strings in language code
 
         assert result is not None
         blocked_indices = {item.observation_index for item in violations}
-        observations: list[LectureObservation] = []
         unresolved = list(result.unresolved)
+
+        valid_segments_by_index: dict[int, list[str]] = {}
+        kept_indices: set[int] = set()
         for index, item in enumerate(result.observations):
-            valid_segment_ids = [ref for ref in item.source_segment_ids if ref in segment_map]
+            valid_segment_ids = [
+                ref for ref in item.source_segment_ids if ref in segment_map
+            ]
+            valid_segments_by_index[index] = valid_segment_ids
             if not valid_segment_ids:
                 unresolved.append(
                     "Dropped generated observation "
-                    f"{item.id or index}: no valid source segment ids."
+                    f"{index}: no valid source segment ids."
                 )
                 continue
             if index in blocked_indices:
@@ -410,19 +424,44 @@ Return events in temporal order. Write descriptive strings in language code
                 )
                 unresolved.append(
                     "Host visual-formula gate suppressed observation "
-                    f"{item.id or index} after retry: {details}"
+                    f"{index} after retry: {details}"
                 )
                 continue
-            valid_visual_ids = [ref for ref in item.visual_evidence_ids if ref in visual_ids]
             if item.kind == ObservationKind.UNRESOLVED:
-                unresolved.append(f"{item.text} [segments={','.join(valid_segment_ids)}]")
+                unresolved.append(
+                    f"{item.text} [segments={','.join(valid_segment_ids)}]"
+                )
                 continue
+            kept_indices.add(index)
+
+        host_ids = {
+            index: f"obs_{chunk.id}_{index:03d}" for index in kept_indices
+        }
+        observations: list[LectureObservation] = []
+        for index, item in enumerate(result.observations):
+            if index not in kept_indices:
+                continue
+            valid_segment_ids = valid_segments_by_index[index]
+            valid_visual_ids = [
+                ref for ref in item.visual_evidence_ids if ref in visual_ids
+            ]
+
+            target_observation_id = item.target_observation_id
+            if item.target_local_index is not None:
+                local_index = item.target_local_index
+                if local_index >= index or local_index not in host_ids:
+                    unresolved.append(
+                        "Dropped invalid same-response target for observation "
+                        f"{index}: target_local_index={local_index}."
+                    )
+                    target_observation_id = None
+                else:
+                    target_observation_id = host_ids[local_index]
 
             segments = [segment_map[ref] for ref in valid_segment_ids]
-            observation_id = item.id or f"obs_{chunk.id}_{index:03d}"
             observations.append(
                 LectureObservation(
-                    id=observation_id,
+                    id=host_ids[index],
                     window_id=chunk.id,
                     window_ids=[chunk.id],
                     start=min(segment["start_seconds"] for segment in segments),
@@ -430,11 +469,17 @@ Return events in temporal order. Write descriptive strings in language code
                     kind=item.kind,
                     text=item.text,
                     latex=item.latex,
-                    target_observation_id=item.target_observation_id,
+                    target_observation_id=target_observation_id,
                     confidence=item.confidence,
                     source_status=item.source_status,
                     evidence_refs=[*valid_segment_ids, *valid_visual_ids],
                 )
+            )
+
+        ids = [item.id for item in observations]
+        if len(ids) != len(set(ids)):
+            raise RuntimeError(
+                f"host-generated observation ids are not unique in {chunk.id}: {ids}"
             )
 
         return WindowObservations(

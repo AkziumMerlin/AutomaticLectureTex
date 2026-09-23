@@ -12,6 +12,7 @@ from .schemas import (
     EpisodeTrackingUpdate,
     LectureChunk,
     LectureKnowledgeBase,
+    LectureObservation,
     TranscriptSegment,
     VisualEvidence,
     WindowObservations,
@@ -37,12 +38,48 @@ class ResilientIntegrityKnowledgeOrchestrator(IntegrityKnowledgeOrchestrator):
         evidence: list[VisualEvidence],
         kb: LectureKnowledgeBase,
     ) -> WindowObservations:
-        return self._extract_resilient(
+        result = self._extract_resilient(
             chunk,
             evidence,
             kb,
             parent_window_id=chunk.id,
             allow_visual_compaction=True,
+        )
+        return self._reindex_parent_window(result, chunk.id)
+
+    @staticmethod
+    def _reindex_parent_window(
+        result: WindowObservations,
+        parent_window_id: str,
+    ) -> WindowObservations:
+        """Assign canonical IDs once, after all recursive reconstruction children are merged."""
+
+        old_to_new = {
+            item.id: f"obs_{parent_window_id}_{index:03d}"
+            for index, item in enumerate(result.observations)
+        }
+        observations: list[LectureObservation] = []
+        for index, raw in enumerate(result.observations):
+            item = raw.model_copy(deep=True)
+            item.id = f"obs_{parent_window_id}_{index:03d}"
+            item.window_id = parent_window_id
+            item.window_ids = [parent_window_id]
+            if item.target_observation_id in old_to_new:
+                item.target_observation_id = old_to_new[item.target_observation_id]
+            observations.append(item)
+
+        ids = [item.id for item in observations]
+        if len(ids) != len(set(ids)):
+            raise RuntimeError(
+                f"canonical observation ids are not unique in {parent_window_id}: {ids}"
+            )
+
+        return WindowObservations(
+            window_id=parent_window_id,
+            start=result.start,
+            end=result.end,
+            observations=observations,
+            unresolved=list(result.unresolved),
         )
 
     def track_episodes(

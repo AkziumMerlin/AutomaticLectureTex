@@ -1,5 +1,8 @@
+import json
+
 from automatic_lecture_tex.config import AppConfig
 from automatic_lecture_tex.generated_notes import GeneratedChunkNotes, GeneratedNoteBlock
+from automatic_lecture_tex.knowledge_pipeline import _load_window_artifact
 from automatic_lecture_tex.pipeline import Pipeline
 from automatic_lecture_tex.schemas import (
     EpisodeBoundary,
@@ -156,3 +159,37 @@ def test_knowledge_pipeline_builds_episode_graph_outline_and_ir(tmp_path, monkey
         "episode_write",
         "episode_validation",
     ]
+
+
+def test_window_cache_with_duplicate_observation_ids_is_invalidated(tmp_path):
+    path = tmp_path / "window.json"
+    payload = {
+        "fingerprint": "fp",
+        "observations": WindowObservations(
+            window_id="window_0001",
+            start=0.0,
+            end=2.0,
+            observations=[
+                LectureObservation(
+                    id="obs_window_0001_000",
+                    window_id="window_0001",
+                    start=0.0,
+                    end=1.0,
+                    kind=ObservationKind.CLAIM,
+                    text="A",
+                ),
+                LectureObservation(
+                    id="obs_window_0001_000",
+                    window_id="window_0001",
+                    start=1.0,
+                    end=2.0,
+                    kind=ObservationKind.CLAIM,
+                    text="B",
+                ),
+            ],
+        ).model_dump(mode="json"),
+        "episode_update": EpisodeTrackingUpdate().model_dump(mode="json"),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _load_window_artifact(path, "fp") is None
