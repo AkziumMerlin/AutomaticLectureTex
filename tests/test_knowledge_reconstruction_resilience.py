@@ -17,8 +17,16 @@ class _SplitRecoveryLLM:
         self.always_fail = always_fail
         self.prompts: list[str] = []
 
-    def _structured(self, prompt, schema, *, operation, max_tokens=None):
-        del max_tokens
+    def _structured(
+        self,
+        prompt,
+        schema,
+        *,
+        operation,
+        max_tokens=None,
+        split_oversized_task=False,
+    ):
+        del max_tokens, split_oversized_task
         assert operation == "knowledge_extract"
         self.prompts.append(prompt)
         both_segments = "seg_00001" in prompt and "seg_00002" in prompt
