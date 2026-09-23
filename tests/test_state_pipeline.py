@@ -214,11 +214,20 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.vision.board_sampling_mode == "change"
     assert config.vision.board_crop_max_vlm_images == 5
     assert config.vision.board_change_probe_seconds == 4.0
-    assert config.vision.board_change_min_gap_seconds == 3.0
-    assert config.vision.math_ocr.backend == "latexocr"
+    assert config.vision.board_change_min_gap_seconds == 2.0
+    assert config.vision.board_change_threshold == 0.10
+    assert config.vision.formula_detection.enabled is True
+    assert config.vision.formula_detection.backend == "yolov8"
+    assert config.vision.formula_detection.model_path is not None
+    assert config.vision.formula_detection.model_path.name == "yolo_v8_ft.pt"
+    assert config.vision.math_ocr.backend == "unimernet"
     assert config.vision.math_ocr.board_scan_enabled is True
-    assert config.vision.math_ocr.board_scan_max_images == 3
+    assert config.vision.math_ocr.board_scan_max_images == 8
     assert config.vision.math_ocr.device == "cuda"
+    assert config.vision.math_ocr.unimernet_config_path is not None
+    assert config.vision.math_ocr.unimernet_config_path.name == "automatic_lecture_tex.yaml"
+    assert config.vision.math_ocr.unimernet_python_path is not None
+    assert config.vision.math_ocr.unimernet_python_path.name == "python"
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
 
@@ -332,6 +341,7 @@ def test_state_section_writer_splits_episode_batch_after_context_limit(monkeypat
             start=child_section.start,
             end=child_section.end,
             section_title=child_section.title,
+            blocks=[],
             unresolved=[f"wrote:{episode_ids[0]}"],
         )
 
@@ -433,6 +443,7 @@ def test_state_section_writer_splits_episode_batch_after_structured_json_failure
             start=child_section.start,
             end=child_section.end,
             section_title=child_section.title,
+            blocks=[],
             unresolved=[f"wrote:{episode_ids[0]}"],
         )
 

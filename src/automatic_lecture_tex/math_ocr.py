@@ -5,6 +5,7 @@ import base64
 import json
 import mimetypes
 import os
+import subprocess
 import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -13,6 +14,27 @@ from .config import MathOCRConfig
 from .schemas import MathOCRCandidate
 
 _MAX_OCR_TEXT_CHARS = 8000
+
+
+def _normalize_formula_image(image, config: MathOCRConfig):
+    if not config.normalize_dark_formula:
+        return image.convert("RGB")
+
+    from PIL import ImageOps
+
+    gray = image.convert("L")
+    histogram = gray.histogram()
+    midpoint = sum(histogram) / 2
+    running = 0
+    median = 255
+    for value, count in enumerate(histogram):
+        running += count
+        if running >= midpoint:
+            median = value
+            break
+    if median < config.dark_formula_threshold:
+        gray = ImageOps.invert(gray)
+    return ImageOps.autocontrast(gray).convert("RGB")
 
 
 class MathOCRBackend(ABC):
@@ -63,7 +85,8 @@ class LatexOCRBackend(MathOCRBackend):
             raise RuntimeError("LaTeX-OCR backend requires Pillow") from exc
 
         with Image.open(image_path) as image:
-            text = str(self.model(image.convert("RGB")) or "").strip()[:_MAX_OCR_TEXT_CHARS]
+            prepared = _normalize_formula_image(image, self.config)
+            text = str(self.model(prepared) or "").strip()[:_MAX_OCR_TEXT_CHARS]
         if not text:
             return None
         return MathOCRCandidate(backend="latexocr", text=text)
@@ -113,16 +136,82 @@ class MathpixBackend(MathOCRBackend):
 
 
 class UniMERNetBackend(MathOCRBackend):
-    """Local UniMERNet wrapper following the upstream inference API.
+    """UniMERNet wrapper with an optional persistent isolated worker process.
 
-    UniMERNet is most useful when the temporal composite contains a dominant formula or a cropped
-    board region. The backend is optional because its model environment is substantially heavier
-    than the core lecture pipeline.
+    UniMERNet 0.2.3 pins an older Transformers release than Qwen-ASR. When an isolated Python path
+    is configured, inference runs in that interpreter and the model stays resident across all crop
+    requests. The legacy in-process path remains available for dedicated environments.
     """
 
     def __init__(self, config: MathOCRConfig) -> None:
         if config.unimernet_config_path is None:
             raise RuntimeError("UniMERNet OCR requires vision.math_ocr.unimernet_config_path")
+
+        self.config = config
+        self._worker: subprocess.Popen[str] | None = None
+        self.torch = None
+        self.Image = None
+        self.device = None
+        self.model = None
+        self.processor = None
+
+        if config.unimernet_python_path is not None:
+            self._start_worker()
+        else:
+            self._init_in_process()
+
+    def _start_worker(self) -> None:
+        python_path = self.config.unimernet_python_path
+        assert python_path is not None
+        if not python_path.is_file():
+            raise RuntimeError(
+                f"UniMERNet worker Python does not exist: {python_path}. "
+                "Run scripts/create_unimernet_worker_env.sh first."
+            )
+        worker_script = Path(__file__).with_name("unimernet_worker.py")
+        process = subprocess.Popen(  # noqa: S603
+            [
+                str(python_path),
+                str(worker_script),
+                "--config",
+                str(self.config.unimernet_config_path),
+                "--device",
+                self.config.device,
+                "--dark-formula-threshold",
+                str(self.config.dark_formula_threshold),
+                *(
+                    ["--normalize-dark-formula"]
+                    if self.config.normalize_dark_formula
+                    else []
+                ),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        ready_line = process.stdout.readline()
+        if not ready_line:
+            return_code = process.poll()
+            process.terminate()
+            raise RuntimeError(
+                "UniMERNet worker exited before reporting readiness"
+                + (f" (return code {return_code})" if return_code is not None else "")
+            )
+        try:
+            ready = json.loads(ready_line)
+        except json.JSONDecodeError as exc:
+            process.terminate()
+            raise RuntimeError(
+                f"Invalid UniMERNet worker startup response: {ready_line!r}"
+            ) from exc
+        if not ready.get("ready"):
+            process.terminate()
+            raise RuntimeError(f"UniMERNet worker failed to initialize: {ready!r}")
+        self._worker = process
+
+    def _init_in_process(self) -> None:
         try:
             import torch
             import unimernet.tasks as tasks
@@ -131,16 +220,24 @@ class UniMERNetBackend(MathOCRBackend):
             from unimernet.processors import load_processor
         except ImportError as exc:
             raise RuntimeError(
-                "UniMERNet OCR requires the upstream package, for example: "
-                "pip install 'unimernet[full]'"
+                "In-process UniMERNet OCR requires the unimernet package. Prefer the isolated "
+                "worker via vision.math_ocr.unimernet_python_path."
             ) from exc
+
+        if self.config.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "UniMERNet OCR is configured for CUDA, but torch.cuda.is_available() is False."
+            )
 
         self.torch = torch
         self.Image = Image
-        args = argparse.Namespace(cfg_path=str(config.unimernet_config_path), options=None)
+        args = argparse.Namespace(
+            cfg_path=str(self.config.unimernet_config_path),
+            options=None,
+        )
         cfg = Config(args)
         task = tasks.setup_task(cfg)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(self.config.device)
         self.model = task.build_model(cfg).to(self.device)
         self.model.eval()
         self.processor = load_processor(
@@ -148,8 +245,42 @@ class UniMERNetBackend(MathOCRBackend):
             cfg.config.datasets.formula_rec_eval.vis_processor.eval,
         )
 
+    def _recognize_worker(self, image_path: Path) -> MathOCRCandidate | None:
+        process = self._worker
+        if process is None or process.stdin is None or process.stdout is None:
+            raise RuntimeError("UniMERNet worker is not available")
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"UniMERNet worker exited unexpectedly with return code {process.returncode}"
+            )
+
+        process.stdin.write(
+            json.dumps({"image": str(image_path)}, ensure_ascii=False) + "\n"
+        )
+        process.stdin.flush()
+        response_line = process.stdout.readline()
+        if not response_line:
+            raise RuntimeError("UniMERNet worker closed stdout during inference")
+        response = json.loads(response_line)
+        if response.get("error"):
+            raise RuntimeError(f"UniMERNet worker error: {response['error']}")
+        text = str(response.get("text") or "").strip()[:_MAX_OCR_TEXT_CHARS]
+        if not text:
+            return None
+        return MathOCRCandidate(backend="unimernet", text=text)
+
     def recognize(self, image_path: Path) -> MathOCRCandidate | None:
-        raw_image = self.Image.open(image_path).convert("RGB")
+        if self._worker is not None:
+            return self._recognize_worker(image_path)
+
+        assert self.Image is not None
+        assert self.processor is not None
+        assert self.device is not None
+        assert self.torch is not None
+        assert self.model is not None
+
+        with self.Image.open(image_path) as raw:
+            raw_image = _normalize_formula_image(raw, self.config)
         image = self.processor(raw_image).unsqueeze(0).to(self.device)
         with self.torch.inference_mode():
             output = self.model.generate({"image": image})
@@ -157,6 +288,25 @@ class UniMERNetBackend(MathOCRBackend):
         if not text:
             return None
         return MathOCRCandidate(backend="unimernet", text=text)
+
+    def close(self) -> None:
+        process = self._worker
+        self._worker = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+                process.stdin.flush()
+            process.wait(timeout=5)
+        except Exception:
+            process.terminate()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def make_math_ocr_backend(config: MathOCRConfig) -> MathOCRBackend | None:

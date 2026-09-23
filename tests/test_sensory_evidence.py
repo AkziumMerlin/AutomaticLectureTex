@@ -11,7 +11,14 @@ from automatic_lecture_tex import asr as asr_module
 from automatic_lecture_tex import sensory_evidence as sensory_evidence_module
 from automatic_lecture_tex.asr import GigaAMBackend
 from automatic_lecture_tex.board import build_temporal_board_composite, temporal_sample_offsets
-from automatic_lecture_tex.config import ASRConfig, MathOCRConfig, RuntimeConfig, VisionConfig
+from automatic_lecture_tex.config import (
+    ASRConfig,
+    FormulaDetectionConfig,
+    MathOCRConfig,
+    RuntimeConfig,
+    VisionConfig,
+)
+from automatic_lecture_tex.formula_detection import DetectedFormulaCrop
 from automatic_lecture_tex.schemas import (
     ExtractedFrame,
     LectureChunk,
@@ -333,3 +340,90 @@ def test_board_scan_runs_specialized_latex_ocr_without_extra_vlm_call(tmp_path, 
         "x_{2}=1",
         "x_{3}=1",
     ]
+
+
+class _FakeFormulaDetector:
+    def detect(self, frame, output_dir, *, id_prefix):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        crop_path = output_dir / f"{id_prefix}_f00.jpg"
+        Image.open(frame.path).convert("RGB").save(crop_path)
+        return [
+            DetectedFormulaCrop(
+                id=f"{id_prefix}_f00",
+                frame=ExtractedFrame(timestamp=frame.timestamp, path=crop_path),
+                bbox=(0, 0, 16, 16),
+                confidence=0.9,
+            )
+        ]
+
+
+def test_board_scan_ocr_uses_detected_formula_crops(tmp_path, monkeypatch):
+    llm = _FakeLLM()
+    ocr = _FakeMathOCR()
+    detector = _FakeFormulaDetector()
+    monkeypatch.setattr(sensory_evidence_module, "_math_ocr_backend", lambda _pipeline: ocr)
+    monkeypatch.setattr(sensory_evidence_module, "_formula_detector", lambda _pipeline: detector)
+
+    vision = VisionConfig(
+        board_uniform_samples=5,
+        board_crop_max_vlm_images=5,
+        board_auto_crop_enabled=False,
+        temporal_composite_enabled=False,
+        formula_detection=FormulaDetectionConfig(
+            enabled=True,
+            backend="yolov8",
+            model_path=tmp_path / "unused.pt",
+            max_crops_per_chunk=8,
+            contact_sheet_enabled=True,
+        ),
+        math_ocr=MathOCRConfig(
+            backend="unimernet",
+            board_scan_enabled=True,
+            board_scan_max_images=2,
+        ),
+    )
+    pipeline = SimpleNamespace(
+        config=SimpleNamespace(
+            notes=SimpleNamespace(
+                visual_chunk_board_scan=True,
+                visual_rule_selector=False,
+                visual_llm_selector=False,
+                max_low_confidence_visual_requests=0,
+                visual_dedupe_seconds=8.0,
+            ),
+            vision=vision,
+            latex=SimpleNamespace(output_dir=tmp_path / "tex"),
+        ),
+        llm=llm,
+    )
+    transcript = Transcript(lecture_id="lecture", language="ru", segments=[])
+    chunk = LectureChunk(
+        id="chunk_0000",
+        start=0,
+        end=180,
+        segment_ids=[],
+        text="",
+    )
+
+    _requests, evidence, _elapsed = collect_visual_evidence(
+        pipeline,
+        SimpleNamespace(id="lecture"),
+        chunk,
+        transcript,
+        _FakeSource(),
+        tmp_path / "work",
+        tmp_path / "tex" / "figures",
+        {},
+    )
+
+    visual = evidence[0]
+    assert len(visual.formula_crops) == 5
+    assert visual.formula_contact_sheet_path is not None
+    assert Path(visual.formula_contact_sheet_path).is_file()
+    assert len(ocr.calls) == 2
+    assert [candidate.source_id for candidate in visual.math_ocr_candidates] == [
+        "chunk_0000_board_scan_00_s00_f00",
+        "chunk_0000_board_scan_00_s01_f00",
+    ]
+    crop_paths = {Path(item.image_path) for item in visual.formula_crops}
+    assert set(ocr.calls).issubset(crop_paths)

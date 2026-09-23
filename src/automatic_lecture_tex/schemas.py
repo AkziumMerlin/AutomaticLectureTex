@@ -80,6 +80,15 @@ class MathOCRCandidate(BaseModel):
     text: str
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     timestamp: float | None = None
+    source_id: str | None = None
+
+
+class FormulaVisualCrop(BaseModel):
+    id: str
+    timestamp: float
+    bbox: tuple[int, int, int, int]
+    detector_confidence: float = Field(ge=0.0, le=1.0)
+    image_path: str
 
 
 class VisualEvidence(BaseModel):
@@ -91,6 +100,8 @@ class VisualEvidence(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     corrections: list[CorrectionRecord] = Field(default_factory=list)
     math_ocr_candidates: list[MathOCRCandidate] = Field(default_factory=list)
+    formula_crops: list[FormulaVisualCrop] = Field(default_factory=list)
+    formula_contact_sheet_path: str | None = None
     requires_figure_in_notes: bool = False
     best_frame_index: int | None = None
     asset_path: str | None = None

@@ -72,13 +72,39 @@ def _edge_signature(path: Path, size: tuple[int, int] = (192, 108)) -> np.ndarra
     return np.clip(magnitude, 0.0, cap) / cap
 
 
+def _localized_writing_change(diff: np.ndarray) -> float:
+    """Emphasize sparse local writing changes that global image averages would miss."""
+
+    height, width = diff.shape
+    block_h = max(6, height // 9)
+    block_w = max(8, width // 12)
+    scores: list[float] = []
+    for y0 in range(0, height, block_h):
+        for x0 in range(0, width, block_w):
+            block = diff[y0 : min(height, y0 + block_h), x0 : min(width, x0 + block_w)]
+            if block.size:
+                scores.append(float(block.mean()))
+    if not scores:
+        return 0.0
+    scores.sort(reverse=True)
+    return float(sum(scores[: min(4, len(scores))]) / min(4, len(scores)))
+
+
 def board_state_change_score(left: Path, right: Path) -> float:
-    """Return a deterministic visual-change score between two candidate board states."""
+    """Return a writing-sensitive visual-change score between board states.
+
+    Small newly written formulas occupy little of a lecture frame and were previously diluted by
+    the global mean. Combine global edge change with the strongest local writing regions so a new
+    line or formula can survive selection without making the sampler depend on an LLM confidence.
+    """
 
     first = _edge_signature(left)
     second = _edge_signature(right)
     diff = np.abs(first - second)
-    return float(0.65 * diff.mean() + 0.35 * np.quantile(diff, 0.90))
+    global_score = float(0.55 * diff.mean() + 0.45 * np.quantile(diff, 0.90))
+    local_score = _localized_writing_change(diff)
+    sparse_score = float(np.quantile(diff, 0.97))
+    return float(0.45 * global_score + 0.35 * local_score + 0.20 * sparse_score)
 
 
 def select_board_state_frames(
@@ -110,6 +136,15 @@ def select_board_state_frames(
         score = board_state_change_score(candidates[-1].path, frame.path)
         if score >= change_threshold:
             candidates.append(frame)
+
+    # A semantically important final line can be too sparse for the ordinary threshold. Preserve
+    # the latest probe when it carries at least half-threshold writing change relative to the last
+    # selected state; unchanged tails still remain collapsed.
+    latest = ordered[-1]
+    if latest.path != candidates[-1].path and latest.timestamp - candidates[-1].timestamp >= min_gap_seconds:
+        tail_score = board_state_change_score(candidates[-1].path, latest.path)
+        if tail_score >= 0.5 * change_threshold:
+            candidates.append(latest)
 
     if len(candidates) <= max_states:
         return candidates

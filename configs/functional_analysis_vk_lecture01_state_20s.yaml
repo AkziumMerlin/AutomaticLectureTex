@@ -103,8 +103,8 @@ vision:
   board_uniform_samples: 5
   # Probe densely enough that a 20 s window can supply up to five distinct board states.
   board_change_probe_seconds: 4.0
-  board_change_threshold: 0.20
-  board_change_min_gap_seconds: 3.0
+  board_change_threshold: 0.10
+  board_change_min_gap_seconds: 2.0
   board_change_max_probe_frames: 48
 
   # If important mathematical content remains unresolved, keep the source itself in the notes.
@@ -112,13 +112,30 @@ vision:
   unresolved_board_min_visual_confidence: 0.30
   unresolved_board_max_per_chunk: 1
 
+  formula_detection:
+    # Detect local formula regions before MER; whole-board OCR is deliberately avoided.
+    enabled: true
+    backend: yolov8
+    model_path: ../models/formula/mfd/yolo_v8_ft.pt
+    confidence: 0.25
+    iou: 0.45
+    image_size: 1280
+    device: cuda
+    max_crops_per_state: 6
+    max_crops_per_chunk: 8
+    padding_fraction: 0.08
+    contact_sheet_enabled: true
+    contact_sheet_columns: 2
+
   math_ocr:
-    # Dedicated image-to-LaTeX sensor for exact symbols/signs on selected board states.
-    backend: latexocr
+    # UniMERNet supplies glyph-level hypotheses for MFD crops; the VLM still sees the pixels.
+    backend: unimernet
     min_confidence: 0.45
     board_scan_enabled: true
-    board_scan_max_images: 3
+    board_scan_max_images: 8
     device: cuda
+    unimernet_config_path: ../models/formula/unimernet_small/automatic_lecture_tex.yaml
+    unimernet_python_path: ../models/formula/unimernet-env/bin/python
 
 literature:
   enabled: false
