@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -258,5 +259,7 @@ def load_config(path: str | Path) -> AppConfig:
     if unimernet_python is not None and not unimernet_python.is_absolute():
         # Do not call Path.resolve() here: venv/bin/python is normally a symlink to the base
         # interpreter, and resolving it silently discards the virtual environment entrypoint.
-        cfg.vision.math_ocr.unimernet_python_path = (base / unimernet_python).absolute()
+        cfg.vision.math_ocr.unimernet_python_path = Path(
+            os.path.abspath(base / unimernet_python)
+        )
     return cfg
