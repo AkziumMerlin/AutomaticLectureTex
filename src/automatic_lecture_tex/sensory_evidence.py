@@ -114,7 +114,12 @@ def _select_diverse_formula_crops(
         key = round(crop.frame.timestamp * 1000)
         groups.setdefault(key, []).append(crop)
     for values in groups.values():
-        values.sort(key=lambda item: item.confidence, reverse=True)
+        values.sort(
+            key=lambda item: (
+                "_t" in item.id,  # MFD/line-refined proposals before temporal attention proposals.
+                -item.confidence,
+            )
+        )
 
     selected: list[DetectedFormulaCrop] = []
     selected_ids: set[str] = set()
@@ -129,8 +134,10 @@ def _select_diverse_formula_crops(
     # Second pass: fill remaining capacity with the strongest unused detections globally.
     remaining = sorted(
         (crop for crop in crops if crop.id not in selected_ids),
-        key=lambda item: item.confidence,
-        reverse=True,
+        key=lambda item: (
+            "_t" in item.id,
+            -item.confidence,
+        ),
     )
     selected.extend(remaining[: max(0, limit - len(selected))])
     return sorted(

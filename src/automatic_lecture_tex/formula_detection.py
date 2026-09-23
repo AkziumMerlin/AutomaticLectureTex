@@ -172,8 +172,16 @@ def _dominant_surface_color(rgb: np.ndarray) -> np.ndarray:
     return selected.mean(axis=0) if len(selected) else candidate.mean(axis=0)
 
 
-def _chalk_mask(rgb: np.ndarray, *, large_component_fraction: float) -> np.ndarray:
-    """Extract thin bright writing and suppress large foreground objects such as the lecturer."""
+def _stroke_masks(
+    rgb: np.ndarray,
+    config: FormulaDetectionConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return thin chalk strokes and a conservative thick-foreground mask.
+
+    Large connected components are a bad lecturer proxy on dense mathematics: after closing, an
+    entire formula can become one component. Instead, use distance-to-background thickness. Chalk
+    strokes are thin; faces, hands, clothes, board frames and other foreground contain thick cores.
+    """
 
     cv2 = _cv2()
     image = rgb.astype(np.float32)
@@ -184,39 +192,46 @@ def _chalk_mask(rgb: np.ndarray, *, large_component_fraction: float) -> np.ndarr
         0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2]
     )
 
-    # Chalk is both substantially brighter than the board and chromatically distinct. This also
-    # admits some foreground pixels, which are removed below by connected-component geometry.
-    mask = (
+    candidate = (
         (luminance >= max(82.0, board_luminance + 18.0))
         & (distance >= 28.0)
     ).astype(np.uint8) * 255
-    mask = cv2.morphologyEx(
-        mask,
+    candidate = cv2.morphologyEx(
+        candidate,
         cv2.MORPH_OPEN,
         np.ones((2, 2), dtype=np.uint8),
     )
 
-    # Join filled foreground regions before measuring their area. Thin chalk strokes remain too
-    # sparse to form a large filled component at this scale.
-    joined = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_CLOSE,
-        np.ones((9, 9), dtype=np.uint8),
+    thickness = cv2.distanceTransform(
+        (candidate > 0).astype(np.uint8),
+        cv2.DIST_L2,
+        5,
     )
-    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(joined, 8)
-    max_area = max(1, int(mask.shape[0] * mask.shape[1] * large_component_fraction))
-    foreground = np.zeros_like(mask)
-    for index in range(1, count):
-        if int(stats[index, cv2.CC_STAT_AREA]) >= max_area:
-            foreground[labels == index] = 255
-    if np.any(foreground):
-        foreground = cv2.dilate(
-            foreground,
-            np.ones((11, 11), dtype=np.uint8),
-            iterations=1,
-        )
-        mask[foreground > 0] = 0
-    return mask
+    thick_core = (
+        thickness >= config.stroke_foreground_core_radius_px
+    ).astype(np.uint8) * 255
+    if np.any(thick_core):
+        radius = config.stroke_foreground_core_dilate_px
+        if radius > 0:
+            thick_core = cv2.dilate(
+                thick_core,
+                np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8),
+                iterations=1,
+            )
+
+    chalk = candidate.copy()
+    chalk[thick_core > 0] = 0
+
+    # Auto-crops often include a few pixels of the metal board frame. Those long edge strokes are
+    # not mathematical content and otherwise dominate row/column projections.
+    height, width = chalk.shape
+    border_x = max(2, int(round(width * config.stroke_border_fraction)))
+    border_y = max(2, int(round(height * config.stroke_border_fraction)))
+    chalk[:border_y, :] = 0
+    chalk[-border_y:, :] = 0
+    chalk[:, :border_x] = 0
+    chalk[:, -border_x:] = 0
+    return chalk, thick_core
 
 
 def _merge_active_runs(
@@ -225,12 +240,12 @@ def _merge_active_runs(
     max_gap: int,
     min_height: int,
 ) -> list[tuple[int, int]]:
-    rows = np.flatnonzero(active)
-    if not len(rows):
+    indices = np.flatnonzero(active)
+    if not len(indices):
         return []
     result: list[tuple[int, int]] = []
-    start = previous = int(rows[0])
-    for raw in rows[1:]:
+    start = previous = int(indices[0])
+    for raw in indices[1:]:
         current = int(raw)
         if current - previous <= max_gap + 1:
             previous = current
@@ -243,44 +258,78 @@ def _merge_active_runs(
     return result
 
 
+def _index_runs(indices: np.ndarray, *, max_gap: int) -> list[tuple[int, int]]:
+    if not len(indices):
+        return []
+    result: list[tuple[int, int]] = []
+    start = previous = int(indices[0])
+    for raw in indices[1:]:
+        current = int(raw)
+        if current - previous <= max_gap + 1:
+            previous = current
+            continue
+        result.append((start, previous + 1))
+        start = previous = current
+    result.append((start, previous + 1))
+    return result
+
+
 def _line_boxes(
     rgb: np.ndarray,
     config: FormulaDetectionConfig,
 ) -> list[tuple[int, int, int, int]]:
-    """Split a coarse board region into tight horizontal writing bands."""
+    """Split a coarse board region into OCR-sized horizontal writing bands."""
 
     height, width = rgb.shape[:2]
-    if height < config.line_split_min_height_px:
-        return [(0, 0, width, height)]
-
-    mask = _chalk_mask(
-        rgb,
-        large_component_fraction=config.foreground_component_area_fraction,
-    )
-    row_counts = (mask > 0).sum(axis=1)
-    row_threshold = max(3, int(round(width * 0.0045)))
-    active = row_counts >= row_threshold
-    max_gap = max(2, int(round(height * config.line_split_max_gap_fraction)))
+    chalk, _foreground = _stroke_masks(rgb, config)
+    row_counts = (chalk > 0).sum(axis=1)
+    row_threshold = max(4, int(round(width * config.line_split_row_density)))
     bands = _merge_active_runs(
-        active,
-        max_gap=max_gap,
+        row_counts >= row_threshold,
+        max_gap=max(3, int(round(height * config.line_split_max_gap_fraction))),
         min_height=config.line_split_min_band_height_px,
     )
-    if len(bands) <= 1:
-        return [(0, 0, width, height)]
+    if not bands:
+        return []
 
     boxes: list[tuple[int, int, int, int]] = []
     for y0, y1 in bands:
-        band_mask = mask[y0:y1]
-        columns = np.flatnonzero((band_mask > 0).sum(axis=0) >= 1)
-        if not len(columns):
+        band = chalk[y0:y1]
+        column_counts = (band > 0).sum(axis=0)
+        column_threshold = max(
+            2,
+            int(round((y1 - y0) * config.line_split_column_density)),
+        )
+        active_columns = np.flatnonzero(column_counts >= column_threshold)
+        if not len(active_columns):
             continue
-        x0 = int(columns[0])
-        x1 = int(columns[-1]) + 1
-        band_width = x1 - x0
-        band_height = y1 - y0
-        pad_x = int(round(band_width * config.line_split_padding_fraction))
-        pad_y = int(round(band_height * config.line_split_padding_fraction))
+
+        # Ignore narrow border remnants while retaining separated pieces of one expression. This is
+        # deliberately not horizontal connected-component segmentation: large formulas can contain
+        # substantial whitespace, fractions and side conditions.
+        runs = _index_runs(
+            active_columns,
+            max_gap=max(4, int(round((y1 - y0) * 0.04))),
+        )
+        filtered: list[tuple[int, int]] = []
+        edge_margin = width * 0.04
+        narrow_edge = max(20, int(round(width * 0.08)))
+        for left, right in runs:
+            near_edge = left <= edge_margin or right >= width - edge_margin
+            if near_edge and (right - left) < narrow_edge:
+                continue
+            filtered.append((left, right))
+        if not filtered:
+            filtered = runs
+        if not filtered:
+            continue
+
+        x0 = min(left for left, _right in filtered)
+        x1 = max(right for _left, right in filtered)
+        box_width = x1 - x0
+        box_height = y1 - y0
+        pad_x = max(6, int(round(box_width * config.line_split_padding_fraction)))
+        pad_y = max(4, int(round(box_height * config.line_split_padding_fraction)))
         x0 = max(0, x0 - pad_x)
         x1 = min(width, x1 + pad_x)
         y0 = max(0, y0 - pad_y)
@@ -290,7 +339,7 @@ def _line_boxes(
             and y1 - y0 >= config.min_height_px
         ):
             boxes.append((x0, y0, x1, y1))
-    return boxes or [(0, 0, width, height)]
+    return boxes
 
 
 def split_oversized_formula_crops(
@@ -298,7 +347,7 @@ def split_oversized_formula_crops(
     output_dir: Path,
     config: FormulaDetectionConfig,
 ) -> list[DetectedFormulaCrop]:
-    """Turn board-sized MFD detections into OCR-sized chalk-line crops."""
+    """Turn board-sized MFD detections into line-sized crops without deleting dense mathematics."""
 
     if not config.line_split_enabled:
         return crops
@@ -307,10 +356,13 @@ def split_oversized_formula_crops(
     for crop in crops:
         with Image.open(crop.frame.path) as raw:
             image = raw.convert("RGB")
-            rgb = np.asarray(image)
-            boxes = _line_boxes(rgb, config)
-            if len(boxes) == 1 and boxes[0] == (0, 0, image.width, image.height):
+            if image.height < config.line_split_min_height_px:
                 result.append(crop)
+                continue
+            boxes = _line_boxes(np.asarray(image), config)
+            if not boxes:
+                # Fail closed. OCR'ing an unsplittable board-sized MFD region was the source of
+                # hundreds of long false LaTeX candidates.
                 continue
 
             parent_x0, parent_y0, _parent_x1, _parent_y1 = crop.bbox
@@ -381,63 +433,82 @@ def _registered_homography(
     return homography, inlier_ratio
 
 
-def _boxes_from_temporal_seed(
-    current_rgb: np.ndarray,
+def _seed_components(
     seed: np.ndarray,
     config: FormulaDetectionConfig,
-) -> list[tuple[int, int, int, int]]:
-    """Grow newly written seed pixels to their containing chalk line."""
+) -> list[np.ndarray]:
+    """Return coherent local change seeds instead of treating every changed pixel as one proposal."""
 
     cv2 = _cv2()
-    chalk = _chalk_mask(
-        current_rgb,
-        large_component_fraction=config.foreground_component_area_fraction,
-    )
-    height, width = chalk.shape
-    horizontal = max(15, width // 55)
-    vertical = max(3, height // 240)
-    lines = cv2.dilate(
-        chalk,
-        np.ones((vertical, horizontal), dtype=np.uint8),
+    joined = cv2.dilate(
+        seed,
+        np.ones((3, 11), dtype=np.uint8),
         iterations=1,
     )
-    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(lines, 8)
-    boxes: list[tuple[int, int, int, int]] = []
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(joined, 8)
+    result: list[np.ndarray] = []
+    frame_area = seed.shape[0] * seed.shape[1]
     for index in range(1, count):
-        component = labels == index
-        if int(np.logical_and(component, seed > 0).sum()) < config.temporal_min_new_pixels:
+        width = int(stats[index, cv2.CC_STAT_WIDTH])
+        height = int(stats[index, cv2.CC_STAT_HEIGHT])
+        if width * height > frame_area * 0.08:
             continue
-        x = int(stats[index, cv2.CC_STAT_LEFT])
-        y = int(stats[index, cv2.CC_STAT_TOP])
-        w = int(stats[index, cv2.CC_STAT_WIDTH])
-        h = int(stats[index, cv2.CC_STAT_HEIGHT])
-        local = chalk[y : y + h, x : x + w]
-        ys, xs = np.nonzero(local)
-        if not len(xs):
+        component = np.logical_and(labels == index, seed > 0).astype(np.uint8) * 255
+        if int((component > 0).sum()) < config.temporal_min_new_pixels:
             continue
-        x0 = x + int(xs.min())
-        x1 = x + int(xs.max()) + 1
-        y0 = y + int(ys.min())
-        y1 = y + int(ys.max()) + 1
-        pad_x = max(6, int(round((x1 - x0) * config.padding_fraction)))
-        pad_y = max(4, int(round((y1 - y0) * config.padding_fraction)))
-        x0 = max(0, x0 - pad_x)
-        x1 = min(width, x1 + pad_x)
-        y0 = max(0, y0 - pad_y)
-        y1 = min(height, y1 + pad_y)
-        if (
-            x1 - x0 >= config.min_width_px
-            and y1 - y0 >= config.min_height_px
-        ):
-            boxes.append((x0, y0, x1, y1))
+        result.append(component)
+    result.sort(key=lambda item: int((item > 0).sum()), reverse=True)
+    return result[: max(1, 2 * config.temporal_max_crops_per_state)]
 
-    # Keep geometrically distinct regions in reading order.
-    boxes.sort(key=lambda box: (box[1], box[0]))
-    distinct: list[tuple[int, int, int, int]] = []
+
+def _local_formula_box(
+    rgb: np.ndarray,
+    seed: np.ndarray,
+    config: FormulaDetectionConfig,
+) -> tuple[int, int, int, int] | None:
+    """Expand one temporal attention seed to a complete local writing band."""
+
+    ys, xs = np.nonzero(seed)
+    if not len(xs):
+        return None
+    height, width = seed.shape
+    seed_width = int(xs.max() - xs.min() + 1)
+    seed_height = int(ys.max() - ys.min() + 1)
+    margin_x = max(
+        config.temporal_context_min_width_px,
+        int(round(seed_width * config.temporal_context_width_factor)),
+    )
+    margin_y = max(
+        config.temporal_context_min_height_px,
+        int(round(seed_height * config.temporal_context_height_factor)),
+    )
+    roi = (
+        max(0, int(xs.min()) - margin_x),
+        max(0, int(ys.min()) - margin_y),
+        min(width, int(xs.max()) + 1 + margin_x),
+        min(height, int(ys.max()) + 1 + margin_y),
+    )
+    x0, y0, x1, y1 = roi
+    local_rgb = rgb[y0:y1, x0:x1]
+    local_seed = seed[y0:y1, x0:x1]
+    boxes = _line_boxes(local_rgb, config)
+    if not boxes:
+        return None
+
+    best: tuple[int, tuple[int, int, int, int]] | None = None
     for box in boxes:
-        if all(_bbox_iou(box, existing) < 0.65 for existing in distinct):
-            distinct.append(box)
-    return distinct[: config.temporal_max_crops_per_state]
+        bx0, by0, bx1, by1 = box
+        overlap = int((local_seed[by0:by1, bx0:bx1] > 0).sum())
+        if overlap <= 0:
+            continue
+        candidate = (overlap, box)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    if best is None:
+        return None
+
+    bx0, by0, bx1, by1 = best[1]
+    return x0 + bx0, y0 + by0, x0 + bx1, y0 + by1
 
 
 def detect_temporal_formula_crops(
@@ -447,11 +518,12 @@ def detect_temporal_formula_crops(
     *,
     id_prefix: str,
 ) -> list[DetectedFormulaCrop]:
-    """Localize newly written mathematics from registered neighboring board states.
+    """Use temporal change only as attention, then OCR a clean future full-line view.
 
-    A proposal is emitted only when the previous and next board state both belong to the same shot
-    as the current frame. New chalk must be absent in the registered previous state and persist in
-    the registered next state, which rejects most lecturer motion without interpreting OCR output.
+    The previous implementation sent the changed connected component itself to OCR, producing hands,
+    faces and isolated glyphs. Here a coherent new-stroke seed must persist into a later registered
+    state. The crop is materialized from the cleanest future state and expanded to the containing
+    writing band before UniMERNet sees it.
     """
 
     if not config.temporal_proposals_enabled or len(frames) < 3:
@@ -460,86 +532,162 @@ def detect_temporal_formula_crops(
     cv2 = _cv2()
     ordered = sorted(frames, key=lambda item: item.timestamp)
     images: list[np.ndarray] = []
+    stroke_masks: list[tuple[np.ndarray, np.ndarray]] = []
     for frame in ordered:
         with Image.open(frame.path) as raw:
-            images.append(np.asarray(raw.convert("RGB")))
+            rgb = np.asarray(raw.convert("RGB"))
+        images.append(rgb)
+        stroke_masks.append(_stroke_masks(rgb, config))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    result: list[DetectedFormulaCrop] = []
+    proposals: list[DetectedFormulaCrop] = []
     for index in range(1, len(ordered) - 1):
         previous_rgb = images[index - 1]
         current_rgb = images[index]
-        next_rgb = images[index + 1]
-        current_height, current_width = current_rgb.shape[:2]
-
         previous_registration = _registered_homography(previous_rgb, current_rgb, config)
-        next_registration = _registered_homography(next_rgb, current_rgb, config)
-        if previous_registration is None or next_registration is None:
+        if previous_registration is None:
             continue
         previous_h, previous_ratio = previous_registration
-        next_h, next_ratio = next_registration
 
-        previous_mask = _chalk_mask(
-            previous_rgb,
-            large_component_fraction=config.foreground_component_area_fraction,
-        )
-        current_mask = _chalk_mask(
-            current_rgb,
-            large_component_fraction=config.foreground_component_area_fraction,
-        )
-        next_mask = _chalk_mask(
-            next_rgb,
-            large_component_fraction=config.foreground_component_area_fraction,
-        )
+        current_chalk, _current_foreground = stroke_masks[index]
+        current_height, current_width = current_chalk.shape
         previous_warped = cv2.warpPerspective(
-            previous_mask,
+            stroke_masks[index - 1][0],
             previous_h,
             (current_width, current_height),
             flags=cv2.INTER_NEAREST,
         )
-        next_warped = cv2.warpPerspective(
-            next_mask,
-            next_h,
-            (current_width, current_height),
-            flags=cv2.INTER_NEAREST,
+        tolerance = max(1, config.temporal_registration_tolerance_px)
+        previous_warped = cv2.dilate(
+            previous_warped,
+            np.ones((2 * tolerance + 1, 2 * tolerance + 1), dtype=np.uint8),
+            iterations=1,
         )
-        tolerance = np.ones((5, 5), dtype=np.uint8)
-        previous_warped = cv2.dilate(previous_warped, tolerance, iterations=1)
-        next_warped = cv2.dilate(next_warped, tolerance, iterations=1)
-
-        new_seed = np.logical_and(current_mask > 0, previous_warped == 0)
-        persistent = np.logical_and(new_seed, next_warped > 0).astype(np.uint8) * 255
-        persistent = cv2.morphologyEx(
-            persistent,
+        raw_seed = np.logical_and(
+            current_chalk > 0,
+            previous_warped == 0,
+        ).astype(np.uint8) * 255
+        raw_seed = cv2.morphologyEx(
+            raw_seed,
             cv2.MORPH_OPEN,
             np.ones((2, 2), dtype=np.uint8),
         )
-        if int((persistent > 0).sum()) < config.temporal_min_new_pixels:
-            continue
 
-        boxes = _boxes_from_temporal_seed(current_rgb, persistent, config)
-        if not boxes:
-            continue
-
-        confidence = min(previous_ratio, next_ratio)
-        with Image.open(ordered[index].path) as raw:
-            image = raw.convert("RGB")
-            for local_index, box in enumerate(boxes):
-                crop_id = f"{id_prefix}_s{index:02d}_t{local_index:02d}"
-                path = output_dir / f"{crop_id}.jpg"
-                image.crop(box).save(path, quality=97)
-                result.append(
-                    DetectedFormulaCrop(
-                        id=crop_id,
-                        frame=ExtractedFrame(
-                            timestamp=ordered[index].timestamp,
-                            path=path,
-                        ),
-                        bbox=box,
-                        confidence=confidence,
-                    )
+        for component_index, component in enumerate(_seed_components(raw_seed, config)):
+            best: tuple[
+                float,
+                int,
+                np.ndarray,
+                tuple[int, int, int, int],
+                float,
+            ] | None = None
+            max_future = min(
+                len(ordered) - 1,
+                index + config.temporal_lookahead_states,
+            )
+            # Require at least one later frame. This is what turns "motion now" into persistent
+            # writing rather than a hand/face crop.
+            for future_index in range(index + 1, max_future + 1):
+                registration = _registered_homography(
+                    current_rgb,
+                    images[future_index],
+                    config,
                 )
-    return result
+                if registration is None:
+                    # A real shot cut ends the temporal track.
+                    break
+                homography, future_ratio = registration
+                future_height, future_width = stroke_masks[future_index][0].shape
+                future_seed = cv2.warpPerspective(
+                    component,
+                    homography,
+                    (future_width, future_height),
+                    flags=cv2.INTER_NEAREST,
+                )
+                seed_pixels = int((future_seed > 0).sum())
+                if seed_pixels <= 0:
+                    continue
+
+                future_chalk, future_foreground = stroke_masks[future_index]
+                chalk_nearby = cv2.dilate(
+                    future_chalk,
+                    np.ones((7, 7), dtype=np.uint8),
+                    iterations=1,
+                )
+                persistent_pixels = int(
+                    np.logical_and(future_seed > 0, chalk_nearby > 0).sum()
+                )
+                persistence = persistent_pixels / max(1, seed_pixels)
+                if persistence < config.temporal_min_persistence_ratio:
+                    continue
+
+                box = _local_formula_box(
+                    images[future_index],
+                    future_seed,
+                    config,
+                )
+                if box is None:
+                    continue
+                x0, y0, x1, y1 = box
+                foreground_fraction = float(
+                    (future_foreground[y0:y1, x0:x1] > 0).mean()
+                )
+                # Prefer a clean later view; persistence and registration quality break ties.
+                score = (
+                    1.0
+                    - min(1.0, foreground_fraction)
+                    + 0.20 * persistence
+                    + 0.10 * future_ratio
+                    + 0.01 * (future_index - index)
+                )
+                candidate = (
+                    score,
+                    future_index,
+                    future_seed,
+                    box,
+                    min(previous_ratio, future_ratio),
+                )
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
+
+            if best is None:
+                continue
+            _score, future_index, _future_seed, box, registration_confidence = best
+            crop_id = f"{id_prefix}_s{index:02d}_t{component_index:02d}"
+            path = output_dir / f"{crop_id}.jpg"
+            with Image.open(ordered[future_index].path) as raw:
+                raw.convert("RGB").crop(box).save(path, quality=97)
+            proposals.append(
+                DetectedFormulaCrop(
+                    id=crop_id,
+                    frame=ExtractedFrame(
+                        timestamp=ordered[future_index].timestamp,
+                        path=path,
+                    ),
+                    bbox=box,
+                    # Proposal confidence is intentionally below a good MFD detection. It measures
+                    # geometric support, not OCR correctness.
+                    confidence=min(0.60, 0.55 * registration_confidence),
+                )
+            )
+
+    # Deduplicate temporal attention seeds that expanded to the same clean formula line.
+    distinct: list[DetectedFormulaCrop] = []
+    for crop in sorted(
+        proposals,
+        key=lambda item: (-item.confidence, item.frame.timestamp, item.bbox[1], item.bbox[0]),
+    ):
+        if any(
+            abs(existing.frame.timestamp - crop.frame.timestamp) < 1e-3
+            and _bbox_iou(existing.bbox, crop.bbox) >= 0.55
+            for existing in distinct
+        ):
+            continue
+        distinct.append(crop)
+    return sorted(
+        distinct,
+        key=lambda item: (item.frame.timestamp, item.bbox[1], item.bbox[0]),
+    )[: config.temporal_max_crops_per_state * max(1, len(ordered) - 2)]
 
 
 def _bbox_iou(

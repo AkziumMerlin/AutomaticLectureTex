@@ -132,8 +132,21 @@ vision:
     temporal_proposals_enabled: true
     temporal_min_inlier_ratio: 0.40
     temporal_min_good_matches: 18
-    temporal_max_crops_per_state: 4
+    temporal_max_crops_per_state: 2
     temporal_min_new_pixels: 24
+    temporal_registration_tolerance_px: 6
+    temporal_lookahead_states: 3
+    temporal_min_persistence_ratio: 0.65
+    temporal_context_min_width_px: 180
+    temporal_context_min_height_px: 90
+    temporal_context_width_factor: 4.0
+    temporal_context_height_factor: 2.5
+
+    # Suppress thick foreground cores (lecturer, hand, board frame) while keeping dense chalk
+    # formulas intact. Do not classify foreground by connected-component area.
+    stroke_foreground_core_radius_px: 8.0
+    stroke_foreground_core_dilate_px: 9
+    stroke_border_fraction: 0.012
 
     # PDF-oriented MFD boxes can span most of a chalkboard. Split tall coarse boxes into
     # line-sized regions before UniMERNet instead of OCR'ing the whole board region.
@@ -141,8 +154,9 @@ vision:
     line_split_min_height_px: 180
     line_split_min_band_height_px: 12
     line_split_max_gap_fraction: 0.035
+    line_split_row_density: 0.006
+    line_split_column_density: 0.03
     line_split_padding_fraction: 0.10
-    foreground_component_area_fraction: 0.018
 
   math_ocr:
     # UniMERNet supplies glyph-level hypotheses for MFD crops; the VLM still sees the pixels.

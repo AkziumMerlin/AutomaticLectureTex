@@ -116,6 +116,22 @@ def _board_scan_images(
                 + (f"timestamp={last_ts:.3f}s" if last_ts is not None else "timestamp=unknown"),
             )
 
+        # Formula crops are supporting evidence, not a replacement for board context. Reserve at
+        # least one intermediate board state before spending the five-image budget on OCR details.
+        if len(board_frames) > 2 and len(images) < limit:
+            middle = board_frames[len(board_frames) // 2]
+            middle_path, middle_ts, middle_index = middle
+            append(
+                middle_path,
+                f"intermediate_board_state request_id={item.request_id}, "
+                f"frame_index={middle_index}, "
+                + (
+                    f"timestamp={middle_ts:.3f}s"
+                    if middle_ts is not None
+                    else "timestamp=unknown"
+                ),
+            )
+
         if item.formula_contact_sheet_path:
             crop_ids = ",".join(crop.id for crop in item.formula_crops)
             append(
@@ -137,7 +153,7 @@ def _board_scan_images(
             if len(images) >= limit:
                 break
 
-        # Fill any spare slots with intermediate board states for temporal context.
+        # Fill any spare slots with the remaining intermediate board states.
         for path, timestamp, index in board_frames[1:-1]:
             append(
                 path,
@@ -292,10 +308,11 @@ the actual pixels when reconstructing notation, equations, theorem statements, d
 Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`), detected
 `formula_crops`, and independent `math_ocr_candidates`. Those text channels are FALLIBLE SENSOR
 HYPOTHESES, not ground truth. A UniMERNet candidate tied to a formula `source_id` is a specialized
-glyph-level transcription hypothesis: give it more weight than phonetic ASR for exact operators,
-indices, roots and variable names, but verify it against the ATTACHED crop pixels before accepting
-it. The crop image remains the direct sensor source. ASR is primarily phonetic evidence and standard
-mathematics is only a final disambiguation prior, never a license to complete missing content.
+glyph-level transcription hypothesis. Use it to help read operators, indices, roots and variable
+names, but verify it against the ATTACHED crop pixels before accepting it. The crop image remains
+the direct sensor source; the OCR string is never authoritative by itself. ASR is primarily phonetic
+evidence and standard mathematics is only a final disambiguation prior, never a license to complete
+missing content.
 
 Compare the actual board/full-state images, the corresponding formula crops, OCR channels,
 established notation, neighboring equations, and local mathematical consistency. If exact

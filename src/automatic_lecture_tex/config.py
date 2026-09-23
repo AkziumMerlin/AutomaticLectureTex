@@ -141,8 +141,21 @@ class FormulaDetectionConfig(BaseModel):
     temporal_proposals_enabled: bool = False
     temporal_min_inlier_ratio: float = Field(default=0.40, ge=0.0, le=1.0)
     temporal_min_good_matches: int = Field(default=18, ge=4, le=500)
-    temporal_max_crops_per_state: int = Field(default=4, ge=1, le=16)
+    temporal_max_crops_per_state: int = Field(default=2, ge=1, le=16)
     temporal_min_new_pixels: int = Field(default=24, ge=1, le=10000)
+    temporal_registration_tolerance_px: int = Field(default=6, ge=1, le=32)
+    temporal_lookahead_states: int = Field(default=3, ge=1, le=8)
+    temporal_min_persistence_ratio: float = Field(default=0.65, ge=0.0, le=1.0)
+    temporal_context_min_width_px: int = Field(default=180, ge=16, le=2048)
+    temporal_context_min_height_px: int = Field(default=90, ge=16, le=1024)
+    temporal_context_width_factor: float = Field(default=4.0, ge=0.5, le=20.0)
+    temporal_context_height_factor: float = Field(default=2.5, ge=0.5, le=20.0)
+
+    # Chalk is identified by thin-stroke geometry. Thick image regions are treated as foreground
+    # cores instead of deleting whole connected components, which can otherwise erase dense math.
+    stroke_foreground_core_radius_px: float = Field(default=8.0, ge=1.0, le=32.0)
+    stroke_foreground_core_dilate_px: int = Field(default=9, ge=0, le=64)
+    stroke_border_fraction: float = Field(default=0.012, ge=0.0, le=0.10)
 
     # PDF-trained MFD often returns a whole board region. Split tall coarse regions into
     # chalk-line-sized OCR crops before UniMERNet.
@@ -150,7 +163,12 @@ class FormulaDetectionConfig(BaseModel):
     line_split_min_height_px: int = Field(default=180, ge=32, le=2048)
     line_split_min_band_height_px: int = Field(default=12, ge=2, le=512)
     line_split_max_gap_fraction: float = Field(default=0.035, ge=0.0, le=0.25)
+    line_split_row_density: float = Field(default=0.006, ge=0.0005, le=0.20)
+    line_split_column_density: float = Field(default=0.03, ge=0.001, le=0.50)
     line_split_padding_fraction: float = Field(default=0.10, ge=0.0, le=0.50)
+
+    # Kept only for backward-compatible config parsing. Dense-math suppression no longer uses
+    # connected-component area.
     foreground_component_area_fraction: float = Field(default=0.018, ge=0.001, le=0.25)
 
 
