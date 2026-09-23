@@ -373,3 +373,66 @@ def test_generated_observation_schema_has_no_canonical_id():
 
     assert "id" not in properties
     assert "target_local_index" in properties
+
+
+class _LocalTargetLLM:
+    def _structured(self, prompt, schema, *, operation, max_tokens=None, **kwargs):
+        del prompt, max_tokens, kwargs
+        assert operation == "knowledge_extract"
+        return schema.model_validate(
+            {
+                "observations": [
+                    {
+                        "kind": "claim",
+                        "text": "Первое утверждение.",
+                        "confidence": 0.9,
+                        "source_status": "observed",
+                        "source_segment_ids": ["seg_001"],
+                    },
+                    {
+                        "kind": "correction",
+                        "text": "Исправление первого утверждения.",
+                        "target_local_index": 0,
+                        "confidence": 0.9,
+                        "source_status": "observed",
+                        "source_segment_ids": ["seg_002"],
+                    },
+                ],
+                "unresolved": [],
+            }
+        )
+
+
+def test_same_response_target_is_resolved_to_host_owned_id():
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[
+            TranscriptSegment(id="seg_001", start=0.0, end=1.0, text="first"),
+            TranscriptSegment(id="seg_002", start=1.0, end=2.0, text="correction"),
+        ],
+    )
+    chunk = LectureChunk(
+        id="window_0001",
+        start=0.0,
+        end=2.0,
+        segment_ids=["seg_001", "seg_002"],
+        text="first correction",
+    )
+    orchestrator = IntegrityKnowledgeOrchestrator(
+        _LocalTargetLLM(),
+        NotesConfig(),
+        "ru",
+        transcript=transcript,
+    )
+
+    result = orchestrator.extract_observations(
+        chunk,
+        [],
+        LectureKnowledgeBase(lecture_id="lecture", title="Lecture"),
+    )
+
+    assert [item.id for item in result.observations] == [
+        "obs_window_0001_000",
+        "obs_window_0001_001",
+    ]
+    assert result.observations[1].target_observation_id == "obs_window_0001_000"
