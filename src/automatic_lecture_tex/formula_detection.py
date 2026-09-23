@@ -449,8 +449,6 @@ def _seed_components(
     result: list[np.ndarray] = []
     frame_area = seed.shape[0] * seed.shape[1]
     for index in range(1, count):
-        x = int(stats[index, cv2.CC_STAT_LEFT])
-        y = int(stats[index, cv2.CC_STAT_TOP])
         width = int(stats[index, cv2.CC_STAT_WIDTH])
         height = int(stats[index, cv2.CC_STAT_HEIGHT])
         if width * height > frame_area * 0.08:
