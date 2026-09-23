@@ -5,9 +5,11 @@ import logging
 
 from pydantic import ValidationError
 
+from .episode_graph import apply_episode_tracking
 from .knowledge_integrity import IntegrityKnowledgeOrchestrator
 from .llm import StructuredTaskTooLargeError
 from .schemas import (
+    EpisodeTrackingUpdate,
     LectureChunk,
     LectureKnowledgeBase,
     TranscriptSegment,
@@ -42,6 +44,80 @@ class ResilientIntegrityKnowledgeOrchestrator(IntegrityKnowledgeOrchestrator):
             parent_window_id=chunk.id,
             allow_visual_compaction=True,
         )
+
+    def track_episodes(
+        self,
+        kb: LectureKnowledgeBase,
+        batch: WindowObservations,
+        added_observation_ids: list[str],
+    ) -> EpisodeTrackingUpdate:
+        return self._track_episodes_resilient(kb, batch, added_observation_ids)
+
+    def _track_episodes_resilient(
+        self,
+        kb: LectureKnowledgeBase,
+        batch: WindowObservations,
+        added_observation_ids: list[str],
+    ) -> EpisodeTrackingUpdate:
+        try:
+            return super().track_episodes(kb, batch, added_observation_ids)
+        except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
+            if len(added_observation_ids) <= 1:
+                observation_id = (
+                    added_observation_ids[0] if added_observation_ids else "<none>"
+                )
+                logger.warning(
+                    "[%s] episode tracking leaf unresolved for %s: %s",
+                    batch.window_id,
+                    observation_id,
+                    exc,
+                )
+                return EpisodeTrackingUpdate(
+                    unresolved=[
+                        "Episode tracking failed for indivisible canonical observation "
+                        f"{observation_id}: {type(exc).__name__}: {exc}"
+                    ]
+                )
+
+            midpoint = len(added_observation_ids) // 2
+            left_ids = added_observation_ids[:midpoint]
+            right_ids = added_observation_ids[midpoint:]
+            logger.warning(
+                "[%s] episode tracking task too large/invalid; splitting %d observations "
+                "into %d + %d",
+                batch.window_id,
+                len(added_observation_ids),
+                len(left_ids),
+                len(right_ids),
+            )
+
+            # Track the right half against a shadow state containing the left-half structural
+            # decisions. The real KB is mutated only once by the caller with the merged update.
+            shadow = kb.model_copy(deep=True)
+            left = self._track_episodes_resilient(shadow, batch, left_ids)
+            apply_episode_tracking(
+                shadow,
+                left,
+                left_ids,
+                window_id=batch.window_id,
+            )
+            right = self._track_episodes_resilient(shadow, batch, right_ids)
+
+            return EpisodeTrackingUpdate(
+                boundaries=[*left.boundaries, *right.boundaries],
+                close_after_observation_ids=list(
+                    dict.fromkeys(
+                        [
+                            *left.close_after_observation_ids,
+                            *right.close_after_observation_ids,
+                        ]
+                    )
+                ),
+                symbols=[*left.symbols, *right.symbols],
+                unresolved=list(
+                    dict.fromkeys([*left.unresolved, *right.unresolved])
+                ),
+            )
 
     def _extract_resilient(
         self,
