@@ -278,7 +278,7 @@ class _FakeMathOCR:
         )
 
 
-def test_board_scan_runs_specialized_latex_ocr_without_extra_vlm_call(tmp_path, monkeypatch):
+def test_board_scan_does_not_run_specialized_ocr_without_formula_regions(tmp_path, monkeypatch):
     llm = _FakeLLM()
     ocr = _FakeMathOCR()
     monkeypatch.setattr(sensory_evidence_module, "_math_ocr_backend", lambda _pipeline: ocr)
@@ -329,17 +329,8 @@ def test_board_scan_runs_specialized_latex_ocr_without_extra_vlm_call(tmp_path, 
     )
 
     assert llm.calls == []
-    assert len(ocr.calls) == 3
-    assert [item.timestamp for item in evidence[0].math_ocr_candidates] == [
-        18.0,
-        90.0,
-        162.0,
-    ]
-    assert [item.text for item in evidence[0].math_ocr_candidates] == [
-        "x_{1}=1",
-        "x_{2}=1",
-        "x_{3}=1",
-    ]
+    assert ocr.calls == []
+    assert evidence[0].math_ocr_candidates == []
 
 
 class _FakeFormulaDetector:
