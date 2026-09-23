@@ -39,6 +39,7 @@ class _ExtractionLLM:
             {
                 "observations": [
                     {
+                        "id": "model_should_not_own_this",
                         "kind": "definition",
                         "text": "Определяется комплексный линейный функционал.",
                         "latex": r"f:X\to\mathbb{C}",
@@ -103,6 +104,7 @@ def test_observation_times_are_derived_from_asr_segment_ids():
     assert result.observations[0].start == pytest.approx(236.46)
     assert result.observations[0].end == pytest.approx(247.04)
     assert result.observations[0].evidence_refs == ["seg_002"]
+    assert result.observations[0].id == "obs_window_0000_000"
 
 
 def _episode_evidence(count: int) -> dict:
@@ -364,3 +366,10 @@ def test_structured_retry_halves_first_overflow_instead_of_using_reported_lower_
     assert result.value == 7
     assert fake_completions.max_tokens_seen == [4096, 2048]
 
+
+
+def test_generated_observation_schema_has_no_canonical_id():
+    properties = GeneratedLectureObservation.model_json_schema()["properties"]
+
+    assert "id" not in properties
+    assert "target_local_index" in properties
