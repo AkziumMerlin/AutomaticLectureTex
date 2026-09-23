@@ -100,6 +100,10 @@ def test_structured_failure_splits_window_and_preserves_parent_window_identity()
     ]
     assert all(item.window_id == "window_0000" for item in result.observations)
     assert all(item.window_ids == ["window_0000"] for item in result.observations)
+    assert [item.id for item in result.observations] == [
+        "obs_window_0000_000",
+        "obs_window_0000_001",
+    ]
 
 
 def test_indivisible_structured_failure_becomes_unresolved_instead_of_raising():
