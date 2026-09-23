@@ -470,3 +470,39 @@ def test_state_section_writer_splits_episode_batch_after_structured_json_failure
         ["episode_1"],
     ]
     assert result.unresolved == ["wrote:episode_0", "wrote:episode_1"]
+
+
+def test_load_config_preserves_unimernet_venv_python_symlink(tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    worker_bin = tmp_path / "models" / "formula" / "unimernet-env" / "bin"
+    worker_bin.mkdir(parents=True)
+    base_python = tmp_path / "base-python"
+    base_python.write_text("", encoding="utf-8")
+    worker_python = worker_bin / "python"
+    worker_python.symlink_to(base_python)
+
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        """
+course:
+  id: test
+  title: Test
+  lectures:
+    - id: lecture
+      source:
+        type: youtube
+        url: https://example.com/video
+vision:
+  math_ocr:
+    backend: unimernet
+    unimernet_config_path: ../models/formula/unimernet_small/model.yaml
+    unimernet_python_path: ../models/formula/unimernet-env/bin/python
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.vision.math_ocr.unimernet_python_path == worker_python.absolute()
+    assert config.vision.math_ocr.unimernet_python_path != base_python.resolve()
