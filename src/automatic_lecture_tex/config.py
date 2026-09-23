@@ -136,6 +136,23 @@ class FormulaDetectionConfig(BaseModel):
     normalize_dark_board: bool = True
     dark_board_threshold: int = Field(default=128, ge=0, le=255)
 
+    # Board-video-specific proposal refinement. MFD remains a coarse proposal source; temporal
+    # proposals localize newly written chalk after shot-continuity/homography checks.
+    temporal_proposals_enabled: bool = False
+    temporal_min_inlier_ratio: float = Field(default=0.40, ge=0.0, le=1.0)
+    temporal_min_good_matches: int = Field(default=18, ge=4, le=500)
+    temporal_max_crops_per_state: int = Field(default=4, ge=1, le=16)
+    temporal_min_new_pixels: int = Field(default=24, ge=1, le=10000)
+
+    # PDF-trained MFD often returns a whole board region. Split tall coarse regions into
+    # chalk-line-sized OCR crops before UniMERNet.
+    line_split_enabled: bool = True
+    line_split_min_height_px: int = Field(default=180, ge=32, le=2048)
+    line_split_min_band_height_px: int = Field(default=12, ge=2, le=512)
+    line_split_max_gap_fraction: float = Field(default=0.035, ge=0.0, le=0.25)
+    line_split_padding_fraction: float = Field(default=0.10, ge=0.0, le=0.50)
+    foreground_component_area_fraction: float = Field(default=0.018, ge=0.001, le=0.25)
+
 
 class MathOCRConfig(BaseModel):
     backend: Literal["none", "mathpix", "unimernet", "latexocr"] = "none"
