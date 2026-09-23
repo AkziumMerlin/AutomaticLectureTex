@@ -12,6 +12,7 @@ from .schemas import (
     EpisodeTrackingUpdate,
     LectureChunk,
     LectureKnowledgeBase,
+    LectureObservation,
     TranscriptSegment,
     VisualEvidence,
     WindowObservations,
