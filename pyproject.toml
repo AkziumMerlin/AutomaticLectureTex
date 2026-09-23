@@ -30,6 +30,7 @@ formula-vision = [
   "torchvision>=0.25,<0.26",
   "ultralytics>=8.3,<9",
   "huggingface-hub>=0.35,<1",
+  "opencv-python>=4.10,<5",
 ]
 latexocr = [
   "torch>=2.10,<2.11",
@@ -37,7 +38,7 @@ latexocr = [
   "pix2tex==0.1.4",
 ]
 review = ["pymupdf>=1.25"]
-dev = ["pytest>=8.3", "ruff>=0.9"]
+dev = ["pytest>=8.3", "ruff>=0.9", "opencv-python>=4.10,<5"]
 all = [
   "qwen-asr>=0.0.6,<0.1",
   "faster-whisper>=1.1.0",

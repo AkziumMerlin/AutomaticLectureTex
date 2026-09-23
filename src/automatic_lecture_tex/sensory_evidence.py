@@ -11,7 +11,10 @@ from .board_crop import generate_board_crops
 from .formula_detection import (
     DetectedFormulaCrop,
     build_formula_contact_sheet,
+    detect_temporal_formula_crops,
     make_formula_detector,
+    merge_formula_crops,
+    split_oversized_formula_crops,
 )
 from .frame_selection import select_board_state_frames, select_least_occluded_frame
 from .math_ocr import make_math_ocr_backend
@@ -383,7 +386,6 @@ def collect_visual_evidence(
         board_views: list[ExtractedFrame] = []
         formula_crops: list[DetectedFormulaCrop] = []
         formula_contact_sheet: Path | None = None
-        fallback_ocr_frames: list[ExtractedFrame] = []
 
         if is_chunk_board_scan:
             display_frames: list[ExtractedFrame] = []
@@ -399,7 +401,6 @@ def collect_visual_evidence(
                         if crop_result is not None and crop_result.frames:
                             selected = crop_result.frames[0]
                             board_views.append(selected)
-                            fallback_ocr_frames.extend(crop_result.frames[1:])
                     except Exception as exc:
                         logger.warning(
                             "[%s] board auto-crop failed for %s state %d; using raw frame: %s",
@@ -412,13 +413,18 @@ def collect_visual_evidence(
                 display_frames.append(selected)
                 if formula_detector is not None:
                     try:
-                        formula_crops.extend(
-                            formula_detector.detect(
-                                selected,
-                                frame_dir / "formula_crops" / f"state_{index:02d}",
-                                id_prefix=f"{request.id}_s{index:02d}",
-                            )
+                        state_dir = frame_dir / "formula_crops" / f"state_{index:02d}"
+                        detected = formula_detector.detect(
+                            selected,
+                            state_dir,
+                            id_prefix=f"{request.id}_s{index:02d}",
                         )
+                        detected = split_oversized_formula_crops(
+                            detected,
+                            state_dir / "line_crops",
+                            pipeline.config.vision.formula_detection,
+                        )
+                        formula_crops.extend(detected)
                     except Exception as exc:
                         logger.warning(
                             "[%s] formula detection failed for %s state %d: %s",
@@ -428,6 +434,28 @@ def collect_visual_evidence(
                             exc,
                         )
 
+            if (
+                formula_detector is not None
+                and pipeline.config.vision.formula_detection.temporal_proposals_enabled
+                and len(display_frames) >= 3
+            ):
+                try:
+                    temporal_crops = detect_temporal_formula_crops(
+                        display_frames,
+                        frame_dir / "formula_crops" / "temporal",
+                        pipeline.config.vision.formula_detection,
+                        id_prefix=request.id,
+                    )
+                    formula_crops.extend(temporal_crops)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] temporal formula proposal extraction failed for %s: %s",
+                        lecture.id,
+                        request.id,
+                        exc,
+                    )
+
+            formula_crops = merge_formula_crops(formula_crops)
             display_frames = display_frames[: pipeline.config.vision.board_crop_max_vlm_images]
             if display_frames:
                 ocr_image = display_frames[0].path
@@ -477,29 +505,19 @@ def collect_visual_evidence(
                 is_chunk_board_scan
                 and pipeline.config.vision.math_ocr.board_scan_enabled
             ):
-                if formula_crops:
-                    selected_crops = _select_diverse_formula_crops(
-                        formula_crops,
-                        limit=pipeline.config.vision.math_ocr.board_scan_max_images,
-                    )
-                    ocr_inputs = [(item.id, item.frame) for item in selected_crops]
-                else:
-                    fallback = fallback_ocr_frames or display_frames
-                    selected_frames = _subsample_ocr_frames(
-                        fallback,
-                        limit=pipeline.config.vision.math_ocr.board_scan_max_images,
-                    )
-                    ocr_inputs = [
-                        (f"{request.id}_fallback_{index:02d}", frame)
-                        for index, frame in enumerate(selected_frames)
-                    ]
-                candidates = _run_math_ocr(
-                    ocr_backend,
-                    ocr_inputs,
-                    min_confidence=pipeline.config.vision.math_ocr.min_confidence,
-                    lecture_id=lecture.id,
-                    request_id=request.id,
+                selected_crops = _select_diverse_formula_crops(
+                    formula_crops,
+                    limit=pipeline.config.vision.math_ocr.board_scan_max_images,
                 )
+                ocr_inputs = [(item.id, item.frame) for item in selected_crops]
+                if ocr_inputs:
+                    candidates = _run_math_ocr(
+                        ocr_backend,
+                        ocr_inputs,
+                        min_confidence=pipeline.config.vision.math_ocr.min_confidence,
+                        lecture_id=lecture.id,
+                        request_id=request.id,
+                    )
             elif not is_chunk_board_scan and ocr_image is not None:
                 candidates = _run_math_ocr(
                     ocr_backend,

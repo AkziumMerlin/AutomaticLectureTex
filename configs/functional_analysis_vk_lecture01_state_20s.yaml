@@ -127,6 +127,23 @@ vision:
     contact_sheet_enabled: true
     contact_sheet_columns: 2
 
+    # Board-video refinement: register neighboring board states, reject camera cuts, use persistent
+    # newly written chalk as a seed, and expand it to the containing mathematical line.
+    temporal_proposals_enabled: true
+    temporal_min_inlier_ratio: 0.40
+    temporal_min_good_matches: 18
+    temporal_max_crops_per_state: 4
+    temporal_min_new_pixels: 24
+
+    # PDF-oriented MFD boxes can span most of a chalkboard. Split tall coarse boxes into
+    # line-sized regions before UniMERNet instead of OCR'ing the whole board region.
+    line_split_enabled: true
+    line_split_min_height_px: 180
+    line_split_min_band_height_px: 12
+    line_split_max_gap_fraction: 0.035
+    line_split_padding_fraction: 0.10
+    foreground_component_area_fraction: 0.018
+
   math_ocr:
     # UniMERNet supplies glyph-level hypotheses for MFD crops; the VLM still sees the pixels.
     backend: unimernet

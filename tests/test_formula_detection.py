@@ -3,13 +3,16 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageDraw
 
 from automatic_lecture_tex.config import FormulaDetectionConfig
 from automatic_lecture_tex.formula_detection import (
     DetectedFormulaCrop,
     FormulaDetector,
     build_formula_contact_sheet,
+    detect_temporal_formula_crops,
+    split_oversized_formula_crops,
 )
 from automatic_lecture_tex.schemas import ExtractedFrame
 
@@ -117,3 +120,95 @@ def test_formula_contact_sheet_preserves_crop_ids(tmp_path):
     with Image.open(output) as sheet:
         assert sheet.width > 1000
         assert sheet.height > 500
+
+
+
+def test_oversized_mfd_crop_is_split_into_chalk_lines(tmp_path):
+    image_path = tmp_path / "coarse.jpg"
+    image = Image.new("RGB", (640, 360), (35, 88, 58))
+    draw = ImageDraw.Draw(image)
+    # Two mathematical lines.
+    for x in range(180, 560, 28):
+        draw.rectangle((x, 75, x + 14, 84), fill=(235, 235, 220))
+    for x in range(205, 600, 24):
+        draw.rectangle((x, 238, x + 12, 248), fill=(238, 238, 225))
+    # Large bright foreground object, representing the lecturer, should be removed before row split.
+    draw.rectangle((10, 35, 140, 335), fill=(190, 160, 135))
+    image.save(image_path)
+
+    crop = DetectedFormulaCrop(
+        id="coarse",
+        frame=ExtractedFrame(timestamp=1.0, path=image_path),
+        bbox=(100, 50, 740, 410),
+        confidence=0.8,
+    )
+    config = FormulaDetectionConfig(
+        line_split_enabled=True,
+        line_split_min_height_px=120,
+        line_split_min_band_height_px=5,
+        foreground_component_area_fraction=0.015,
+        min_width_px=20,
+        min_height_px=5,
+    )
+
+    refined = split_oversized_formula_crops(
+        [crop],
+        tmp_path / "refined",
+        config,
+    )
+
+    assert len(refined) == 2
+    assert all(item.frame.path.is_file() for item in refined)
+    assert all(item.id.startswith("coarse_l") for item in refined)
+    assert refined[0].bbox[1] < refined[1].bbox[1]
+
+
+def test_temporal_proposal_requires_persistent_new_writing(tmp_path, monkeypatch):
+    import automatic_lecture_tex.formula_detection as module
+
+    paths = []
+    for index in range(3):
+        path = tmp_path / f"state_{index}.png"
+        image = Image.new("RGB", (640, 320), (35, 88, 58))
+        draw = ImageDraw.Draw(image)
+        # Fixed board landmarks/writing.
+        for x in range(80, 560, 45):
+            draw.rectangle((x, 55, x + 10, 64), fill=(235, 235, 220))
+        # New line appears at current state and persists into the next state.
+        if index >= 1:
+            for x in range(220, 520, 25):
+                draw.rectangle((x, 205, x + 12, 214), fill=(240, 240, 225))
+        image.save(path)
+        paths.append(path)
+
+    monkeypatch.setattr(
+        module,
+        "_registered_homography",
+        lambda _source, _target, _config: (np.eye(3, dtype=np.float32), 0.9),
+    )
+    config = FormulaDetectionConfig(
+        temporal_proposals_enabled=True,
+        temporal_min_new_pixels=8,
+        temporal_max_crops_per_state=3,
+        foreground_component_area_fraction=0.02,
+        min_width_px=20,
+        min_height_px=5,
+    )
+    frames = [
+        ExtractedFrame(timestamp=float(index), path=path)
+        for index, path in enumerate(paths)
+    ]
+
+    crops = detect_temporal_formula_crops(
+        frames,
+        tmp_path / "temporal",
+        config,
+        id_prefix="window",
+    )
+
+    assert len(crops) == 1
+    assert crops[0].frame.timestamp == 1.0
+    x0, y0, x1, y1 = crops[0].bbox
+    assert y0 < 205 < y1
+    assert x0 < 300 < x1
+    assert crops[0].frame.path.is_file()
