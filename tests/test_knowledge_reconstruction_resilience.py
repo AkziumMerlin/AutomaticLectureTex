@@ -144,7 +144,9 @@ class _TrackingSplitLLM:
         assert operation == "episode_track"
         assert split_oversized_task is True
         self.calls.append(prompt)
-        if "obs_a" in prompt and "obs_b" in prompt:
+        current = prompt.split("New canonical observations from ", 1)[1]
+        current = current.split("\n\nActive symbols:", 1)[0]
+        if "obs_a" in current and "obs_b" in current:
             raise StructuredTaskTooLargeError("too large")
         return schema.model_validate({})
 
