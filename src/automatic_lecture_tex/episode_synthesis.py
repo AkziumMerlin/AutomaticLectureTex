@@ -4,7 +4,10 @@ import json
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from .generated_notes import GeneratedChunkNotes
+from .llm import StructuredTaskTooLargeError
 from .schemas import (
     ChunkNotes,
     ClaimStatus,
@@ -363,6 +366,7 @@ Rules:
         GeneratedChunkNotes,
         operation="episode_write",
         max_tokens=4096,
+        split_oversized_task=True,
     )
     notes = generated.to_chunk_notes()
     batch = evidence["batch"]
@@ -430,6 +434,7 @@ outer section/theorem/proof/definition wrappers are not. Write reasons in langua
         MathAudit,
         operation="episode_validation",
         max_tokens=2048,
+        split_oversized_task=True,
     )
 
 
