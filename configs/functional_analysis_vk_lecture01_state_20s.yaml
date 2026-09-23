@@ -144,7 +144,7 @@ vision:
 
     # Suppress thick foreground cores (lecturer, hand, board frame) while keeping dense chalk
     # formulas intact. Do not classify foreground by connected-component area.
-    stroke_foreground_core_radius_px: 5.5
+    stroke_foreground_core_radius_px: 8.0
     stroke_foreground_core_dilate_px: 9
     stroke_border_fraction: 0.012
 
