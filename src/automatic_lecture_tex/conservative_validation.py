@@ -64,6 +64,7 @@ specific error. Write reasons in language code `{orchestrator.output_language}`.
         ConservativeAudit,
         operation="episode_validation",
         max_tokens=2048,
+        split_oversized_task=True,
     )
     return MathAudit(
         corrections=[
