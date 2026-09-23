@@ -111,11 +111,17 @@ def test_unimernet_uses_persistent_isolated_worker(tmp_path, monkeypatch):
     process = _FakeWorkerProcess()
     captured = {}
 
+    def fake_run(args, **kwargs):
+        captured["preflight_args"] = args
+        captured["preflight_kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="/tmp/unimernet/__init__.py\n", stderr="")
+
     def fake_popen(args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
         return process
 
+    monkeypatch.setattr(math_ocr_module.subprocess, "run", fake_run)
     monkeypatch.setattr(math_ocr_module.subprocess, "Popen", fake_popen)
 
     backend = UniMERNetBackend(
@@ -131,6 +137,8 @@ def test_unimernet_uses_persistent_isolated_worker(tmp_path, monkeypatch):
     assert candidate is not None
     assert candidate.backend == "unimernet"
     assert candidate.text == r"\frac{x}{y}"
+    assert str(python_path) == captured["preflight_args"][0]
+    assert "import pathlib, sys, unimernet, unimernet.tasks" in captured["preflight_args"][2]
     assert str(python_path) == captured["args"][0]
     assert "--config" in captured["args"]
     assert any('"image"' in item for item in process.stdin.writes)
