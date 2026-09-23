@@ -30,6 +30,7 @@ formula-vision = [
   "torchvision>=0.25,<0.26",
   "ultralytics>=8.3,<9",
   "huggingface-hub>=0.35,<1",
+  "opencv-python>=4.10,<5",
 ]
 latexocr = [
   "torch>=2.10,<2.11",
