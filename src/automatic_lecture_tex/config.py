@@ -153,7 +153,7 @@ class FormulaDetectionConfig(BaseModel):
 
     # Chalk is identified by thin-stroke geometry. Thick image regions are treated as foreground
     # cores instead of deleting whole connected components, which can otherwise erase dense math.
-    stroke_foreground_core_radius_px: float = Field(default=5.5, ge=1.0, le=32.0)
+    stroke_foreground_core_radius_px: float = Field(default=8.0, ge=1.0, le=32.0)
     stroke_foreground_core_dilate_px: int = Field(default=9, ge=0, le=64)
     stroke_border_fraction: float = Field(default=0.012, ge=0.0, le=0.10)
 
