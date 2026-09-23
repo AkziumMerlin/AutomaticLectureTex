@@ -174,7 +174,9 @@ class UniMERNetBackend(MathOCRBackend):
         # official UniMERNet source tree is kept next to the worker venv, so make that source root
         # explicit for both the preflight and the long-lived worker process.
         worker_env = os.environ.copy()
-        formula_root = python_path.parent.parent.parent
+        # The Python entrypoint may itself be a symlink, so never infer the model/source root from
+        # its target. The UniMERNet config lives at <formula_root>/unimernet_small/*.yaml.
+        formula_root = self.config.unimernet_config_path.parent.parent
         source_root = formula_root / "UniMERNet-src"
         if source_root.is_dir():
             existing_pythonpath = worker_env.get("PYTHONPATH", "")
