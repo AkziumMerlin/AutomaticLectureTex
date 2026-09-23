@@ -146,7 +146,8 @@ def test_oversized_mfd_crop_is_split_into_chalk_lines(tmp_path):
         line_split_enabled=True,
         line_split_min_height_px=120,
         line_split_min_band_height_px=5,
-        foreground_component_area_fraction=0.015,
+        stroke_foreground_core_radius_px=5.5,
+        stroke_foreground_core_dilate_px=7,
         min_width_px=20,
         min_height_px=5,
     )
@@ -190,7 +191,10 @@ def test_temporal_proposal_requires_persistent_new_writing(tmp_path, monkeypatch
         temporal_proposals_enabled=True,
         temporal_min_new_pixels=8,
         temporal_max_crops_per_state=3,
-        foreground_component_area_fraction=0.02,
+        temporal_lookahead_states=2,
+        temporal_min_persistence_ratio=0.6,
+        stroke_foreground_core_radius_px=5.5,
+        stroke_foreground_core_dilate_px=7,
         min_width_px=20,
         min_height_px=5,
     )
@@ -206,9 +210,55 @@ def test_temporal_proposal_requires_persistent_new_writing(tmp_path, monkeypatch
         id_prefix="window",
     )
 
-    assert len(crops) == 1
-    assert crops[0].frame.timestamp == 1.0
-    x0, y0, x1, y1 = crops[0].bbox
-    assert y0 < 205 < y1
-    assert x0 < 300 < x1
-    assert crops[0].frame.path.is_file()
+    assert crops
+    # Temporal change is only an attention seed: OCR uses the later clean state where the writing
+    # has persisted, never the just-changing frame itself.
+    assert all(crop.frame.timestamp == 2.0 for crop in crops)
+    assert any(crop.bbox[1] < 205 < crop.bbox[3] for crop in crops)
+    assert any(crop.bbox[0] < 300 < crop.bbox[2] for crop in crops)
+    assert all(crop.frame.path.is_file() for crop in crops)
+
+
+
+def test_temporal_proposal_rejects_transient_motion(tmp_path, monkeypatch):
+    import automatic_lecture_tex.formula_detection as module
+
+    paths = []
+    for index in range(3):
+        path = tmp_path / f"motion_{index}.png"
+        image = Image.new("RGB", (640, 320), (35, 88, 58))
+        draw = ImageDraw.Draw(image)
+        for x in range(80, 560, 45):
+            draw.rectangle((x, 55, x + 10, 64), fill=(235, 235, 220))
+        if index == 1:
+            # A transient thin object is visible only in the changing frame.
+            draw.line((220, 205, 520, 205), fill=(240, 240, 225), width=4)
+        image.save(path)
+        paths.append(path)
+
+    monkeypatch.setattr(
+        module,
+        "_registered_homography",
+        lambda _source, _target, _config: (np.eye(3, dtype=np.float32), 0.9),
+    )
+    config = FormulaDetectionConfig(
+        temporal_proposals_enabled=True,
+        temporal_min_new_pixels=8,
+        temporal_lookahead_states=2,
+        temporal_min_persistence_ratio=0.6,
+        min_width_px=20,
+        min_height_px=5,
+    )
+    frames = [
+        ExtractedFrame(timestamp=float(index), path=path)
+        for index, path in enumerate(paths)
+    ]
+
+    crops = detect_temporal_formula_crops(
+        frames,
+        tmp_path / "transient",
+        config,
+        id_prefix="window",
+    )
+
+    assert crops == []
