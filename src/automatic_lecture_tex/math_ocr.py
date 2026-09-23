@@ -169,6 +169,44 @@ class UniMERNetBackend(MathOCRBackend):
                 "Run scripts/create_unimernet_worker_env.sh first."
             )
         worker_script = Path(__file__).with_name("unimernet_worker.py")
+
+        # Do not rely only on editable-install import hooks in the isolated environment. The
+        # official UniMERNet source tree is kept next to the worker venv, so make that source root
+        # explicit for both the preflight and the long-lived worker process.
+        worker_env = os.environ.copy()
+        formula_root = python_path.parent.parent.parent
+        source_root = formula_root / "UniMERNet-src"
+        if source_root.is_dir():
+            existing_pythonpath = worker_env.get("PYTHONPATH", "")
+            worker_env["PYTHONPATH"] = (
+                str(source_root)
+                if not existing_pythonpath
+                else str(source_root) + os.pathsep + existing_pythonpath
+            )
+
+        preflight = subprocess.run(  # noqa: S603
+            [
+                str(python_path),
+                "-c",
+                (
+                    "import pathlib, sys, unimernet, unimernet.tasks; "
+                    "print(pathlib.Path(unimernet.__file__).resolve()); "
+                    "print(sys.executable)"
+                ),
+            ],
+            env=worker_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if preflight.returncode != 0:
+            raise RuntimeError(
+                "UniMERNet worker preflight import failed. "
+                f"python={python_path}, source_root={source_root}, "
+                f"stderr={preflight.stderr.strip()!r}"
+            )
+
         process = subprocess.Popen(  # noqa: S603
             [
                 str(python_path),
@@ -189,6 +227,7 @@ class UniMERNetBackend(MathOCRBackend):
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=worker_env,
         )
         assert process.stdout is not None
         ready_line = process.stdout.readline()
