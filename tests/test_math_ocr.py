@@ -172,7 +172,7 @@ def test_unimumer_uses_persistent_isolated_worker(tmp_path, monkeypatch):
 
     def fake_run(args, **kwargs):
         captured["preflight_args"] = args
-        return SimpleNamespace(returncode=0, stdout="0.27.1\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="2.9.1 5.17.0 0.49.0\n", stderr="")
 
     def fake_popen(args, **kwargs):
         captured["args"] = args
@@ -186,8 +186,10 @@ def test_unimumer_uses_persistent_isolated_worker(tmp_path, monkeypatch):
         MathOCRConfig(
             backend="unimumer",
             device="cuda",
-            unimumer_model="phxember/Uni-MuMER-Qwen3.5-4B",
+            unimumer_model="phxember/Uni-MuMER-Qwen3.5-2B",
             unimumer_python_path=python_path,
+            unimumer_load_in_4bit=True,
+            unimumer_max_gpu_memory_gib=5.5,
         )
     )
     candidate = backend.recognize(image_path)
@@ -196,10 +198,15 @@ def test_unimumer_uses_persistent_isolated_worker(tmp_path, monkeypatch):
     assert candidate.backend == "unimumer"
     assert candidate.text == r"\frac{x}{y}"
     assert str(python_path) == captured["preflight_args"][0]
-    assert "vllm" in captured["preflight_args"][2]
+    assert "bitsandbytes" in captured["preflight_args"][2]
+    assert "vllm" not in captured["preflight_args"][2]
     assert str(python_path) == captured["args"][0]
     assert "--model" in captured["args"]
-    assert "phxember/Uni-MuMER-Qwen3.5-4B" in captured["args"]
+    assert "phxember/Uni-MuMER-Qwen3.5-2B" in captured["args"]
+    assert "--load-in-4bit" in captured["args"]
+    assert "--max-gpu-memory-gib" in captured["args"]
+    memory_index = captured["args"].index("--max-gpu-memory-gib")
+    assert captured["args"][memory_index + 1] == "5.5"
     assert any('"image"' in item for item in process.stdin.writes)
 
     backend.close()
@@ -257,13 +264,13 @@ def test_qwen_vlm_ocr_reuses_configured_multimodal_server(tmp_path, monkeypatch)
 
 
 
-def test_unimumer_worker_disables_nested_vllm_multiprocessing(monkeypatch):
+def test_unimumer_worker_uses_expandable_cuda_allocator(monkeypatch):
     import importlib
     import os
 
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     import automatic_lecture_tex.unimumer_worker as worker_module
 
     importlib.reload(worker_module)
 
-    assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
