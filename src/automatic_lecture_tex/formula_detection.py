@@ -274,72 +274,238 @@ def _index_runs(indices: np.ndarray, *, max_gap: int) -> list[tuple[int, int]]:
     return result
 
 
+def _layout_panels(
+    thick_foreground: np.ndarray,
+    config: FormulaDetectionConfig,
+) -> list[tuple[int, int]]:
+    """Split a crop at stable vertical barriers such as chalkboard frames.
+
+    The previous splitter let one OCR crop span multiple board panels. Long white/metal dividers
+    have a thick-core signature across most of the crop height, so they are reliable host-side
+    layout separators without interpreting the written content.
+    """
+
+    cv2 = _cv2()
+    height, width = thick_foreground.shape
+    if width < 2 * config.line_split_min_panel_width_px:
+        return [(0, width)]
+
+    occupancy = (thick_foreground > 0).mean(axis=0)
+    barrier = occupancy >= config.line_split_vertical_barrier_fraction
+    barrier = cv2.morphologyEx(
+        (barrier.astype(np.uint8) * 255)[None, :],
+        cv2.MORPH_CLOSE,
+        np.ones((1, 9), dtype=np.uint8),
+    )[0] > 0
+
+    barrier_runs = [
+        (left, right)
+        for left, right in _index_runs(np.flatnonzero(barrier), max_gap=2)
+        if right - left >= 6
+        and left > 0.03 * width
+        and right < 0.97 * width
+    ]
+    if not barrier_runs:
+        return [(0, width)]
+
+    panels: list[tuple[int, int]] = []
+    cursor = 0
+    for left, right in barrier_runs:
+        if left - cursor >= config.line_split_min_panel_width_px:
+            panels.append((cursor, left))
+        cursor = right
+    if width - cursor >= config.line_split_min_panel_width_px:
+        panels.append((cursor, width))
+    return panels or [(0, width)]
+
+
+def _horizontal_continuity_score(
+    chalk: np.ndarray,
+    *,
+    close_width: int,
+) -> np.ndarray:
+    """Measure row-wise writing continuity while ignoring sparse vertical braces/ovals."""
+
+    cv2 = _cv2()
+    width = max(5, close_width | 1)
+    closed = cv2.morphologyEx(
+        (chalk > 0).astype(np.uint8) * 255,
+        cv2.MORPH_CLOSE,
+        np.ones((1, width), dtype=np.uint8),
+    )
+    score = (closed > 0).mean(axis=1).astype(np.float32)
+    return cv2.GaussianBlur(score[:, None], (1, 0), sigmaX=0, sigmaY=2.0)[:, 0]
+
+
+def _continuity_bands(
+    score: np.ndarray,
+    config: FormulaDetectionConfig,
+) -> list[tuple[int, int]]:
+    """Use hysteresis on horizontal continuity to find writing bands."""
+
+    cv2 = _cv2()
+    positive = score[score > 0]
+    if not len(positive):
+        return []
+
+    p95 = float(np.quantile(positive, 0.95))
+    high = max(0.04, 0.45 * p95)
+    low = max(0.015, 0.30 * high)
+    seed = score >= high
+    support = score >= low
+    support = cv2.morphologyEx(
+        (support.astype(np.uint8) * 255)[:, None],
+        cv2.MORPH_CLOSE,
+        np.ones(
+            (
+                max(3, 2 * int(round(len(score) * config.line_split_max_gap_fraction)) + 1),
+                1,
+            ),
+            dtype=np.uint8,
+        ),
+    )[:, 0] > 0
+
+    bands: list[tuple[int, int]] = []
+    indices = np.flatnonzero(support)
+    if not len(indices):
+        return bands
+    start = previous = int(indices[0])
+    for raw in indices[1:]:
+        current = int(raw)
+        if current == previous + 1:
+            previous = current
+            continue
+        if (
+            previous - start + 1 >= config.line_split_min_band_height_px
+            and seed[start : previous + 1].any()
+        ):
+            bands.append((start, previous + 1))
+        start = previous = current
+    if (
+        previous - start + 1 >= config.line_split_min_band_height_px
+        and seed[start : previous + 1].any()
+    ):
+        bands.append((start, previous + 1))
+    return bands
+
+
+def _split_tall_band(
+    score: np.ndarray,
+    band: tuple[int, int],
+    config: FormulaDetectionConfig,
+) -> list[tuple[int, int]]:
+    """Recursively cut an unusually tall band at genuine continuity valleys."""
+
+    pending = [band]
+    result: list[tuple[int, int]] = []
+    min_piece = max(24, 2 * config.line_split_min_band_height_px)
+    while pending:
+        y0, y1 = pending.pop()
+        if y1 - y0 <= config.line_split_max_band_height_px:
+            result.append((y0, y1))
+            continue
+
+        left = y0 + min_piece
+        right = y1 - min_piece
+        if right <= left:
+            continue
+
+        valley = left + int(np.argmin(score[left:right]))
+        local = score[y0:y1]
+        positive = local[local > 0]
+        median = float(np.median(positive)) if len(positive) else 0.0
+        if median <= 0 or float(score[valley]) > config.line_split_valley_ratio * median:
+            # A large region with no real layout valley is not a trustworthy isolated formula.
+            # Fail closed rather than feed a board-sized scene to UniMERNet.
+            continue
+
+        pending.append((valley, y1))
+        pending.append((y0, valley))
+    return sorted(result)
+
+
 def _line_boxes(
     rgb: np.ndarray,
     config: FormulaDetectionConfig,
 ) -> list[tuple[int, int, int, int]]:
-    """Split a coarse board region into OCR-sized horizontal writing bands."""
+    """Split a coarse proposal into panel-aware horizontal formula/text bands.
+
+    Chalkboard formulas often contain braces, circles and long vertical strokes. Plain connected
+    components or raw row density therefore merge several lines into one giant crop. Horizontal
+    continuity is robust to those sparse vertical bridges, while thick vertical board dividers are
+    handled as explicit panel boundaries.
+    """
 
     height, width = rgb.shape[:2]
-    chalk, _foreground = _stroke_masks(rgb, config)
-    row_counts = (chalk > 0).sum(axis=1)
-    row_threshold = max(4, int(round(width * config.line_split_row_density)))
-    bands = _merge_active_runs(
-        row_counts >= row_threshold,
-        max_gap=max(3, int(round(height * config.line_split_max_gap_fraction))),
-        min_height=config.line_split_min_band_height_px,
-    )
-    if not bands:
-        return []
-
+    chalk, thick_foreground = _stroke_masks(rgb, config)
     boxes: list[tuple[int, int, int, int]] = []
-    for y0, y1 in bands:
-        band = chalk[y0:y1]
-        column_counts = (band > 0).sum(axis=0)
-        column_threshold = max(
-            2,
-            int(round((y1 - y0) * config.line_split_column_density)),
-        )
-        active_columns = np.flatnonzero(column_counts >= column_threshold)
-        if not len(active_columns):
-            continue
 
-        # Ignore narrow border remnants while retaining separated pieces of one expression. This is
-        # deliberately not horizontal connected-component segmentation: large formulas can contain
-        # substantial whitespace, fractions and side conditions.
-        runs = _index_runs(
-            active_columns,
-            max_gap=max(4, int(round((y1 - y0) * 0.04))),
+    for panel_x0, panel_x1 in _layout_panels(thick_foreground, config):
+        panel_chalk = chalk[:, panel_x0:panel_x1]
+        panel_width = panel_x1 - panel_x0
+        close_width = min(
+            config.line_split_horizontal_close_px,
+            max(5, (panel_width // 20) | 1),
         )
-        filtered: list[tuple[int, int]] = []
-        edge_margin = width * 0.04
-        narrow_edge = max(20, int(round(width * 0.08)))
-        for left, right in runs:
-            near_edge = left <= edge_margin or right >= width - edge_margin
-            if near_edge and (right - left) < narrow_edge:
+        score = _horizontal_continuity_score(
+            panel_chalk,
+            close_width=close_width,
+        )
+        bands: list[tuple[int, int]] = []
+        for band in _continuity_bands(score, config):
+            bands.extend(_split_tall_band(score, band, config))
+
+        for y0, y1 in bands:
+            pad_y = max(
+                4,
+                int(round((y1 - y0) * config.line_split_padding_fraction)),
+            )
+            y0p = max(0, y0 - pad_y)
+            y1p = min(height, y1 + pad_y)
+            active_columns = np.flatnonzero(
+                (chalk[y0p:y1p, panel_x0:panel_x1] > 0).sum(axis=0) >= 1
+            )
+            if not len(active_columns):
                 continue
-            filtered.append((left, right))
-        if not filtered:
-            filtered = runs
-        if not filtered:
-            continue
 
-        x0 = min(left for left, _right in filtered)
-        x1 = max(right for _left, right in filtered)
-        box_width = x1 - x0
-        box_height = y1 - y0
-        pad_x = max(6, int(round(box_width * config.line_split_padding_fraction)))
-        pad_y = max(4, int(round(box_height * config.line_split_padding_fraction)))
-        x0 = max(0, x0 - pad_x)
-        x1 = min(width, x1 + pad_x)
-        y0 = max(0, y0 - pad_y)
-        y1 = min(height, y1 + pad_y)
-        if (
-            x1 - x0 >= config.min_width_px
-            and y1 - y0 >= config.min_height_px
-        ):
-            boxes.append((x0, y0, x1, y1))
+            horizontal_gap = max(
+                config.line_split_horizontal_gap_px,
+                int(round((y1p - y0p) * 0.70)),
+            )
+            for local_x0, local_x1 in _index_runs(
+                active_columns,
+                max_gap=horizontal_gap,
+            ):
+                x0 = panel_x0 + local_x0
+                x1 = panel_x0 + local_x1
+                box_width = x1 - x0
+                box_height = y1p - y0p
+                if (
+                    box_width < config.min_width_px
+                    or box_height < config.min_height_px
+                ):
+                    continue
+
+                stroke_pixels = int((chalk[y0p:y1p, x0:x1] > 0).sum())
+                if stroke_pixels < max(60, config.temporal_min_new_pixels):
+                    continue
+
+                pad_x = max(
+                    6,
+                    int(round(box_width * config.line_split_padding_fraction)),
+                )
+                boxes.append(
+                    (
+                        max(panel_x0, x0 - pad_x),
+                        y0p,
+                        min(panel_x1, x1 + pad_x),
+                        y1p,
+                    )
+                )
+
+    boxes.sort(key=lambda box: (box[1], box[0], box[3], box[2]))
     return boxes
+
 
 
 def split_oversized_formula_crops(

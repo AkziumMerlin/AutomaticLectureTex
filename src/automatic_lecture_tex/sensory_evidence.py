@@ -447,11 +447,17 @@ def collect_visual_evidence(
                 and len(display_frames) >= 3
             ):
                 try:
+                    temporal_dir = frame_dir / "formula_crops" / "temporal"
                     temporal_crops = detect_temporal_formula_crops(
                         display_frames,
-                        frame_dir / "formula_crops" / "temporal",
+                        temporal_dir,
                         pipeline.config.vision.formula_detection,
                         id_prefix=request.id,
+                    )
+                    temporal_crops = split_oversized_formula_crops(
+                        temporal_crops,
+                        temporal_dir / "line_crops",
+                        pipeline.config.vision.formula_detection,
                     )
                     formula_crops.extend(temporal_crops)
                 except Exception as exc:
