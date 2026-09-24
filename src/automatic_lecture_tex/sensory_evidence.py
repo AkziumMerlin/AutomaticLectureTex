@@ -59,7 +59,10 @@ def _unique_times(values: list[float]) -> list[float]:
 
 def _math_ocr_backend(pipeline: Pipeline):
     if not getattr(pipeline, "_math_ocr_backend_initialized", False):
-        pipeline._math_ocr_backend = make_math_ocr_backend(pipeline.config.vision.math_ocr)
+        pipeline._math_ocr_backend = make_math_ocr_backend(
+            pipeline.config.vision.math_ocr,
+            pipeline.config.llm,
+        )
         pipeline._math_ocr_backend_initialized = True
     return pipeline._math_ocr_backend
 
