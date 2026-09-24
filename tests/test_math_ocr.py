@@ -254,3 +254,16 @@ def test_qwen_vlm_ocr_reuses_configured_multimodal_server(tmp_path, monkeypatch)
     assert content[0]["type"] == "image_url"
     assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert "handwritten mathematical expression" in content[1]["text"]
+
+
+
+def test_unimumer_worker_disables_nested_vllm_multiprocessing(monkeypatch):
+    import importlib
+    import os
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    import automatic_lecture_tex.unimumer_worker as worker_module
+
+    importlib.reload(worker_module)
+
+    assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
