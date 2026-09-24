@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import mimetypes
 import os
@@ -133,6 +134,139 @@ class MathpixBackend(MathOCRBackend):
         except (TypeError, ValueError):
             confidence = None
         return MathOCRCandidate(backend="mathpix", text=text, confidence=confidence)
+
+
+class UniMuMERBackend(MathOCRBackend):
+    """Specialized handwritten-math OCR via an isolated Uni-MuMER/Qwen worker."""
+
+    def __init__(self, config: MathOCRConfig) -> None:
+        self.config = config
+        self._worker: subprocess.Popen[str] | None = None
+        self._start_worker()
+
+    def _start_worker(self) -> None:
+        python_path = self.config.unimumer_python_path
+        if python_path is None:
+            raise RuntimeError(
+                "Uni-MuMER OCR requires vision.math_ocr.unimumer_python_path. "
+                "Run scripts/create_unimumer_worker_env.sh first."
+            )
+        if not python_path.is_file():
+            raise RuntimeError(
+                f"Uni-MuMER worker Python does not exist: {python_path}. "
+                "Run scripts/create_unimumer_worker_env.sh first."
+            )
+
+        preflight = subprocess.run(  # noqa: S603
+            [
+                str(python_path),
+                "-c",
+                "import vllm, transformers, qwen_vl_utils; print(vllm.__version__)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if preflight.returncode != 0:
+            raise RuntimeError(
+                "Uni-MuMER worker preflight failed. "
+                f"python={python_path}, stderr={preflight.stderr.strip()!r}"
+            )
+
+        worker_script = Path(__file__).with_name("unimumer_worker.py")
+        process = subprocess.Popen(  # noqa: S603
+            [
+                str(python_path),
+                str(worker_script),
+                "--model",
+                self.config.unimumer_model,
+                "--device",
+                self.config.device,
+                "--max-tokens",
+                str(self.config.unimumer_max_tokens),
+                "--temperature",
+                str(self.config.unimumer_temperature),
+                "--top-p",
+                str(self.config.unimumer_top_p),
+                "--gpu-memory-utilization",
+                str(self.config.unimumer_gpu_memory_utilization),
+                "--dark-formula-threshold",
+                str(self.config.dark_formula_threshold),
+                *(
+                    ["--normalize-dark-formula"]
+                    if self.config.normalize_dark_formula
+                    else []
+                ),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        ready_line = process.stdout.readline()
+        if not ready_line:
+            return_code = process.poll()
+            process.terminate()
+            raise RuntimeError(
+                "Uni-MuMER worker exited before reporting readiness"
+                + (f" (return code {return_code})" if return_code is not None else "")
+            )
+        try:
+            ready = json.loads(ready_line)
+        except json.JSONDecodeError as exc:
+            process.terminate()
+            raise RuntimeError(
+                f"Invalid Uni-MuMER worker startup response: {ready_line!r}"
+            ) from exc
+        if not ready.get("ready"):
+            process.terminate()
+            raise RuntimeError(f"Uni-MuMER worker failed to initialize: {ready!r}")
+        self._worker = process
+
+    def recognize(self, image_path: Path) -> MathOCRCandidate | None:
+        process = self._worker
+        if process is None or process.stdin is None or process.stdout is None:
+            raise RuntimeError("Uni-MuMER worker is not available")
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Uni-MuMER worker exited unexpectedly with return code {process.returncode}"
+            )
+
+        process.stdin.write(
+            json.dumps({"image": str(image_path)}, ensure_ascii=False) + "\n"
+        )
+        process.stdin.flush()
+        response_line = process.stdout.readline()
+        if not response_line:
+            raise RuntimeError("Uni-MuMER worker closed stdout during inference")
+        response = json.loads(response_line)
+        if response.get("error"):
+            raise RuntimeError(f"Uni-MuMER worker error: {response['error']}")
+        text = str(response.get("text") or "").strip()[:_MAX_OCR_TEXT_CHARS]
+        if not text:
+            return None
+        return MathOCRCandidate(backend="unimumer", text=text)
+
+    def close(self) -> None:
+        process = self._worker
+        self._worker = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+                process.stdin.flush()
+            process.wait(timeout=5)
+        except Exception:
+            process.terminate()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class UniMERNetBackend(MathOCRBackend):
