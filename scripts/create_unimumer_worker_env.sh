@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="${1:-models/formula}"
 ENV_DIR="${ROOT}/unimumer-env"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu129}"
+VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
+CPU_ARCH="$(uname -m)"
+VLLM_WHEEL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl"
 
 # This machine has heterogeneous GPUs; keep CUDA index ordering stable so CUDA_VISIBLE_DEVICES
 # selects the same physical adapter across PyTorch/vLLM invocations.
@@ -19,7 +22,7 @@ python -m venv "${ENV_DIR}"
 # machines exposes CUDA 12.9, so install the official cu129 stack explicitly instead of letting
 # PyPI choose the newer cu130 wheel.
 "${ENV_DIR}/bin/pip" install \
-  "vllm>=0.27,<0.28" \
+  "${VLLM_WHEEL}" \
   --extra-index-url "${PYTORCH_INDEX_URL}"
 
 "${ENV_DIR}/bin/pip" install \
