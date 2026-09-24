@@ -272,7 +272,7 @@ def test_layout_split_respects_board_divider_and_oval_bridges(tmp_path):
     draw = ImageDraw.Draw(image)
 
     # Two separate board panels.
-    draw.rectangle((444, 0, 456, 499), fill=(240, 240, 235))
+    draw.rectangle((435, 0, 465, 499), fill=(240, 240, 235))
 
     # Left panel: two writing bands.
     for x in range(60, 380, 26):
