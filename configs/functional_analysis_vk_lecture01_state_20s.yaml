@@ -172,12 +172,15 @@ vision:
     board_scan_enabled: true
     board_scan_max_images: 8
     device: cuda
-    unimumer_model: phxember/Uni-MuMER-Qwen3.5-4B
+    unimumer_model: phxember/Uni-MuMER-Qwen3.5-2B
     unimumer_python_path: ../models/formula/unimumer-env/bin/python
-    unimumer_max_tokens: 2048
+    unimumer_max_tokens: 512
     unimumer_temperature: 0.2
     unimumer_top_p: 0.8
-    unimumer_gpu_memory_utilization: 0.35
+    unimumer_load_in_4bit: true
+    # Hard allocator cap for the OCR subprocess. Leaves headroom beside the already resident
+    # ~33 GiB lecture LLM on a 40 GiB A100.
+    unimumer_max_gpu_memory_gib: 5.5
 
     # Baselines / ablations:
     #   backend: unimernet
