@@ -12,7 +12,7 @@ from pathlib import Path
 # This module is itself a dedicated long-lived subprocess. Running vLLM's V1 EngineCore in yet
 # another process adds a ZMQ startup handshake that is unnecessary here and can hang when vLLM is
 # embedded as a library. Keep the engine core in this worker process.
-os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
 HMER_PROMPT = (
