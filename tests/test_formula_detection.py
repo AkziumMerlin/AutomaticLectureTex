@@ -263,3 +263,60 @@ def test_temporal_proposal_rejects_transient_motion(tmp_path, monkeypatch):
     )
 
     assert crops == []
+
+
+
+def test_layout_split_respects_board_divider_and_oval_bridges(tmp_path):
+    image_path = tmp_path / "board_scene.jpg"
+    image = Image.new("RGB", (900, 500), (35, 88, 58))
+    draw = ImageDraw.Draw(image)
+
+    # Two separate board panels.
+    draw.rectangle((444, 0, 456, 499), fill=(240, 240, 235))
+
+    # Left panel: two writing bands.
+    for x in range(60, 380, 26):
+        draw.rectangle((x, 95, x + 12, 106), fill=(238, 238, 225))
+    for x in range(80, 410, 24):
+        draw.rectangle((x, 315, x + 12, 326), fill=(238, 238, 225))
+
+    # Right panel: two bands plus a large oval/brace-like stroke spanning them. The oval should
+    # not glue the two rows into one board-sized OCR crop.
+    for x in range(520, 840, 24):
+        draw.rectangle((x, 105, x + 12, 116), fill=(238, 238, 225))
+    for x in range(500, 825, 26):
+        draw.rectangle((x, 330, x + 12, 341), fill=(238, 238, 225))
+    draw.ellipse((500, 70, 850, 385), outline=(235, 235, 220), width=4)
+    image.save(image_path)
+
+    crop = DetectedFormulaCrop(
+        id="scene",
+        frame=ExtractedFrame(timestamp=1.0, path=image_path),
+        bbox=(100, 50, 1000, 550),
+        confidence=0.8,
+    )
+    config = FormulaDetectionConfig(
+        line_split_enabled=True,
+        line_split_min_height_px=100,
+        line_split_min_band_height_px=5,
+        line_split_min_panel_width_px=120,
+        line_split_max_band_height_px=160,
+        stroke_foreground_core_radius_px=8.0,
+        stroke_foreground_core_dilate_px=5,
+        min_width_px=30,
+        min_height_px=5,
+    )
+
+    refined = split_oversized_formula_crops(
+        [crop],
+        tmp_path / "layout_refined",
+        config,
+    )
+
+    assert len(refined) >= 4
+    divider = 100 + 450
+    assert all(
+        item.bbox[2] <= divider or item.bbox[0] >= divider
+        for item in refined
+    )
+    assert max(item.bbox[3] - item.bbox[1] for item in refined) < 220
