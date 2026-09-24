@@ -269,6 +269,70 @@ class UniMuMERBackend(MathOCRBackend):
             pass
 
 
+class QwenVLMOCRBackend(MathOCRBackend):
+    """Reuse an OpenAI-compatible multimodal Qwen server as a literal formula transcriber."""
+
+    _PROMPT = (
+        "Transcribe this cropped handwritten mathematical expression from a chalkboard into LaTeX. "
+        "Return only the LaTeX expression, without markdown fences or explanation. "
+        "Read the visible symbols literally; do not complete or infer missing mathematics."
+    )
+
+    def __init__(self, config: MathOCRConfig, llm_config) -> None:
+        if llm_config is None and (
+            not config.qwen_vlm_base_url or not config.qwen_vlm_model
+        ):
+            raise RuntimeError(
+                "qwen_vlm OCR requires the application llm config or explicit "
+                "qwen_vlm_base_url/qwen_vlm_model values"
+            )
+
+        from openai import OpenAI
+
+        self.config = config
+        base_url = config.qwen_vlm_base_url or llm_config.base_url
+        api_key = config.qwen_vlm_api_key or llm_config.api_key
+        self.model = config.qwen_vlm_model or llm_config.model
+        timeout = getattr(llm_config, "timeout_seconds", 300.0)
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+
+    def recognize(self, image_path: Path) -> MathOCRCandidate | None:
+        from PIL import Image
+
+        with Image.open(image_path) as raw:
+            prepared = _normalize_formula_image(raw, self.config)
+            buffer = io.BytesIO()
+            prepared.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.0,
+            max_tokens=self.config.qwen_vlm_max_tokens,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64," + encoded},
+                        },
+                        {"type": "text", "text": self._PROMPT},
+                    ],
+                }
+            ],
+        )
+        text = str(response.choices[0].message.content or "").strip()
+        if text.startswith("~~~") and text.endswith("~~~"):
+            lines = text.splitlines()
+            if len(lines) >= 3:
+                text = "\n".join(lines[1:-1]).strip()
+        text = text[:_MAX_OCR_TEXT_CHARS]
+        if not text:
+            return None
+        return MathOCRCandidate(backend="qwen_vlm", text=text)
+
+
 class UniMERNetBackend(MathOCRBackend):
     """UniMERNet wrapper with an optional persistent isolated worker process.
 
@@ -484,13 +548,20 @@ class UniMERNetBackend(MathOCRBackend):
             pass
 
 
-def make_math_ocr_backend(config: MathOCRConfig) -> MathOCRBackend | None:
+def make_math_ocr_backend(
+    config: MathOCRConfig,
+    llm_config=None,
+) -> MathOCRBackend | None:
     if config.backend == "none":
         return None
     if config.backend == "mathpix":
         return MathpixBackend(config)
     if config.backend == "unimernet":
         return UniMERNetBackend(config)
+    if config.backend == "unimumer":
+        return UniMuMERBackend(config)
+    if config.backend == "qwen_vlm":
+        return QwenVLMOCRBackend(config, llm_config)
     if config.backend == "latexocr":
         return LatexOCRBackend(config)
     raise ValueError(f"unsupported math OCR backend: {config.backend}")
