@@ -157,6 +157,12 @@ vision:
     line_split_row_density: 0.006
     line_split_column_density: 0.03
     line_split_padding_fraction: 0.10
+    line_split_horizontal_close_px: 41
+    line_split_vertical_barrier_fraction: 0.55
+    line_split_min_panel_width_px: 140
+    line_split_max_band_height_px: 220
+    line_split_valley_ratio: 0.70
+    line_split_horizontal_gap_px: 70
 
   math_ocr:
     # UniMERNet supplies glyph-level hypotheses for MFD crops; the VLM still sees the pixels.
