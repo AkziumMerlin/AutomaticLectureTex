@@ -161,7 +161,8 @@ class UniMuMERBackend(MathOCRBackend):
             [
                 str(python_path),
                 "-c",
-                "import vllm, transformers, qwen_vl_utils; print(vllm.__version__)",
+                "import bitsandbytes, torch, transformers; "
+                "print(torch.__version__, transformers.__version__, bitsandbytes.__version__)",
             ],
             capture_output=True,
             text=True,
@@ -189,8 +190,13 @@ class UniMuMERBackend(MathOCRBackend):
                 str(self.config.unimumer_temperature),
                 "--top-p",
                 str(self.config.unimumer_top_p),
-                "--gpu-memory-utilization",
-                str(self.config.unimumer_gpu_memory_utilization),
+                "--max-gpu-memory-gib",
+                str(self.config.unimumer_max_gpu_memory_gib),
+                *(
+                    ["--load-in-4bit"]
+                    if self.config.unimumer_load_in_4bit
+                    else []
+                ),
                 "--dark-formula-threshold",
                 str(self.config.dark_formula_threshold),
                 *(
