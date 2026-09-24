@@ -179,7 +179,7 @@ class FormulaDetectionConfig(BaseModel):
 
 
 class MathOCRConfig(BaseModel):
-    backend: Literal["none", "mathpix", "unimernet", "latexocr"] = "none"
+    backend: Literal["none", "mathpix", "unimernet", "unimumer", "qwen_vlm", "latexocr"] = "none"
     min_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
     board_scan_enabled: bool = False
     board_scan_max_images: int = Field(default=3, ge=1, le=8)
@@ -188,6 +188,16 @@ class MathOCRConfig(BaseModel):
     mathpix_app_key_env: str = "MATHPIX_APP_KEY"
     unimernet_config_path: Path | None = None
     unimernet_python_path: Path | None = None
+    unimumer_model: str = "phxember/Uni-MuMER-Qwen3.5-4B"
+    unimumer_python_path: Path | None = None
+    unimumer_max_tokens: int = Field(default=2048, ge=64, le=8192)
+    unimumer_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    unimumer_top_p: float = Field(default=0.8, gt=0.0, le=1.0)
+    unimumer_gpu_memory_utilization: float = Field(default=0.35, gt=0.05, le=0.95)
+    qwen_vlm_model: str | None = None
+    qwen_vlm_base_url: str | None = None
+    qwen_vlm_api_key: str | None = None
+    qwen_vlm_max_tokens: int = Field(default=1024, ge=64, le=8192)
     normalize_dark_formula: bool = True
     dark_formula_threshold: int = Field(default=128, ge=0, le=255)
 
@@ -302,5 +312,10 @@ def load_config(path: str | Path) -> AppConfig:
         # interpreter, and resolving it silently discards the virtual environment entrypoint.
         cfg.vision.math_ocr.unimernet_python_path = Path(
             os.path.abspath(base / unimernet_python)
+        )
+    unimumer_python = cfg.vision.math_ocr.unimumer_python_path
+    if unimumer_python is not None and not unimumer_python.is_absolute():
+        cfg.vision.math_ocr.unimumer_python_path = Path(
+            os.path.abspath(base / unimumer_python)
         )
     return cfg
