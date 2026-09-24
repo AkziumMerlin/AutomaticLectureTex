@@ -165,14 +165,26 @@ vision:
     line_split_horizontal_gap_px: 70
 
   math_ocr:
-    # UniMERNet supplies glyph-level hypotheses for MFD crops; the VLM still sees the pixels.
-    backend: unimernet
+    # Uni-MuMER is a Qwen-based HMER model fine-tuned specifically for handwritten mathematical
+    # expressions. Crop pixels remain direct evidence for the reconstruction VLM.
+    backend: unimumer
     min_confidence: 0.45
     board_scan_enabled: true
     board_scan_max_images: 8
     device: cuda
-    unimernet_config_path: ../models/formula/unimernet_small/automatic_lecture_tex.yaml
-    unimernet_python_path: ../models/formula/unimernet-env/bin/python
+    unimumer_model: phxember/Uni-MuMER-Qwen3.5-4B
+    unimumer_python_path: ../models/formula/unimumer-env/bin/python
+    unimumer_max_tokens: 2048
+    unimumer_temperature: 0.2
+    unimumer_top_p: 0.8
+    unimumer_gpu_memory_utilization: 0.35
+
+    # Baselines / ablations:
+    #   backend: unimernet
+    #   unimernet_config_path: ../models/formula/unimernet_base/automatic_lecture_tex.yaml
+    #   unimernet_python_path: ../models/formula/unimernet-env/bin/python
+    # or reuse the already running multimodal lecture model:
+    #   backend: qwen_vlm
 
 literature:
   enabled: false
