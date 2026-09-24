@@ -166,6 +166,12 @@ class FormulaDetectionConfig(BaseModel):
     line_split_row_density: float = Field(default=0.006, ge=0.0005, le=0.20)
     line_split_column_density: float = Field(default=0.03, ge=0.001, le=0.50)
     line_split_padding_fraction: float = Field(default=0.10, ge=0.0, le=0.50)
+    line_split_horizontal_close_px: int = Field(default=41, ge=5, le=201)
+    line_split_vertical_barrier_fraction: float = Field(default=0.55, ge=0.05, le=1.0)
+    line_split_min_panel_width_px: int = Field(default=140, ge=32, le=2048)
+    line_split_max_band_height_px: int = Field(default=220, ge=32, le=1024)
+    line_split_valley_ratio: float = Field(default=0.70, ge=0.05, le=1.0)
+    line_split_horizontal_gap_px: int = Field(default=70, ge=4, le=512)
 
     # Kept only for backward-compatible config parsing. Dense-math suppression no longer uses
     # connected-component area.
