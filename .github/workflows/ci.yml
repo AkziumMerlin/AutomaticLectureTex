@@ -42,6 +42,7 @@ jobs:
             src/automatic_lecture_tex/sensory_evidence.py \
             src/automatic_lecture_tex/tex_safety.py \
             src/automatic_lecture_tex/unimernet_worker.py \
+            src/automatic_lecture_tex/unimumer_worker.py \
             src/automatic_lecture_tex/visual_formula_gate.py \
             tests/test_adaptive_board_sampling.py \
             tests/test_evidence_preservation.py \

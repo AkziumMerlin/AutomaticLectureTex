@@ -9,9 +9,18 @@ from pathlib import Path
 import yaml
 
 
-UNIMERNET_REPO = "wanderkid/unimernet_small"
-UNIMERNET_CHECKPOINT = "unimernet_small.pth"
-UNIMERNET_SHA256 = "fa54b0a8126bb60060bc90818ce20a5ca1b5dd5d7da5c0983579f5c3a2cc90ea"
+UNIMERNET_VARIANTS = {
+    "small": {
+        "repo": "wanderkid/unimernet_small",
+        "checkpoint": "unimernet_small.pth",
+        "sha256": "fa54b0a8126bb60060bc90818ce20a5ca1b5dd5d7da5c0983579f5c3a2cc90ea",
+    },
+    "base": {
+        "repo": "wanderkid/unimernet_base",
+        "checkpoint": "pytorch_model.pth",
+        "sha256": "16cd0891233cfee3c11215a7b87306f160f7e7f3f52091a6253751c149a8c180",
+    },
+}
 
 MFD_REPO = "opendatalab/PDF-Extract-Kit-1.0"
 MFD_FILE = "models/MFD/YOLO/yolo_v8_ft.pt"
@@ -34,8 +43,8 @@ def _verify(path: Path, expected: str) -> None:
         )
 
 
-def _write_unimernet_config(model_dir: Path) -> Path:
-    checkpoint = model_dir / UNIMERNET_CHECKPOINT
+def _write_unimernet_config(model_dir: Path, checkpoint_name: str) -> Path:
+    checkpoint = model_dir / checkpoint_name
     payload = {
         "model": {
             "arch": "unimernet",
@@ -88,13 +97,19 @@ def _write_unimernet_config(model_dir: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download UniMERNet-small and the PDF-Extract-Kit MFD weights."
+        description="Download UniMERNet weights and the PDF-Extract-Kit MFD weights."
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("models/formula"),
         help="Destination root (default: models/formula).",
+    )
+    parser.add_argument(
+        "--unimernet-size",
+        choices=sorted(UNIMERNET_VARIANTS),
+        default="base",
+        help="UniMERNet variant to download. 'base' is the largest official checkpoint.",
     )
     args = parser.parse_args()
 
@@ -107,24 +122,26 @@ def main() -> None:
         ) from exc
 
     root = args.output_dir.resolve()
-    unimernet_dir = root / "unimernet_small"
+    variant = UNIMERNET_VARIANTS[args.unimernet_size]
+    checkpoint_name = str(variant["checkpoint"])
+    unimernet_dir = root / f"unimernet_{args.unimernet_size}"
     mfd_dir = root / "mfd"
     unimernet_dir.mkdir(parents=True, exist_ok=True)
     mfd_dir.mkdir(parents=True, exist_ok=True)
 
     snapshot_download(
-        repo_id=UNIMERNET_REPO,
+        repo_id=str(variant["repo"]),
         local_dir=unimernet_dir,
         allow_patterns=[
             "config.json",
             "preprocessor_config.json",
             "tokenizer.json",
             "tokenizer_config.json",
-            UNIMERNET_CHECKPOINT,
+            checkpoint_name,
         ],
     )
-    checkpoint = unimernet_dir / UNIMERNET_CHECKPOINT
-    _verify(checkpoint, UNIMERNET_SHA256)
+    checkpoint = unimernet_dir / checkpoint_name
+    _verify(checkpoint, str(variant["sha256"]))
 
     mfd_download = Path(
         hf_hub_download(
@@ -137,9 +154,9 @@ def main() -> None:
         shutil.copy2(mfd_download, mfd_target)
     _verify(mfd_target, MFD_SHA256)
 
-    config_path = _write_unimernet_config(unimernet_dir)
+    config_path = _write_unimernet_config(unimernet_dir, checkpoint_name)
 
-    print(f"UniMERNet model: {unimernet_dir}")
+    print(f"UniMERNet-{args.unimernet_size} model: {unimernet_dir}")
     print(f"UniMERNet config: {config_path}")
     print(f"MFD weights: {mfd_target}")
     print()

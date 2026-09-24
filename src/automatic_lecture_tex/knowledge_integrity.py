@@ -307,9 +307,10 @@ the actual pixels when reconstructing notation, equations, theorem statements, d
 
 Visual evidence metadata can also contain VLM OCR (`raw_latex`/`latex`), detected
 `formula_crops`, and independent `math_ocr_candidates`. Those text channels are FALLIBLE SENSOR
-HYPOTHESES, not ground truth. A UniMERNet candidate tied to a formula `source_id` is a specialized
-glyph-level transcription hypothesis. Use it to help read operators, indices, roots and variable
-names, but verify it against the ATTACHED crop pixels before accepting it. The crop image remains
+HYPOTHESES, not ground truth. A math OCR candidate tied to a formula `source_id` is a specialized
+glyph-level transcription hypothesis (for example Uni-MuMER, UniMERNet, or a Qwen transcription
+pass). Use it to help read operators, indices, roots and variable names, but verify it against the
+ATTACHED crop pixels before accepting it. The crop image remains
 the direct sensor source; the OCR string is never authoritative by itself. ASR is primarily phonetic
 evidence and standard mathematics is only a final disambiguation prior, never a license to complete
 missing content.
