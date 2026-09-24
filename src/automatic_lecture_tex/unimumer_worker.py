@@ -9,10 +9,9 @@ import tempfile
 from pathlib import Path
 
 
-# This module is itself a dedicated long-lived subprocess. Running vLLM's V1 EngineCore in yet
-# another process adds a ZMQ startup handshake that is unnecessary here and can hang when vLLM is
-# embedded as a library. Keep the engine core in this worker process.
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+# Keep transient OCR allocations from fragmenting the few GiB left beside the resident lecture LLM.
+# This must be set before importing torch.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 HMER_PROMPT = (
@@ -58,94 +57,152 @@ def _normalize_image(
     return temp_path, temp_path
 
 
-def _load_engine(args):
+def _load_model(args):
     with contextlib.redirect_stdout(sys.stderr):
         import torch
-        from transformers import AutoProcessor
-        from vllm import LLM, SamplingParams
+        from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
-        if args.device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError(
-                "Uni-MuMER worker requested CUDA, but torch.cuda.is_available() is False."
-            )
+        if args.device == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "Uni-MuMER worker requested CUDA, but torch.cuda.is_available() is False."
+                )
+            total_bytes = torch.cuda.get_device_properties(0).total_memory
+            requested_bytes = int(args.max_gpu_memory_gib * 1024**3)
+            fraction = min(1.0, requested_bytes / total_bytes)
+            torch.cuda.set_per_process_memory_fraction(fraction, device=0)
 
-        llm = LLM(
-            model=args.model,
-            tensor_parallel_size=1,
-            trust_remote_code=True,
-            dtype="bfloat16",
-            max_model_len=max(4096, args.max_tokens + 1024),
-            gpu_memory_utilization=args.gpu_memory_utilization,
-            limit_mm_per_prompt={"image": 1},
-        )
+            free_bytes, _total_bytes = torch.cuda.mem_get_info(0)
+            if free_bytes < 2 * 1024**3:
+                raise RuntimeError(
+                    "Uni-MuMER worker has less than 2 GiB free GPU memory before model load: "
+                    f"{free_bytes / 1024**3:.2f} GiB"
+                )
+
         processor = AutoProcessor.from_pretrained(
             args.model,
             trust_remote_code=True,
             use_fast=False,
         )
-        sampling = SamplingParams(
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=50,
-            stop=["<|im_end|>", "<|endoftext|>"],
+
+        model_kwargs = {
+            "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
+        }
+        if args.device == "cuda":
+            model_kwargs["device_map"] = {"": 0}
+            model_kwargs["dtype"] = torch.bfloat16
+            if args.load_in_4bit:
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+        else:
+            model_kwargs["device_map"] = {"": "cpu"}
+            model_kwargs["dtype"] = torch.float32
+
+        model = AutoModelForMultimodalLM.from_pretrained(
+            args.model,
+            **model_kwargs,
         )
-    return llm, processor, sampling
+        model.eval()
+
+    return torch, model, processor
 
 
-def _infer(llm, processor, sampling, image_path: Path) -> str:
-    from qwen_vl_utils import process_vision_info
-
-    image_messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
+def _infer(torch, model, processor, args, image_path: Path) -> str:
+    messages = [
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": str(image_path)},
+                {"type": "image", "path": str(image_path.resolve())},
                 {"type": "text", "text": HMER_PROMPT},
             ],
-        },
+        }
     ]
-    final_prompt = processor.apply_chat_template(
-        image_messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    image_inputs, _, _ = process_vision_info(
-        image_messages,
-        return_video_kwargs=True,
-    )
-    mm_data = {}
-    if image_inputs is not None:
-        mm_data["image"] = image_inputs
 
-    with contextlib.redirect_stdout(sys.stderr):
-        outputs = llm.generate(
-            [{"prompt": final_prompt, "multi_modal_data": mm_data}],
-            sampling,
-            use_tqdm=False,
-        )
-    return str(outputs[0].outputs[0].text).strip()
+    inputs = processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+
+    try:
+        model_device = next(model.parameters()).device
+        inputs = inputs.to(model_device)
+        generation_kwargs = {
+            "max_new_tokens": args.max_tokens,
+            "do_sample": args.temperature > 0,
+            "use_cache": True,
+        }
+        if args.temperature > 0:
+            generation_kwargs["temperature"] = args.temperature
+            generation_kwargs["top_p"] = args.top_p
+
+        with torch.inference_mode():
+            outputs = model.generate(**inputs, **generation_kwargs)
+
+        prompt_tokens = inputs["input_ids"].shape[-1]
+        generated = outputs[0, prompt_tokens:]
+        return processor.decode(
+            generated,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        ).strip()
+    finally:
+        del inputs
+        if args.device == "cuda":
+            torch.cuda.empty_cache()
+
+
+def _gpu_snapshot(torch) -> dict[str, float]:
+    if not torch.cuda.is_available():
+        return {}
+    free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+    return {
+        "allocated_gib": round(torch.cuda.memory_allocated(0) / 1024**3, 3),
+        "reserved_gib": round(torch.cuda.memory_reserved(0) / 1024**3, 3),
+        "free_gib": round(free_bytes / 1024**3, 3),
+        "total_gib": round(total_bytes / 1024**3, 3),
+    }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Persistent Uni-MuMER JSONL inference worker.")
+    parser = argparse.ArgumentParser(
+        description="Persistent low-memory Uni-MuMER Transformers JSONL inference worker."
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.8)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.35)
+    parser.add_argument("--max-gpu-memory-gib", type=float, default=5.5)
+    parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--normalize-dark-formula", action="store_true")
     parser.add_argument("--dark-formula-threshold", type=int, default=128)
     args = parser.parse_args()
 
-    # vLLM respects CUDA_VISIBLE_DEVICES inherited from the parent lecture process.
     if args.device == "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    llm, processor, sampling = _load_engine(args)
-    print(json.dumps({"ready": True, "model": args.model}), flush=True)
+    torch, model, processor = _load_model(args)
+    print(
+        json.dumps(
+            {
+                "ready": True,
+                "model": args.model,
+                "load_in_4bit": args.load_in_4bit,
+                "max_gpu_memory_gib": args.max_gpu_memory_gib,
+                "gpu": _gpu_snapshot(torch),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
 
     for raw_line in sys.stdin:
         line = raw_line.strip()
@@ -164,7 +221,7 @@ def main() -> None:
                 normalize_dark_formula=args.normalize_dark_formula,
                 dark_formula_threshold=args.dark_formula_threshold,
             )
-            text = _infer(llm, processor, sampling, prepared_path)
+            text = _infer(torch, model, processor, args, prepared_path)
             print(json.dumps({"text": text}, ensure_ascii=False), flush=True)
         except Exception as exc:
             print(
