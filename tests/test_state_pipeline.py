@@ -220,7 +220,9 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.vision.formula_detection.backend == "yolov8"
     assert config.vision.formula_detection.model_path is not None
     assert config.vision.formula_detection.model_path.name == "yolo_v8_ft.pt"
-    assert config.vision.math_ocr.backend == "unimernet"
+    assert config.vision.math_ocr.backend == "unimumer"
+    assert config.vision.math_ocr.unimumer_model == "phxember/Uni-MuMER-Qwen3.5-4B"
+    assert config.vision.math_ocr.unimumer_python_path is not None
     assert config.vision.math_ocr.board_scan_enabled is True
     assert config.vision.math_ocr.board_scan_max_images == 8
     assert config.vision.math_ocr.device == "cuda"
