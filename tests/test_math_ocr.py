@@ -4,10 +4,16 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from automatic_lecture_tex import math_ocr as math_ocr_module
-from automatic_lecture_tex.config import MathOCRConfig
-from automatic_lecture_tex.math_ocr import LatexOCRBackend, UniMERNetBackend
+from automatic_lecture_tex.config import LLMConfig, MathOCRConfig
+from automatic_lecture_tex.math_ocr import (
+    LatexOCRBackend,
+    QwenVLMOCRBackend,
+    UniMERNetBackend,
+    UniMuMERBackend,
+)
 
 
 def _install_fake_pix2tex(monkeypatch, *, cuda_available: bool):
@@ -151,3 +157,100 @@ def test_unimernet_uses_persistent_isolated_worker(tmp_path, monkeypatch):
 
     backend.close()
     assert any('"shutdown"' in item for item in process.stdin.writes)
+
+
+
+def test_unimumer_uses_persistent_isolated_worker(tmp_path, monkeypatch):
+    python_path = tmp_path / "unimumer-env" / "bin" / "python"
+    image_path = tmp_path / "formula.png"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+    image_path.write_bytes(b"image")
+
+    process = _FakeWorkerProcess()
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["preflight_args"] = args
+        return SimpleNamespace(returncode=0, stdout="0.27.1\n", stderr="")
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(math_ocr_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(math_ocr_module.subprocess, "Popen", fake_popen)
+
+    backend = UniMuMERBackend(
+        MathOCRConfig(
+            backend="unimumer",
+            device="cuda",
+            unimumer_model="phxember/Uni-MuMER-Qwen3.5-4B",
+            unimumer_python_path=python_path,
+        )
+    )
+    candidate = backend.recognize(image_path)
+
+    assert candidate is not None
+    assert candidate.backend == "unimumer"
+    assert candidate.text == r"\frac{x}{y}"
+    assert str(python_path) == captured["preflight_args"][0]
+    assert "vllm" in captured["preflight_args"][2]
+    assert str(python_path) == captured["args"][0]
+    assert "--model" in captured["args"]
+    assert "phxember/Uni-MuMER-Qwen3.5-4B" in captured["args"]
+    assert any('"image"' in item for item in process.stdin.writes)
+
+    backend.close()
+    assert any('"shutdown"' in item for item in process.stdin.writes)
+
+
+def test_qwen_vlm_ocr_reuses_configured_multimodal_server(tmp_path, monkeypatch):
+    image_path = tmp_path / "formula.png"
+    Image.new("RGB", (120, 60), "white").save(image_path)
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=r"\frac{x}{y}")
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    openai_module = ModuleType("openai")
+    openai_module.OpenAI = FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", openai_module)
+
+    backend = QwenVLMOCRBackend(
+        MathOCRConfig(
+            backend="qwen_vlm",
+            normalize_dark_formula=False,
+        ),
+        LLMConfig(
+            base_url="http://127.0.0.1:8000/v1",
+            api_key="EMPTY",
+            model="Qwen/test-vlm",
+        ),
+    )
+    candidate = backend.recognize(image_path)
+
+    assert candidate is not None
+    assert candidate.backend == "qwen_vlm"
+    assert candidate.text == r"\frac{x}{y}"
+    assert captured["model"] == "Qwen/test-vlm"
+    assert captured["temperature"] == 0.0
+    assert captured["client"]["base_url"] == "http://127.0.0.1:8000/v1"
+    content = captured["messages"][0]["content"]
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "handwritten mathematical expression" in content[1]["text"]
