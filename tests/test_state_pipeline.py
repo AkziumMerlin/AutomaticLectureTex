@@ -226,10 +226,7 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.vision.math_ocr.board_scan_enabled is True
     assert config.vision.math_ocr.board_scan_max_images == 8
     assert config.vision.math_ocr.device == "cuda"
-    assert config.vision.math_ocr.unimernet_config_path is not None
-    assert config.vision.math_ocr.unimernet_config_path.name == "automatic_lecture_tex.yaml"
-    assert config.vision.math_ocr.unimernet_python_path is not None
-    assert config.vision.math_ocr.unimernet_python_path.name == "python"
+    assert config.vision.math_ocr.unimumer_python_path.name == "python"
     assert config.latex.compile is False
     assert config.latex.output_dir.name == "functional_analysis_vk_20s"
 
