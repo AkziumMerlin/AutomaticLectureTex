@@ -4,7 +4,7 @@ from pathlib import Path
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
-from automatic_lecture_tex.generated_notes import GeneratedChunkNotes, GeneratedObservationResolution
+from automatic_lecture_tex.generated_notes import (\n    GeneratedChunkNotes,\n    GeneratedFormulaObservationResolution,\n    GeneratedObservationResolution,\n)
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import (
@@ -280,6 +280,91 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
     assert "primary local hypothesis" in orchestrator.prompt
     assert "source_evidence_ids" in orchestrator.prompt
     assert r"f(z_f)\\neq0" not in orchestrator.prompt
+
+
+def test_observation_resolution_requires_authoritative_final_state():
+    resolution = GeneratedObservationResolution(
+        text="Resolved observation",
+        correction={
+            "original": "bad",
+            "corrected": "good",
+            "reason": "evidence",
+            "basis": "mathematical_consistency",
+            "confidence": 0.9,
+        },
+    )
+    assert resolution.text == "Resolved observation"
+
+    formula = GeneratedFormulaObservationResolution(
+        text="Resolved formula",
+        latex=r"f(z_f)\\neq0",
+    )
+    assert formula.latex == r"f(z_f)\\neq0"
+
+
+def test_resolved_observation_uses_top_level_resolution_not_correction_record():
+    original = {
+        "id": "obs_1",
+        "text": "old prose",
+        "latex": r"f(z_f)=0",
+    }
+    resolution = GeneratedFormulaObservationResolution(
+        text="new prose",
+        latex=r"f(z_f)\\neq0",
+        correction={
+            "original": "old prose",
+            "corrected": "new prose",
+            "reason": "local evidence",
+            "basis": "multimodal",
+            "confidence": 0.95,
+        },
+    )
+
+    resolved = knowledge_pipeline_module._resolved_observation_from_result(
+        original,
+        resolution,
+    )
+
+    assert resolved["text"] == "new prose"
+    assert resolved["latex"] == r"f(z_f)\\neq0"
+    assert resolved["sequentially_resolved"] is True
+
+
+def test_formula_observation_resolver_uses_formula_schema():
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def __init__(self):
+            self.schema = None
+
+        def _structured(self, prompt, schema, **kwargs):
+            del prompt, kwargs
+            self.schema = schema
+            return schema(text="final", latex=r"x=y")
+
+    orchestrator = FakeOrchestrator()
+    current = {
+        "id": "obs_1",
+        "text": "equation",
+        "latex": r"x=y",
+        "start": 0.0,
+        "end": 1.0,
+        "window_id": "window_1",
+        "window_ids": ["window_1"],
+    }
+
+    knowledge_pipeline_module._resolve_single_state_observation(
+        orchestrator,
+        section=OutlineSection(id="section_1", title="Topic", start=0.0, end=1.0),
+        evidence={"claims": [], "symbols": []},
+        current=current,
+        lookahead=[],
+        resolved_history=[],
+        raw_windows=[],
+        config=NotesConfig(),
+    )
+
+    assert orchestrator.schema is GeneratedFormulaObservationResolution
 
 
 def test_raw_windows_for_sequential_resolution_use_only_current_and_lookahead():
