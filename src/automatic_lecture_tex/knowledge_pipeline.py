@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 2
+STATE_PIPELINE_VERSION = 3
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -371,6 +371,104 @@ def _state_raw_evidence_context(
     return selected
 
 
+def _state_formula_candidate_is_substantive(value: str) -> bool:
+    compact = re.sub(r"\s+", "", value)
+    if len(compact) < 10:
+        return False
+    return any(
+        marker in value
+        for marker in (
+            "=",
+            r"\neq",
+            r"\leq",
+            r"\geq",
+            r"\frac",
+            r"\sum",
+            r"\to",
+            r"\rightarrow",
+            r"\perp",
+            r"\bot",
+        )
+    )
+
+
+def _state_writer_raw_summary(
+    raw_evidence_context: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compress look-around sensor evidence into direct observations + temporal consensus.
+
+    Direct windows retain literal ASR/OCR because they generated the current semantic objects.
+    Non-direct look-around windows are not exposed individually: they may only influence synthesis
+    through formula readings independently repeated in at least two windows. This is temporal
+    ensembling, not another semantic LLM stage.
+    """
+
+    direct_windows: list[dict[str, Any]] = []
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for raw in raw_evidence_context:
+        window_id = str(raw.get("window_id", ""))
+        if raw.get("direct"):
+            direct_windows.append(
+                {
+                    "window_id": window_id,
+                    "start": raw.get("start"),
+                    "end": raw.get("end"),
+                    "asr": _clip_state_raw_text(str(raw.get("asr") or ""), 800),
+                    "visual_latex": list(raw.get("visual_latex", []))[:3],
+                    "math_ocr_candidates": list(raw.get("math_ocr_candidates", []))[:12],
+                }
+            )
+
+        seen_in_window: set[str] = set()
+        for candidate in raw.get("math_ocr_candidates", []):
+            text = str(candidate.get("text") or "").strip()
+            if not text or not _state_formula_candidate_is_substantive(text):
+                continue
+            normalized = re.sub(r"\s+", "", text)
+            if normalized in seen_in_window:
+                continue
+            seen_in_window.add(normalized)
+            item = grouped.setdefault(
+                normalized,
+                {
+                    "text": text,
+                    "window_ids": set(),
+                    "occurrences": 0,
+                    "direct_window_ids": set(),
+                },
+            )
+            item["window_ids"].add(window_id)
+            item["occurrences"] += 1
+            if raw.get("direct"):
+                item["direct_window_ids"].add(window_id)
+
+    consensus = [
+        {
+            "text": item["text"],
+            "window_support": len(item["window_ids"]),
+            "occurrences": item["occurrences"],
+            "window_ids": sorted(item["window_ids"]),
+            "direct_window_support": len(item["direct_window_ids"]),
+        }
+        for item in grouped.values()
+        if len(item["window_ids"]) >= 2
+    ]
+    consensus.sort(
+        key=lambda item: (
+            -int(item["window_support"]),
+            -int(item["direct_window_support"]),
+            -int(item["occurrences"]),
+            -len(str(item["text"])),
+        )
+    )
+
+    return {
+        "direct_windows": direct_windows,
+        "temporal_formula_consensus": consensus[:12],
+    }
+
+
 def _state_section_payload(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
@@ -536,6 +634,7 @@ def _write_state_section_batch(
     guided_json: bool = True,
     max_tokens: int = 6144,
 ) -> ChunkNotes:
+    raw_summary = _state_writer_raw_summary(raw_evidence_context or [])
     prompt = f"""Write one contiguous part of a FINAL lecture-note section. You are the semantic
 resolver at the end of a noisy multimodal reconstruction pipeline. Evidence extraction, episode
 tracking and outline planning happened before this call, but their mathematical interpretation may
@@ -550,33 +649,45 @@ Current fixed section:
 Intermediate semantic reconstruction for this batch (useful but FALLIBLE):
 {json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
 
-Nearby raw sensory evidence (bounded bidirectional context; literal/noisy, not authoritative):
-{json.dumps(raw_evidence_context or [], ensure_ascii=False, separators=(",", ":"))}
+Raw sensory evidence summary:
+- direct_windows are literal/noisy observations from windows that generated CURRENT evidence;
+- temporal_formula_consensus contains exact OCR readings repeated independently across nearby
+  windows and reports their support count. Neighbor windows are intentionally hidden otherwise.
+{json.dumps(raw_summary, ensure_ascii=False, separators=(",", ":"))}
 
 Previously written blocks from THIS section only:
 {json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
 - Interpret the lecture; do not merely paraphrase OCR or the intermediate reconstruction.
-- Canonical observations/active claims/symbol records are fallible hypotheses produced earlier,
-  NOT ground truth. Raw ASR/OCR candidates are also fallible observations.
-- Compare all available evidence. Prefer the interpretation jointly supported by temporal
-  continuity, notation/type information, neighboring board states, speech and mathematical
-  consistency.
-- A forward raw window may only disambiguate material already being written/discussed in this
-  batch. Do not import a later theorem, definition or symbol merely because it appears in look-ahead
-  sensory evidence.
-- You MAY correct an intermediate claim or formula when raw evidence or an elementary consequence
-  of accepted context shows that reading is inconsistent. When you do, add a CorrectionRecord with
-  the original reading, corrected reading, reason, basis and confidence.
-- Before finalizing, explicitly test your chosen reading for local contradictions. Reject readings
-  that make a displayed denominator zero, contradict a simultaneous membership/equation, violate an
-  already established type/linearity relation, or conflict with clearer adjacent board states.
-- OCR token adjacency does not determine mathematical scope. A trailing membership/relation may
-  apply to the whole left-hand expression rather than to the nearest symbol; resolve scope from the
-  equation and surrounding evidence.
+- Treat the intermediate semantic reconstruction as the DEFAULT hypothesis, not as ground truth.
+  Raw evidence is an adjudication channel, not a license to freely rewrite a coherent formula.
+- Override a well-formed intermediate formula only when at least one of these gates is satisfied:
+  (a) it directly contradicts another supplied semantic fact or an elementary consequence of the
+  established context; or (b) a specific alternative reading has support from at least TWO
+  independent windows in temporal_formula_consensus.
+- A one-off OCR/ASR fragment may expose ambiguity, but by itself it MUST NOT replace a coherent
+  semantic formula. In that case keep the supported common content or record unresolved.
+- Repetition across independent windows is stronger evidence than a cleaner-looking singleton OCR
+  crop. Conversely, repeated ASR wording is not independent visual support.
+- Never simplify a more specific formula merely because one OCR crop omits a coefficient, factor,
+  denominator, relation sign, quantifier, membership, or subscript. Missing ink is not evidence that
+  the mathematical object was absent.
+- In particular preserve semantic-critical operators such as = versus \neq and < versus \leq
+  unless the alternative passes one of the override gates above.
+- Neighbor consensus may only disambiguate material already present in CURRENT evidence. Do not
+  import a later theorem, definition, symbol, or proof step as new section content.
+- When an override is justified, add a CorrectionRecord whose corrected text actually differs from
+  original, and state which contradiction or repeated reading justifies it. Do not emit no-op
+  corrections.
+- Before finalizing, test the chosen reading for local contradictions, including zero denominators,
+  incompatible membership/equations, and established type/linearity relations.
+- OCR token adjacency does not determine mathematical scope. Resolve scope from the complete
+  expression and repeated neighboring readings.
+- Standard textbook knowledge may reject a mathematically impossible reading, but it must NOT choose
+  notation or add a lecture claim merely because that form is conventional.
 - If two readings remain genuinely ambiguous, write only their common supported content and record
-  the ambiguity in unresolved. Do not invent a textbook completion.
+  the ambiguity in unresolved.
 - Follow the fixed episode order and the lecture's actual narrative line.
 - Preserve lecturer corrections, notation evolution, theorem/proof continuity and level of detail.
 - Never resurrect superseded/retracted content as a current fact.
@@ -620,6 +731,11 @@ Rules:
             continue
         kept.append(block)
     notes.blocks = kept
+    notes.corrections = [
+        item
+        for item in notes.corrections
+        if item.original.strip() != item.corrected.strip()
+    ]
     notes.unresolved = list(dict.fromkeys(notes.unresolved))
     return notes
 
