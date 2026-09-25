@@ -494,7 +494,6 @@ def _resolve_single_state_observation(
     current: dict[str, Any],
     lookahead: list[dict[str, Any]],
     resolved_history: list[dict[str, Any]],
-    previous_context: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
     config,
 ) -> GeneratedObservationResolution:
@@ -519,9 +518,6 @@ Current fixed section:
 
 Already resolved immutable history:
 {json.dumps(history, ensure_ascii=False, separators=(",", ":"))}
-
-Previously written section context (continuity only):
-{json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
 
 CURRENT observation to resolve:
 {json.dumps(current, ensure_ascii=False, separators=(",", ":"))}
@@ -588,7 +584,6 @@ def _resolve_state_batch_sequential(
     evidence: dict[str, Any],
     section_observations: list[dict[str, Any]],
     resolved_history: list[dict[str, Any]],
-    previous_context: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
     work: Path,
     config,
@@ -646,7 +641,6 @@ def _resolve_state_batch_sequential(
                 "symbols": _symbols_for_observation(evidence, original),
                 "lookahead": lookahead,
                 "history": history,
-                "previous_context": previous_context,
                 "raw_windows": raw,
                 "llm": llm_config,
             }
@@ -669,7 +663,6 @@ def _resolve_state_batch_sequential(
                     current=original,
                     lookahead=lookahead,
                     resolved_history=resolved_history,
-                    previous_context=previous_context,
                     raw_windows=raw_windows,
                     config=config,
                 )
@@ -687,6 +680,9 @@ def _resolve_state_batch_sequential(
                 {
                     "fingerprint": fingerprint,
                     "current": original,
+                    "history_before": history,
+                    "claims": _claims_for_observation(evidence, observation_id),
+                    "symbols": _symbols_for_observation(evidence, original),
                     "lookahead": lookahead,
                     "raw_windows": raw,
                     "resolution": resolution.model_dump(mode="json"),
@@ -1463,7 +1459,6 @@ def run_knowledge_pipeline(
                     evidence=evidence_payload,
                     section_observations=section_observations,
                     resolved_history=resolved_history,
-                    previous_context=previous_context,
                     raw_windows=raw_window_index,
                     work=work,
                     config=pipeline.config.notes,
