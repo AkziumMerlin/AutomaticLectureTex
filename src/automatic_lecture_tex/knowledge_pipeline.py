@@ -766,6 +766,12 @@ def _resolve_state_batch_sequential(
             raw_windows,
             max_windows=int(config.state_observation_max_raw_windows),
         )
+        current_window_ids = _observation_window_ids(original)
+        support_raw = [
+            item
+            for item in raw_windows
+            if str(item.get("window_id", "")) in current_window_ids
+        ]
         history_limit = int(config.state_observation_history)
         history = resolved_history[-history_limit:] if history_limit else []
         fingerprint = stable_hash(
@@ -821,6 +827,7 @@ def _resolve_state_batch_sequential(
                     "symbols": _symbols_for_observation(evidence, original),
                     "lookahead": lookahead,
                     "raw_windows": raw,
+                    "support_raw_windows": support_raw,
                     "resolution": resolution.model_dump(mode="json"),
                 },
             )
@@ -828,7 +835,7 @@ def _resolve_state_batch_sequential(
         resolved, resolution_accepted = _resolved_observation_from_result(
             original,
             resolution,
-            raw,
+            support_raw or raw,
         )
         resolved_batch.append(resolved)
         resolved_history.append(resolved)
