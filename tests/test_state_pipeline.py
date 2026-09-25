@@ -228,7 +228,8 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
         "window_6",
     ]
     assert next(item for item in context if item["window_id"] == "window_5")["direct"] is True
-    assert r"f(z_f)\neq 0" in str(context)
+    future = next(item for item in context if item["window_id"] == "window_6")
+    assert future["math_ocr_candidates"][0]["text"] == r"f(z_f)\neq 0"
     assert "unrelated future material" not in str(context)
 
 
