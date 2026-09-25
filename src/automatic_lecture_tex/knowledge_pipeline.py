@@ -649,8 +649,17 @@ def _write_state_section_batch_resilient(
     kb: LectureKnowledgeBase,
     transcript: Transcript,
     config,
+    raw_window_index: list[dict[str, Any]] | None = None,
+    raw_evidence_context: list[dict[str, Any]] | None = None,
 ) -> ChunkNotes:
     """Recursively split final-writer work that cannot fit in one structured request."""
+
+    if raw_evidence_context is None:
+        raw_evidence_context = _state_raw_evidence_context(
+            evidence,
+            raw_window_index or [],
+            config,
+        )
 
     try:
         return _write_state_section_batch(
@@ -659,6 +668,7 @@ def _write_state_section_batch_resilient(
             evidence,
             outline_context=outline_context,
             previous_context=previous_context,
+            raw_evidence_context=raw_evidence_context,
         )
     except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
@@ -694,6 +704,7 @@ def _write_state_section_batch_resilient(
                 kb=kb,
                 transcript=transcript,
                 config=config,
+                raw_window_index=raw_window_index,
             )
             right_previous = [
                 *previous_context,
@@ -708,6 +719,7 @@ def _write_state_section_batch_resilient(
                 kb=kb,
                 transcript=transcript,
                 config=config,
+                raw_window_index=raw_window_index,
             )
             return _merge_state_section_batches(section, [left_notes, right_notes])
 
@@ -732,6 +744,7 @@ def _write_state_section_batch_resilient(
                 kb=kb,
                 transcript=transcript,
                 config=config,
+                raw_window_index=raw_window_index,
             )
             right_previous = [
                 *previous_context,
@@ -746,6 +759,7 @@ def _write_state_section_batch_resilient(
                 kb=kb,
                 transcript=transcript,
                 config=config,
+                raw_window_index=raw_window_index,
             )
             return _merge_state_section_batches(section, [left_notes, right_notes])
 
@@ -780,6 +794,7 @@ def _write_state_section_batch_resilient(
                 evidence,
                 outline_context=outline_context,
                 previous_context=previous_context,
+                raw_evidence_context=raw_evidence_context,
                 guided_json=False,
                 max_tokens=8192,
             )
@@ -1027,6 +1042,7 @@ def run_knowledge_pipeline(
     if state_mode:
         note_sections: list[ChunkNotes] = []
         outline_context = _state_outline_context(outline)
+        raw_window_index = _load_state_raw_window_index(work)
         for section in outline.sections:
             evidence_batches = _state_section_batches(
                 kb,
@@ -1038,12 +1054,18 @@ def run_knowledge_pipeline(
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
+                raw_evidence_context = _state_raw_evidence_context(
+                    evidence_payload,
+                    raw_window_index,
+                    pipeline.config.notes,
+                )
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
                         "evidence": evidence_payload,
+                        "raw_evidence_context": raw_evidence_context,
                         "previous_context": previous_context,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
@@ -1070,6 +1092,8 @@ def run_knowledge_pipeline(
                     kb=kb,
                     transcript=transcript,
                     config=pipeline.config.notes,
+                    raw_window_index=raw_window_index,
+                    raw_evidence_context=raw_evidence_context,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
                 atomic_json_dump(
@@ -1077,6 +1101,7 @@ def run_knowledge_pipeline(
                     {
                         "fingerprint": fingerprint,
                         "evidence": evidence_payload,
+                        "raw_evidence_context": raw_evidence_context,
                         "notes": notes.model_dump(mode="json"),
                     },
                 )
