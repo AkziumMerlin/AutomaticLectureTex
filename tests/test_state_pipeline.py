@@ -233,7 +233,7 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
-def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
+def test_state_writer_consumes_resolved_state_without_raw_ocr():
     class FakeOrchestrator:
         output_language = "ru"
 
@@ -276,10 +276,10 @@ def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
         raw_evidence_context=raw_context,
     )
 
-    assert "FALLIBLE" in orchestrator.prompt
-    assert "NOT ground truth" in orchestrator.prompt
-    assert "do not merely paraphrase OCR" in orchestrator.prompt
-    assert r"f(z_f)\\neq0" in orchestrator.prompt
+    assert "Sequentially resolved state evidence" in orchestrator.prompt
+    assert "primary local hypothesis" in orchestrator.prompt
+    assert "source_evidence_ids" in orchestrator.prompt
+    assert r"f(z_f)\\neq0" not in orchestrator.prompt
 
 
 def test_raw_windows_for_sequential_resolution_use_only_current_and_lookahead():
