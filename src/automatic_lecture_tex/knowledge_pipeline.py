@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 4
+STATE_PIPELINE_VERSION = 5
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -522,16 +522,88 @@ def _symbols_for_observation(
     ]
 
 
+def _resolution_formula_supported(
+    original: dict[str, Any],
+    resolution: GeneratedObservationResolution,
+    raw_windows: list[dict[str, Any]],
+) -> bool:
+    original_latex = str(original.get("latex") or "").strip()
+    proposed_latex = str(resolution.latex or "").strip()
+    if not original_latex or not proposed_latex:
+        return proposed_latex == original_latex
+
+    original_norm = _compact_formula_similarity_text(original_latex)
+    proposed_norm = _compact_formula_similarity_text(proposed_latex)
+    if proposed_norm == original_norm:
+        return True
+
+    candidates: list[str] = []
+    for raw in raw_windows:
+        candidates.extend(
+            str(item.get("text") or "").strip()
+            for item in raw.get("math_ocr_candidates", [])
+            if str(item.get("text") or "").strip()
+        )
+        candidates.extend(
+            str(item).strip()
+            for item in raw.get("visual_latex", [])
+            if str(item).strip()
+        )
+
+    return any(
+        SequenceMatcher(
+            None,
+            proposed_norm,
+            _compact_formula_similarity_text(candidate),
+        ).ratio()
+        >= 0.88
+        for candidate in candidates
+    )
+
+
+def _resolution_text_correction_supported(
+    resolution: GeneratedObservationResolution,
+) -> bool:
+    correction = resolution.correction
+    if correction is None:
+        return True
+    return (
+        str(correction.basis) in {"visual", "audio_context", "multimodal"}
+        and float(correction.confidence) >= 0.8
+    )
+
+
 def _resolved_observation_from_result(
     original: dict[str, Any],
     resolution: GeneratedObservationResolution,
-) -> dict[str, Any]:
+    raw_windows: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    """Attach a resolution overlay without mutating the source observation."""
+
     resolved = dict(original)
-    resolved["text"] = resolution.text.strip()
-    if resolution.latex is not None and resolution.latex.strip():
-        resolved["latex"] = resolution.latex.strip()
+    original_text = str(original.get("text") or "").strip()
+    original_latex = str(original.get("latex") or "").strip()
+    proposed_latex = str(resolution.latex or "").strip()
+
+    formula_supported = _resolution_formula_supported(original, resolution, raw_windows)
+    text_supported = _resolution_text_correction_supported(resolution)
+
+    accepted = True
+    if original_latex:
+        accepted = formula_supported
+    elif resolution.correction is not None:
+        accepted = text_supported
+
+    if accepted:
+        resolved["resolved_text"] = resolution.text.strip()
+        resolved["resolved_latex"] = proposed_latex or original_latex or None
+    else:
+        resolved["resolved_text"] = original_text
+        resolved["resolved_latex"] = original_latex or None
+
     resolved["sequentially_resolved"] = True
-    return resolved
+    resolved["resolution_accepted"] = accepted
+    return resolved, accepted
 
 
 def _resolve_single_state_observation(
@@ -753,10 +825,19 @@ def _resolve_state_batch_sequential(
                 },
             )
 
-        resolved = _resolved_observation_from_result(original, resolution)
+        resolved, resolution_accepted = _resolved_observation_from_result(
+            original,
+            resolution,
+            raw,
+        )
         resolved_batch.append(resolved)
         resolved_history.append(resolved)
-        if resolution.correction is not None:
+        if not resolution_accepted:
+            unresolved.append(
+                "Rejected unsupported sequential rewrite for "
+                f"{observation_id}; preserved the source observation."
+            )
+        elif resolution.correction is not None:
             correction = resolution.correction
             if correction.original.strip() != correction.corrected.strip():
                 corrections.append(correction)
@@ -930,6 +1011,51 @@ def _state_section_batches(
     return batches
 
 
+def _math_atom_token(observation_id: str) -> str:
+    safe = "".join(char if char.isalnum() else "_" for char in observation_id)
+    return f"MATHATOM__{safe}__"
+
+
+def _writer_evidence_with_math_atoms(
+    evidence: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Mask resolved LaTeX before prose synthesis so the LLM cannot rewrite it."""
+
+    masked = dict(evidence)
+    observations: list[dict[str, Any]] = []
+    atoms: dict[str, str] = {}
+    for item in evidence.get("observations", []):
+        observation = dict(item)
+        observation_id = str(observation.get("id", ""))
+        resolved_text = str(
+            observation.get("resolved_text") or observation.get("text") or ""
+        ).strip()
+        resolved_latex = str(
+            observation.get("resolved_latex") or observation.get("latex") or ""
+        ).strip()
+        observation["text"] = resolved_text
+        observation.pop("resolved_text", None)
+        observation.pop("resolved_latex", None)
+        if resolved_latex and observation_id:
+            token = _math_atom_token(observation_id)
+            observation["latex"] = token
+            atoms[token] = resolved_latex
+        observations.append(observation)
+    masked["observations"] = observations
+    return masked, atoms
+
+
+def _restore_generated_math_atoms(
+    generated: GeneratedChunkNotes,
+    atoms: dict[str, str],
+) -> None:
+    for block in generated.blocks:
+        for token, atom_latex in atoms.items():
+            if token not in block.latex:
+                continue
+            replacement = atom_latex if str(block.type) == "equation" else f"${atom_latex}$"
+            block.latex = block.latex.replace(token, replacement)
+
 def _write_state_section_batch(
     orchestrator: KnowledgeOrchestrator,
     section: OutlineSection,
@@ -941,6 +1067,7 @@ def _write_state_section_batch(
     guided_json: bool = True,
     max_tokens: int = 6144,
 ) -> ChunkNotes:
+    writer_evidence, math_atoms = _writer_evidence_with_math_atoms(evidence)
     prompt = f"""Write one contiguous part of a FINAL lecture-note section from a chronological
 state whose observations have already been resolved one-by-one against their local ASR/OCR evidence.
 
@@ -951,7 +1078,7 @@ Current fixed section:
 {json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
 
 Sequentially resolved state evidence for this batch:
-{json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(writer_evidence, ensure_ascii=False, separators=(",", ":"))}
 
 Previously written blocks from THIS section only:
 {json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
@@ -960,11 +1087,11 @@ Rules:
 - Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
   their wording.
 - The mathematical content of a sequentially resolved observation is the primary local hypothesis.
-- A non-empty latex field of a sequentially resolved observation is a CANONICAL MATH ATOM. Whenever
-  you include that mathematical statement, copy its LaTeX exactly character-for-character. You may
-  connect atoms with prose, but do not rename symbols or translate LaTeX commands into words:
-  preserve commands such as \\sum, \\infty, \\varphi, \\varepsilon, \\neq, \\leq,
-  \\in, \\perp, and \\mathbb exactly as supplied.
+- A non-empty latex field is represented by an opaque token such as
+  MATHATOM__obs_window_0010_000__. The token is a CANONICAL MATH ATOM already resolved upstream.
+  If you use that mathematical statement, copy the token EXACTLY and bare, without dollar signs,
+  LaTeX commands, renaming, expansion, paraphrase, or translation. The host substitutes the exact
+  resolved LaTeX after this call.
 - Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
   relation merely to make the exposition look more familiar.
 - You may still correct a resolved reading if it directly contradicts another supplied resolved fact
@@ -989,6 +1116,7 @@ Rules:
         guided_json=guided_json,
         split_oversized_task=True,
     )
+    _restore_generated_math_atoms(generated, math_atoms)
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
     notes.start = section.start
