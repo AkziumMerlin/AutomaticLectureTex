@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 1
+STATE_PIPELINE_VERSION = 2
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -74,6 +74,8 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "episode_synthesis_max_evidence_chars",
     "episode_symbol_context_limit",
     "state_section_max_evidence_chars",
+    "state_section_raw_context_seconds",
+    "state_section_raw_evidence_chars",
 }
 
 
@@ -211,6 +213,161 @@ def _state_outline_context(outline: LectureOutline) -> list[dict[str, Any]]:
         }
         for section in outline.sections
     ]
+
+
+def _clip_state_raw_text(value: str | None, limit: int) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
+    """Load compact literal ASR/OCR evidence retained by the extraction stage.
+
+    The final state writer is allowed to reinterpret the intermediate semantic state, therefore it
+    needs access to the observations that state was reconstructed from. Keep this index compact:
+    frame pixels are not sent again, only literal ASR and OCR candidates already saved in window
+    artifacts.
+    """
+
+    root = work / "knowledge_windows"
+    windows: list[dict[str, Any]] = []
+    for path in sorted(root.glob("window_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        chunk = payload.get("chunk") or {}
+        visual_latex: list[str] = []
+        ocr_candidates: list[dict[str, Any]] = []
+        seen_ocr: set[tuple[Any, str]] = set()
+
+        for visual in payload.get("visual_evidence", []):
+            for key in ("raw_latex", "latex"):
+                value = _clip_state_raw_text(str(visual.get(key) or ""), 400)
+                if value and value not in visual_latex:
+                    visual_latex.append(value)
+
+            for candidate in visual.get("math_ocr_candidates", []):
+                value = _clip_state_raw_text(str(candidate.get("text") or ""), 400)
+                if not value:
+                    continue
+                key = (candidate.get("timestamp"), value)
+                if key in seen_ocr:
+                    continue
+                seen_ocr.add(key)
+                ocr_candidates.append(
+                    {
+                        "timestamp": candidate.get("timestamp"),
+                        "text": value,
+                        "source_id": candidate.get("source_id"),
+                    }
+                )
+                if len(ocr_candidates) >= 12:
+                    break
+            if len(ocr_candidates) >= 12:
+                break
+
+        start = float(chunk.get("start", 0.0))
+        windows.append(
+            {
+                "window_id": str(chunk.get("id") or path.stem),
+                "start": start,
+                "end": float(chunk.get("end", start)),
+                "asr": _clip_state_raw_text(
+                    str(chunk.get("timestamped_text") or chunk.get("text") or ""),
+                    1200,
+                ),
+                "visual_latex": visual_latex[:3],
+                "math_ocr_candidates": ocr_candidates,
+            }
+        )
+
+    return sorted(
+        windows,
+        key=lambda item: (item["start"], item["end"], item["window_id"]),
+    )
+
+
+def _state_raw_evidence_context(
+    evidence: dict[str, Any],
+    raw_windows: list[dict[str, Any]],
+    config,
+) -> list[dict[str, Any]]:
+    """Select bounded bidirectional literal evidence around one writer batch.
+
+    Forward raw evidence is useful for resolving handwriting scope or an incomplete formula, but it
+    is deliberately distinct from future semantic state: the prompt forbids importing later
+    material merely because it appears in the look-ahead.
+    """
+
+    if not raw_windows:
+        return []
+
+    observations = list(evidence.get("observations", []))
+    episodes = list(evidence.get("episodes", []))
+    if observations:
+        start = min(float(item.get("start", 0.0)) for item in observations)
+        end = max(float(item.get("end", start)) for item in observations)
+    elif episodes:
+        start = min(float(item.get("start", 0.0)) for item in episodes)
+        end = max(float(item.get("end", start)) for item in episodes)
+    else:
+        section = evidence.get("section", {})
+        start = float(section.get("start", 0.0))
+        end = float(section.get("end", start))
+
+    direct_window_ids: set[str] = set()
+    for observation in observations:
+        window_id = observation.get("window_id")
+        if window_id:
+            direct_window_ids.add(str(window_id))
+        direct_window_ids.update(str(item) for item in observation.get("window_ids", []))
+    for episode in episodes:
+        direct_window_ids.update(str(item) for item in episode.get("window_ids", []))
+
+    radius = float(config.state_section_raw_context_seconds)
+    lower = start - radius
+    upper = end + radius
+    center = 0.5 * (start + end)
+
+    candidates: list[dict[str, Any]] = []
+    for raw in raw_windows:
+        is_direct = str(raw["window_id"]) in direct_window_ids
+        overlaps_context = float(raw["end"]) >= lower and float(raw["start"]) <= upper
+        if not is_direct and not overlaps_context:
+            continue
+        item = dict(raw)
+        item["direct"] = is_direct
+        candidates.append(item)
+
+    # Prefer windows that directly generated current semantic evidence, then nearby context.
+    candidates.sort(
+        key=lambda item: (
+            not item["direct"],
+            abs(0.5 * (float(item["start"]) + float(item["end"])) - center),
+            float(item["start"]),
+        )
+    )
+    max_chars = int(config.state_section_raw_evidence_chars)
+    selected: list[dict[str, Any]] = []
+    used = 2
+    for item in candidates:
+        serialized = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        cost = len(serialized) + (1 if selected else 0)
+        if selected and used + cost > max_chars:
+            continue
+        selected.append(item)
+        used += cost
+        if used >= max_chars:
+            break
+
+    selected.sort(
+        key=lambda item: (float(item["start"]), float(item["end"]), item["window_id"])
+    )
+    return selected
 
 
 def _state_section_payload(
@@ -374,12 +531,14 @@ def _write_state_section_batch(
     *,
     outline_context: list[dict[str, Any]],
     previous_context: list[dict[str, Any]],
+    raw_evidence_context: list[dict[str, Any]] | None = None,
     guided_json: bool = True,
     max_tokens: int = 6144,
 ) -> ChunkNotes:
-    prompt = f"""Write one contiguous part of a FINAL lecture-note section from an already assembled
-persistent LectureState. All local evidence extraction, episode tracking, notation tracking and
-global outline planning happened BEFORE this call.
+    prompt = f"""Write one contiguous part of a FINAL lecture-note section. You are the semantic
+resolver at the end of a noisy multimodal reconstruction pipeline. Evidence extraction, episode
+tracking and outline planning happened before this call, but their mathematical interpretation may
+still be wrong.
 
 Global lecture outline (read-only narrative context):
 {json.dumps(outline_context, ensure_ascii=False, separators=(",", ":"))}
@@ -387,23 +546,45 @@ Global lecture outline (read-only narrative context):
 Current fixed section:
 {json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
 
-Canonical state evidence for this batch:
+Intermediate semantic reconstruction for this batch (useful but FALLIBLE):
 {json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
+
+Nearby raw sensory evidence (bounded bidirectional context; literal/noisy, not authoritative):
+{json.dumps(raw_evidence_context or [], ensure_ascii=False, separators=(",", ":"))}
 
 Previously written blocks from THIS section only:
 {json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
+- Interpret the lecture; do not merely paraphrase OCR or the intermediate reconstruction.
+- Canonical observations/active claims/symbol records are fallible hypotheses produced earlier,
+  NOT ground truth. Raw ASR/OCR candidates are also fallible observations.
+- Compare all available evidence. Prefer the interpretation jointly supported by temporal
+  continuity, notation/type information, neighboring board states, speech and mathematical
+  consistency.
+- A forward raw window may only disambiguate material already being written/discussed in this
+  batch. Do not import a later theorem, definition or symbol merely because it appears in look-ahead
+  sensory evidence.
+- You MAY correct an intermediate claim or formula when raw evidence or an elementary consequence
+  of accepted context shows that reading is inconsistent. When you do, add a CorrectionRecord with
+  the original reading, corrected reading, reason, basis and confidence.
+- Before finalizing, explicitly test your chosen reading for local contradictions. Reject readings
+  that make a displayed denominator zero, contradict a simultaneous membership/equation, violate an
+  already established type/linearity relation, or conflict with clearer adjacent board states.
+- OCR token adjacency does not determine mathematical scope. A trailing membership/relation may
+  apply to the whole left-hand expression rather than to the nearest symbol; resolve scope from the
+  equation and surrounding evidence.
+- If two readings remain genuinely ambiguous, write only their common supported content and record
+  the ambiguity in unresolved. Do not invent a textbook completion.
 - Follow the fixed episode order and the lecture's actual narrative line.
-- Canonical observations/active claims/symbol records are the source of truth for final writing.
-- Do not recreate material from raw ASR wording; raw ASR was intentionally removed at this stage.
 - Preserve lecturer corrections, notation evolution, theorem/proof continuity and level of detail.
-- Never resurrect superseded/retracted or unresolved content as a current fact.
+- Never resurrect superseded/retracted content as a current fact.
 - Do not introduce textbook material merely because it would make the exposition nicer.
 - Avoid repeating a definition/proof step already present in previous_context unless this batch
   genuinely develops it further.
 - Every substantive block must cite source_claim_ids and/or source_evidence_ids present in the
-  supplied canonical state evidence.
+  supplied intermediate semantic evidence. A corrected interpretation should cite the evidence it
+  corrects and uses.
 - Return block bodies only; renderer owns section/theorem/proof wrappers.
 - Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
 """
