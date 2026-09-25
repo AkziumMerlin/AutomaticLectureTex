@@ -334,13 +334,18 @@ def _apply_symbols(
         symbol.evidence_ids = [
             canonical_observation_id(kb, item) or item for item in symbol.evidence_ids
         ]
+        evidence_observations = [
+            obs for obs in kb.observations if obs.id in symbol.evidence_ids
+        ]
         episode_ids = [
             obs.episode_id
-            for obs in kb.observations
-            if obs.id in symbol.evidence_ids and obs.episode_id
+            for obs in evidence_observations
+            if obs.episode_id
         ]
         episode_id = episode_ids[0] if episode_ids else ""
         symbol.episode_id = episode_id
+        if evidence_observations:
+            symbol.introduced_at = min(obs.start for obs in evidence_observations)
         # Scope is structural: the model may describe a meaning/type, but cannot choose a global
         # namespace independently of the semantic episode that introduced the symbol.
         symbol.scope = episode_id or "lecture"
@@ -355,8 +360,11 @@ def _apply_symbols(
             if symbol.type_hint:
                 existing.type_hint = symbol.type_hint
             existing.evidence_ids = _merge_unique(existing.evidence_ids, symbol.evidence_ids)
-            if symbol.introduced_at:
-                existing.introduced_at = min(existing.introduced_at, symbol.introduced_at)
+            merged_evidence = [
+                obs for obs in kb.observations if obs.id in existing.evidence_ids
+            ]
+            if merged_evidence:
+                existing.introduced_at = min(obs.start for obs in merged_evidence)
             if episode_id:
                 episode = next((item for item in kb.episodes if item.id == episode_id), None)
                 if episode is not None:
