@@ -438,7 +438,7 @@ def _filter_current_window_ocr_candidates(
     return [
         dict(candidate)
         for score, candidate in sorted(ranked, key=lambda item: item[0], reverse=True)
-        if score >= 0.45
+        if score >= 0.55
     ][:4]
 
 
