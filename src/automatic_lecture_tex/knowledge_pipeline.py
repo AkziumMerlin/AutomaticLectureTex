@@ -881,10 +881,8 @@ def _write_state_section_batch(
     guided_json: bool = True,
     max_tokens: int = 6144,
 ) -> ChunkNotes:
-    prompt = f"""Write one contiguous part of a FINAL lecture-note section. You are the semantic
-resolver at the end of a noisy multimodal reconstruction pipeline. Evidence extraction, episode
-tracking and outline planning happened before this call, but their mathematical interpretation may
-still be wrong.
+    prompt = f"""Write one contiguous part of a FINAL lecture-note section from a chronological
+state whose observations have already been resolved one-by-one against their local ASR/OCR evidence.
 
 Global lecture outline (read-only narrative context):
 {json.dumps(outline_context, ensure_ascii=False, separators=(",", ":"))}
@@ -892,45 +890,29 @@ Global lecture outline (read-only narrative context):
 Current fixed section:
 {json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
 
-Intermediate semantic reconstruction for this batch (useful but FALLIBLE):
+Sequentially resolved state evidence for this batch:
 {json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
-
-Nearby raw sensory evidence (bounded bidirectional context; literal/noisy, not authoritative):
-{json.dumps(raw_evidence_context or [], ensure_ascii=False, separators=(",", ":"))}
 
 Previously written blocks from THIS section only:
 {json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
-- Interpret the lecture; do not merely paraphrase OCR or the intermediate reconstruction.
-- Canonical observations/active claims/symbol records are fallible hypotheses produced earlier,
-  NOT ground truth. Raw ASR/OCR candidates are also fallible observations.
-- Compare all available evidence. Prefer the interpretation jointly supported by temporal
-  continuity, notation/type information, neighboring board states, speech and mathematical
-  consistency.
-- A forward raw window may only disambiguate material already being written/discussed in this
-  batch. Do not import a later theorem, definition or symbol merely because it appears in look-ahead
-  sensory evidence.
-- You MAY correct an intermediate claim or formula when raw evidence or an elementary consequence
-  of accepted context shows that reading is inconsistent. When you do, add a CorrectionRecord with
-  the original reading, corrected reading, reason, basis and confidence.
-- Before finalizing, explicitly test your chosen reading for local contradictions. Reject readings
-  that make a displayed denominator zero, contradict a simultaneous membership/equation, violate an
-  already established type/linearity relation, or conflict with clearer adjacent board states.
-- OCR token adjacency does not determine mathematical scope. A trailing membership/relation may
-  apply to the whole left-hand expression rather than to the nearest symbol; resolve scope from the
-  equation and surrounding evidence.
-- If two readings remain genuinely ambiguous, write only their common supported content and record
-  the ambiguity in unresolved. Do not invent a textbook completion.
-- Follow the fixed episode order and the lecture's actual narrative line.
-- Preserve lecturer corrections, notation evolution, theorem/proof continuity and level of detail.
-- Never resurrect superseded/retracted content as a current fact.
-- Do not introduce textbook material merely because it would make the exposition nicer.
+- Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
+  their wording.
+- The mathematical content of a sequentially resolved observation is the primary local hypothesis.
+  Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
+  relation merely to make the exposition look more familiar.
+- You may still correct a resolved reading if it directly contradicts another supplied resolved fact
+  or an elementary consequence of established context. Log every such semantic change in
+  corrections. Do not emit no-op corrections.
+- Preserve lecturer notation, theorem/proof continuity, order, and level of detail.
+- Do not add material from future outline entries or unrelated textbook exposition.
 - Avoid repeating a definition/proof step already present in previous_context unless this batch
   genuinely develops it further.
-- Every substantive block must cite source_claim_ids and/or source_evidence_ids present in the
-  supplied intermediate semantic evidence. A corrected interpretation should cite the evidence it
-  corrects and uses.
+- Every substantive block must cite source_evidence_ids from the supplied resolved observations;
+  source_claim_ids may be empty because pre-resolution claims are intentionally removed.
+- If a remaining ambiguity cannot be resolved from this state, put it in unresolved instead of
+  inventing a specific formula.
 - Return block bodies only; renderer owns section/theorem/proof wrappers.
 - Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
 """
@@ -965,8 +947,79 @@ Rules:
             continue
         kept.append(block)
     notes.blocks = kept
+    notes.corrections = [
+        item
+        for item in notes.corrections
+        if item.original.strip() != item.corrected.strip()
+    ]
     notes.unresolved = list(dict.fromkeys(notes.unresolved))
     return notes
+
+
+def _subset_state_evidence_by_episode_ids(
+    evidence: dict[str, Any],
+    episode_ids: list[str],
+) -> dict[str, Any]:
+    selected_episode_ids = set(episode_ids)
+    episodes = [
+        dict(item)
+        for item in evidence.get("episodes", [])
+        if str(item.get("id", "")) in selected_episode_ids
+    ]
+    observation_ids: set[str] = set()
+    for episode in episodes:
+        observation_ids.update(str(item) for item in episode.get("observation_ids", []))
+
+    observations = [
+        dict(item)
+        for item in evidence.get("observations", [])
+        if (
+            str(item.get("episode_id", "")) in selected_episode_ids
+            or str(item.get("id", "")) in observation_ids
+        )
+    ]
+    selected_observation_ids = {
+        str(item.get("id", "")) for item in observations if item.get("id")
+    }
+    claims = [
+        dict(item)
+        for item in evidence.get("claims", [])
+        if not item.get("evidence_ids")
+        or selected_observation_ids.intersection(
+            str(value) for value in item.get("evidence_ids", [])
+        )
+    ]
+    cutoff = max(
+        (float(item.get("end", item.get("start", 0.0))) for item in observations),
+        default=0.0,
+    )
+    symbols = [
+        dict(item)
+        for item in evidence.get("symbols", [])
+        if (
+            str(item.get("episode_id", "")) in selected_episode_ids
+            or float(item.get("introduced_at", 0.0)) <= cutoff
+        )
+    ]
+
+    child = dict(evidence)
+    child["episodes"] = episodes
+    child["observations"] = observations
+    child["claims"] = claims
+    child["symbols"] = symbols
+    if "sequential_resolution" in child:
+        child["sequential_resolution"] = {
+            **dict(child["sequential_resolution"]),
+            "resolved_observation_ids": [
+                item
+                for item in child["sequential_resolution"].get(
+                    "resolved_observation_ids",
+                    [],
+                )
+                if str(item) in selected_observation_ids
+            ],
+        }
+    return child
 
 
 def _state_section_for_episode_ids(
@@ -1000,13 +1053,6 @@ def _write_state_section_batch_resilient(
 ) -> ChunkNotes:
     """Recursively split final-writer work that cannot fit in one structured request."""
 
-    if raw_evidence_context is None:
-        raw_evidence_context = _state_raw_evidence_context(
-            evidence,
-            raw_window_index or [],
-            config,
-        )
-
     try:
         return _write_state_section_batch(
             orchestrator,
@@ -1014,7 +1060,7 @@ def _write_state_section_batch_resilient(
             evidence,
             outline_context=outline_context,
             previous_context=previous_context,
-            raw_evidence_context=raw_evidence_context,
+            raw_evidence_context=None,
         )
     except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
@@ -1038,8 +1084,8 @@ def _write_state_section_batch_resilient(
 
             left_section = _state_section_for_episode_ids(section, left_ids)
             right_section = _state_section_for_episode_ids(section, right_ids)
-            left_evidence = _state_section_payload(kb, left_section, transcript, config)
-            right_evidence = _state_section_payload(kb, right_section, transcript, config)
+            left_evidence = _subset_state_evidence_by_episode_ids(evidence, left_ids)
+            right_evidence = _subset_state_evidence_by_episode_ids(evidence, right_ids)
 
             left_notes = _write_state_section_batch_resilient(
                 orchestrator,
@@ -1140,7 +1186,7 @@ def _write_state_section_batch_resilient(
                 evidence,
                 outline_context=outline_context,
                 previous_context=previous_context,
-                raw_evidence_context=raw_evidence_context,
+                raw_evidence_context=None,
                 guided_json=False,
                 max_tokens=8192,
             )
