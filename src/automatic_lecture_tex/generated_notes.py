@@ -86,9 +86,13 @@ class GeneratedNoteBlock(BaseModel):
 
 
 class GeneratedObservationResolution(BaseModel):
-    """LLM-facing result for resolving exactly one chronological lecture observation."""
+    """Final value for exactly one chronological lecture observation.
 
-    text: str = ""
+    The text field is required. A correction record is audit metadata and must never be the sole
+    carrier of the resolved state.
+    """
+
+    text: str = Field(min_length=1)
     latex: str | None = None
     correction: CorrectionRecord | None = None
     unresolved: list[str] = Field(default_factory=list)
@@ -96,15 +100,33 @@ class GeneratedObservationResolution(BaseModel):
     @field_validator("text")
     @classmethod
     def sanitize_text(cls, value: str) -> str:
-        return strip_control_chars(value)
+        value = strip_control_chars(value).strip()
+        if not value:
+            raise ValueError("resolved observation text must be non-empty")
+        return value
 
     @field_validator("latex")
     @classmethod
     def sanitize_resolution_latex(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return strip_control_chars(value)
+        value = strip_control_chars(value).strip()
+        return value or None
 
+
+
+class GeneratedFormulaObservationResolution(GeneratedObservationResolution):
+    """Resolved observation whose mathematical formula must remain explicit."""
+
+    latex: str = Field(min_length=1)
+
+    @field_validator("latex")
+    @classmethod
+    def require_resolution_latex(cls, value: str) -> str:
+        value = strip_control_chars(value).strip()
+        if not value:
+            raise ValueError("resolved formula observation latex must be non-empty")
+        return value
 
 
 class GeneratedChunkNotes(BaseModel):

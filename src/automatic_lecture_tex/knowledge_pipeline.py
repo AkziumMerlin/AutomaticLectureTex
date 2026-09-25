@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from difflib import SequenceMatcher
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
-from .generated_notes import GeneratedChunkNotes, GeneratedObservationResolution
+from .generated_notes import (GeneratedChunkNotes, GeneratedFormulaObservationResolution, GeneratedObservationResolution)
 from .episode_graph import (
     apply_episode_tracking,
     build_outline_from_episodes,
@@ -65,7 +66,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 3
+STATE_PIPELINE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -398,6 +399,49 @@ def _observation_window_ids(observation: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _compact_formula_similarity_text(value: str) -> str:
+    return (
+        "".join(value.split())
+        .replace(r"\parallel", "|")
+        .replace(r"\|", "|")
+        .replace(r"\left", "")
+        .replace(r"\right", "")
+    )
+
+
+def _filter_current_window_ocr_candidates(
+    current: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep OCR readings plausibly describing the current formula, not later board lines."""
+
+    anchor = str(current.get("latex") or "").strip()
+    if not anchor:
+        return list(candidates[:6])
+
+    normalized_anchor = _compact_formula_similarity_text(anchor)
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for candidate in candidates:
+        text = str(candidate.get("text") or "").strip()
+        if not text:
+            continue
+        score = SequenceMatcher(
+            None,
+            normalized_anchor,
+            _compact_formula_similarity_text(text),
+        ).ratio()
+        ranked.append((score, candidate))
+
+    # A weakly related crop is more likely to be another formula from the same board state. The
+    # semantic look-ahead observation remains available separately if the next proof step is needed
+    # to disambiguate the current one.
+    return [
+        dict(candidate)
+        for score, candidate in sorted(ranked, key=lambda item: item[0], reverse=True)
+        if score >= 0.55
+    ][:4]
+
+
 def _raw_windows_for_observation_sequence(
     current: dict[str, Any],
     lookahead: list[dict[str, Any]],
@@ -405,24 +449,27 @@ def _raw_windows_for_observation_sequence(
     *,
     max_windows: int,
 ) -> list[dict[str, Any]]:
-    """Return literal sensor windows attached only to current/look-ahead observations."""
+    """Return literal sensor evidence only from windows that generated CURRENT.
 
+    Future observations are supplied semantically through fixed-lag look-ahead. Their raw windows
+    are intentionally excluded because one 20 s board window can contain several adjacent proof
+    steps; exposing all later OCR candidates lets the resolver replace CURRENT with the next formula.
+    """
+
+    del lookahead
     current_ids = _observation_window_ids(current)
-    future_ids: set[str] = set()
-    for item in lookahead:
-        future_ids.update(_observation_window_ids(item))
 
     selected: list[dict[str, Any]] = []
     for raw in raw_windows:
         window_id = str(raw.get("window_id", ""))
-        if window_id in current_ids:
-            role = "current"
-        elif window_id in future_ids:
-            role = "lookahead"
-        else:
+        if window_id not in current_ids:
             continue
         item = dict(raw)
-        item["role"] = role
+        item["role"] = "current"
+        item["math_ocr_candidates"] = _filter_current_window_ocr_candidates(
+            current,
+            list(raw.get("math_ocr_candidates", [])),
+        )
         selected.append(item)
 
     if not selected:
@@ -438,17 +485,19 @@ def _raw_windows_for_observation_sequence(
         for raw in nearest[:1]:
             item = dict(raw)
             item["role"] = "current_fallback"
+            item["math_ocr_candidates"] = _filter_current_window_ocr_candidates(
+                current,
+                list(raw.get("math_ocr_candidates", [])),
+            )
             selected.append(item)
 
     selected.sort(
         key=lambda item: (
-            item.get("role") != "current",
             float(item.get("start", 0.0)),
             str(item.get("window_id", "")),
         )
     )
     return selected[:max_windows]
-
 
 def _claims_for_observation(
     evidence: dict[str, Any],
@@ -478,8 +527,7 @@ def _resolved_observation_from_result(
     resolution: GeneratedObservationResolution,
 ) -> dict[str, Any]:
     resolved = dict(original)
-    if resolution.text.strip():
-        resolved["text"] = resolution.text.strip()
+    resolved["text"] = resolution.text.strip()
     if resolution.latex is not None and resolution.latex.strip():
         resolved["latex"] = resolution.latex.strip()
     resolved["sequentially_resolved"] = True
@@ -531,15 +579,26 @@ Symbols established no later than this observation:
 Next observations, provided only as fixed-lag look-ahead to disambiguate CURRENT:
 {json.dumps(lookahead, ensure_ascii=False, separators=(",", ":"))}
 
-Literal ASR/OCR windows attached only to CURRENT/look-ahead observations:
+Literal ASR/OCR windows attached to CURRENT only. For formula observations the host has already
+filtered OCR crops to readings structurally similar to CURRENT so another formula from the same
+board state cannot masquerade as this observation:
 {json.dumps(raw, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
+- ALWAYS return the final resolved text in the top-level text field, even when no change is needed.
+- If CURRENT contains a non-empty latex field, ALWAYS return the final complete formula in the
+  top-level latex field, even when the formula is unchanged. CorrectionRecord is audit metadata
+  only; never put the resolved value exclusively there.
 - Output the resolved form of CURRENT observation only.
 - Earlier resolved history is immutable. Do not revise, summarize, or replace it.
 - Look-ahead may clarify the scope, notation, sign, denominator, or role of CURRENT, but material
-  belonging only to a later observation must not be moved into CURRENT.
-- OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly.
+  belonging only to a later observation must not be moved into CURRENT. A coherent CURRENT formula
+  must not be replaced merely because look-ahead contains a different next proof step.
+- Treat CURRENT as the default hypothesis. If its mathematical content is coherent and is not
+  contradicted by immutable history or structurally matching direct evidence, preserve its meaning
+  and return correction=null.
+- OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly, but do not
+  rewrite CURRENT merely to make the prose cleaner or more textbook-like.
 - Prefer repeated/consistent local evidence over a single cleaner-looking OCR fragment.
 - Never delete a coefficient, denominator, quantifier, membership, subscript, or relation sign merely
   because one OCR candidate omitted it.
@@ -547,15 +606,20 @@ Rules:
   a zero denominator, incompatible kernel membership, or a violated linearity relation.
 - Standard mathematics is a bounded consistency prior: it may reject an impossible reading but must
   not invent lecture-specific notation or a missing theorem statement.
-- If the intermediate observation must change semantically, return a CorrectionRecord. If the
-  ambiguity cannot be resolved, preserve only the common supported content and record the ambiguity
-  in unresolved.
+- If the intermediate observation must change semantically, return a CorrectionRecord. Pure
+  rephrasing is not a semantic correction and should leave correction=null. If ambiguity cannot be
+  resolved, preserve only the common supported content and record the ambiguity in unresolved.
 - Do not emit a no-op correction.
 - Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
 """
+    schema = (
+        GeneratedFormulaObservationResolution
+        if str(current.get("latex") or "").strip()
+        else GeneratedObservationResolution
+    )
     return orchestrator._structured(
         prompt,
-        GeneratedObservationResolution,
+        schema,
         operation="state_observation_resolve",
         max_tokens=1536,
         split_oversized_task=True,
@@ -896,7 +960,12 @@ Rules:
 - Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
   their wording.
 - The mathematical content of a sequentially resolved observation is the primary local hypothesis.
-  Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
+- A non-empty latex field of a sequentially resolved observation is a CANONICAL MATH ATOM. Whenever
+  you include that mathematical statement, copy its LaTeX exactly character-for-character. You may
+  connect atoms with prose, but do not rename symbols or translate LaTeX commands into words:
+  preserve commands such as \\sum, \\infty, \\varphi, \\varepsilon, \\neq, \\leq,
+  \\in, \\perp, and \\mathbb exactly as supplied.
+- Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
   relation merely to make the exposition look more familiar.
 - You may still correct a resolved reading if it directly contradicts another supplied resolved fact
   or an elementary consequence of established context. Log every such semantic change in
