@@ -594,7 +594,11 @@ Rules:
 - Look-ahead may clarify the scope, notation, sign, denominator, or role of CURRENT, but material
   belonging only to a later observation must not be moved into CURRENT. A coherent CURRENT formula
   must not be replaced merely because look-ahead contains a different next proof step.
-- OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly.
+- Treat CURRENT as the default hypothesis. If its mathematical content is coherent and is not
+  contradicted by immutable history or structurally matching direct evidence, preserve its meaning
+  and return correction=null.
+- OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly, but do not
+  rewrite CURRENT merely to make the prose cleaner or more textbook-like.
 - Prefer repeated/consistent local evidence over a single cleaner-looking OCR fragment.
 - Never delete a coefficient, denominator, quantifier, membership, subscript, or relation sign merely
   because one OCR candidate omitted it.
@@ -602,9 +606,9 @@ Rules:
   a zero denominator, incompatible kernel membership, or a violated linearity relation.
 - Standard mathematics is a bounded consistency prior: it may reject an impossible reading but must
   not invent lecture-specific notation or a missing theorem statement.
-- If the intermediate observation must change semantically, return a CorrectionRecord. If the
-  ambiguity cannot be resolved, preserve only the common supported content and record the ambiguity
-  in unresolved.
+- If the intermediate observation must change semantically, return a CorrectionRecord. Pure
+  rephrasing is not a semantic correction and should leave correction=null. If ambiguity cannot be
+  resolved, preserve only the common supported content and record the ambiguity in unresolved.
 - Do not emit a no-op correction.
 - Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
 """
