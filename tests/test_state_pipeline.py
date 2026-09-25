@@ -287,6 +287,41 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
     assert r"f(z_f)\\neq0" not in orchestrator.prompt
 
 
+def test_writer_masks_and_restores_resolved_math_atoms():
+    evidence = {
+        "observations": [
+            {
+                "id": "obs_formula",
+                "text": "source",
+                "latex": r"x=bad",
+                "resolved_text": "resolved formula",
+                "resolved_latex": r"x=\sum_{n=1}^{\infty} x_n",
+            }
+        ]
+    }
+
+    masked, atoms = knowledge_pipeline_module._writer_evidence_with_math_atoms(evidence)
+    token = masked["observations"][0]["latex"]
+
+    assert token.startswith("MATHATOM__")
+    assert r"\sum" not in str(masked)
+    assert atoms[token] == r"x=\sum_{n=1}^{\infty} x_n"
+
+    generated = GeneratedChunkNotes(
+        section_title="Topic",
+        blocks=[
+            {
+                "type": "paragraph",
+                "latex": f"Получаем {token}.",
+                "source_evidence_ids": ["obs_formula"],
+            }
+        ],
+    )
+    knowledge_pipeline_module._restore_generated_math_atoms(generated, atoms)
+
+    assert generated.blocks[0].latex == r"Получаем $x=\sum_{n=1}^{\infty} x_n$."
+
+
 def test_observation_resolution_requires_authoritative_final_state():
     resolution = GeneratedObservationResolution(
         text="Resolved observation",
@@ -327,14 +362,64 @@ def test_resolved_observation_uses_top_level_resolution_not_correction_record():
         },
     )
 
-    resolved = knowledge_pipeline_module._resolved_observation_from_result(
+    resolved, accepted = knowledge_pipeline_module._resolved_observation_from_result(
         original,
         resolution,
+        [
+            {
+                "math_ocr_candidates": [{"text": r"f(z_f)\\neq0"}],
+                "visual_latex": [],
+            }
+        ],
     )
 
-    assert resolved["text"] == "new prose"
-    assert resolved["latex"] == r"f(z_f)\\neq0"
+    assert accepted is True
+    assert resolved["text"] == "old prose"
+    assert resolved["latex"] == r"f(z_f)=0"
+    assert resolved["resolved_text"] == "new prose"
+    assert resolved["resolved_latex"] == r"f(z_f)\\neq0"
     assert resolved["sequentially_resolved"] is True
+
+
+def test_unsupported_formula_rewrite_is_rejected():
+    original = {
+        "id": "obs_norm",
+        "text": "upper bound",
+        "latex": r"\|f\| \leq \|y_f\|",
+    }
+    resolution = GeneratedFormulaObservationResolution(
+        text="reverse bound",
+        latex=r"\|f\| \geq \|y_f\|",
+        correction={
+            "original": r"\|f\| \leq \|y_f\|",
+            "corrected": r"\|f\| \geq \|y_f\|",
+            "reason": "next proof step",
+            "basis": "mathematical_consistency",
+            "confidence": 0.99,
+        },
+    )
+
+    resolved, accepted = knowledge_pipeline_module._resolved_observation_from_result(
+        original,
+        resolution,
+        [
+            {
+                "math_ocr_candidates": [
+                    {
+                        "text": (
+                            r"|f(\frac{y_f}{\|y_f\|})|="
+                            r"\|y_f\|\leq\|f\|"
+                        )
+                    }
+                ],
+                "visual_latex": [],
+            }
+        ],
+    )
+
+    assert accepted is False
+    assert resolved["resolved_text"] == "upper bound"
+    assert resolved["resolved_latex"] == r"\|f\| \leq \|y_f\|"
 
 
 def test_formula_observation_resolver_uses_formula_schema():
@@ -505,7 +590,7 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
                     "end": 1.0,
                     "asr": "",
                     "visual_latex": [],
-                    "math_ocr_candidates": [],
+                    "math_ocr_candidates": [{"text": r"f(z_f)\neq0"}],
                 },
                 {
                     "window_id": "window_2",
@@ -513,7 +598,9 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
                     "end": 2.0,
                     "asr": "",
                     "visual_latex": [],
-                    "math_ocr_candidates": [],
+                    "math_ocr_candidates": [
+                        {"text": r"y=x-\frac{f(x)}{f(z_f)}z_f"}
+                    ],
                 },
             ],
             work=tmp_path,
@@ -527,6 +614,10 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
     assert corrections == []
     assert unresolved == []
     assert [item["latex"] for item in resolved["observations"]] == [
+        r"f(z_f)=0",
+        r"y=x-z_f",
+    ]
+    assert [item["resolved_latex"] for item in resolved["observations"]] == [
         r"f(z_f)\neq0",
         r"y=x-\frac{f(x)}{f(z_f)}z_f",
     ]
@@ -547,8 +638,10 @@ def test_resolved_episode_split_preserves_resolved_observation_values():
                 "episode_id": "episode_1",
                 "start": 0.0,
                 "end": 1.0,
-                "text": "resolved one",
-                "latex": r"f(z_f)\neq0",
+                "text": "source one",
+                "latex": r"f(z_f)=0",
+                "resolved_text": "resolved one",
+                "resolved_latex": r"f(z_f)\neq0",
                 "sequentially_resolved": True,
             },
             {
@@ -556,8 +649,10 @@ def test_resolved_episode_split_preserves_resolved_observation_values():
                 "episode_id": "episode_2",
                 "start": 1.0,
                 "end": 2.0,
-                "text": "resolved two",
-                "latex": r"y=x-\frac{f(x)}{f(z_f)}z_f",
+                "text": "source two",
+                "latex": r"y=x-z_f",
+                "resolved_text": "resolved two",
+                "resolved_latex": r"y=x-\frac{f(x)}{f(z_f)}z_f",
                 "sequentially_resolved": True,
             },
         ],
@@ -574,7 +669,8 @@ def test_resolved_episode_split_preserves_resolved_observation_values():
     )
 
     assert [item["id"] for item in child["observations"]] == ["obs_2"]
-    assert child["observations"][0]["latex"] == r"y=x-\frac{f(x)}{f(z_f)}z_f"
+    assert child["observations"][0]["latex"] == r"y=x-z_f"
+    assert child["observations"][0]["resolved_latex"] == r"y=x-\frac{f(x)}{f(z_f)}z_f"
     assert child["observations"][0]["sequentially_resolved"] is True
     assert child["sequential_resolution"]["resolved_observation_ids"] == ["obs_2"]
 
