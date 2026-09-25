@@ -6,6 +6,7 @@ from . import pipeline as _base_pipeline
 from .asr import make_asr_backend
 from .episode_synthesis_resilient import EPISODE_SYNTHESIS_CACHE_VERSION
 from .gigaam_vad import VadGigaAMBackend
+from .knowledge_pipeline import STATE_PIPELINE_VERSION
 from .knowledge_pipeline_resilient import (
     KNOWLEDGE_CACHE_VERSION,
     run_knowledge_pipeline as resilient_knowledge_pipeline,
@@ -68,13 +69,14 @@ class Pipeline(_base_pipeline.Pipeline):
                 }
             )
         if self.config.notes.architecture in {"knowledge", "state"}:
-            return stable_hash(
-                {
-                    "base": base,
-                    "resilient_episode_synthesis_version": EPISODE_SYNTHESIS_CACHE_VERSION,
-                    "knowledge_integrity_cache_version": KNOWLEDGE_CACHE_VERSION,
-                }
-            )
+            payload = {
+                "base": base,
+                "resilient_episode_synthesis_version": EPISODE_SYNTHESIS_CACHE_VERSION,
+                "knowledge_integrity_cache_version": KNOWLEDGE_CACHE_VERSION,
+            }
+            if self.config.notes.architecture == "state":
+                payload["state_pipeline_version"] = STATE_PIPELINE_VERSION
+            return stable_hash(payload)
         return base
 
     def _restore_raw_asr_cache(self, lecture) -> None:
