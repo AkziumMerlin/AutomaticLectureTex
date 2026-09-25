@@ -960,7 +960,12 @@ Rules:
 - Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
   their wording.
 - The mathematical content of a sequentially resolved observation is the primary local hypothesis.
-  Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
+- A non-empty latex field of a sequentially resolved observation is a CANONICAL MATH ATOM. Whenever
+  you include that mathematical statement, copy its LaTeX exactly character-for-character. You may
+  connect atoms with prose, but do not rename symbols or translate LaTeX commands into words:
+  preserve commands such as \\sum, \\infty, \\varphi, \\varepsilon, \\neq, \\leq,
+  \\in, \\perp, and \\mathbb exactly as supplied.
+- Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
   relation merely to make the exposition look more familiar.
 - You may still correct a resolved reading if it directly contradicts another supplied resolved fact
   or an elementary consequence of established context. Log every such semantic change in
