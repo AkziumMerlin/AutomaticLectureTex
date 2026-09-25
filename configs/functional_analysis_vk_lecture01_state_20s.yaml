@@ -80,6 +80,10 @@ notes:
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
   state_section_max_evidence_chars: 14000
+  # Let the final semantic writer re-read nearby literal evidence instead of treating the first
+  # OCR/ASR interpretation as ground truth. This context is writer-only and does not rerun OCR.
+  state_section_raw_context_seconds: 90
+  state_section_raw_evidence_chars: 16000
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
