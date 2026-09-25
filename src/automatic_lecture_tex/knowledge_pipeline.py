@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -673,7 +674,7 @@ Rules:
 - Never simplify a more specific formula merely because one OCR crop omits a coefficient, factor,
   denominator, relation sign, quantifier, membership, or subscript. Missing ink is not evidence that
   the mathematical object was absent.
-- In particular preserve semantic-critical operators such as = versus \neq and < versus \leq
+- In particular preserve semantic-critical operators such as = versus \\neq and < versus \\leq
   unless the alternative passes one of the override gates above.
 - Neighbor consensus may only disambiguate material already present in CURRENT evidence. Do not
   import a later theorem, definition, symbol, or proof step as new section content.
