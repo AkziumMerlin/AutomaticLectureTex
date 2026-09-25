@@ -387,7 +387,6 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
             evidence=evidence,
             section_observations=list(evidence["observations"]),
             resolved_history=history,
-            previous_context=[],
             raw_windows=[
                 {
                     "window_id": "window_1",
