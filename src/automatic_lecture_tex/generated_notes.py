@@ -115,6 +115,20 @@ class GeneratedObservationResolution(BaseModel):
 
 
 
+class GeneratedFormulaObservationResolution(GeneratedObservationResolution):
+    """Resolved observation whose mathematical formula must remain explicit."""
+
+    latex: str = Field(min_length=1)
+
+    @field_validator("latex")
+    @classmethod
+    def require_resolution_latex(cls, value: str) -> str:
+        value = strip_control_chars(value).strip()
+        if not value:
+            raise ValueError("resolved formula observation latex must be non-empty")
+        return value
+
+
 class GeneratedChunkNotes(BaseModel):
     """Structured-output schema used by the episode writer only."""
 
