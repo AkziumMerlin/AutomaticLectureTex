@@ -325,8 +325,9 @@ def _state_raw_evidence_context(
         if window_id:
             direct_window_ids.add(str(window_id))
         direct_window_ids.update(str(item) for item in observation.get("window_ids", []))
-    for episode in episodes:
-        direct_window_ids.update(str(item) for item in episode.get("window_ids", []))
+    if not observations:
+        for episode in episodes:
+            direct_window_ids.update(str(item) for item in episode.get("window_ids", []))
 
     radius = float(config.state_section_raw_context_seconds)
     lower = start - radius
