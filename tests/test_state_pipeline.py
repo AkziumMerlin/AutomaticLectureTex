@@ -282,6 +282,7 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
 
     assert "Sequentially resolved state evidence" in orchestrator.prompt
     assert "primary local hypothesis" in orchestrator.prompt
+    assert "CANONICAL MATH ATOM" in orchestrator.prompt
     assert "source_evidence_ids" in orchestrator.prompt
     assert r"f(z_f)\\neq0" not in orchestrator.prompt
 
