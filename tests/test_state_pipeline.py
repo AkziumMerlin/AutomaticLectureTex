@@ -4,7 +4,7 @@ from pathlib import Path
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
-from automatic_lecture_tex.generated_notes import GeneratedChunkNotes
+from automatic_lecture_tex.generated_notes import GeneratedChunkNotes, GeneratedObservationResolution
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import (
@@ -233,7 +233,7 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
-def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
+def test_state_writer_consumes_resolved_state_without_raw_ocr():
     class FakeOrchestrator:
         output_language = "ru"
 
@@ -276,10 +276,196 @@ def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
         raw_evidence_context=raw_context,
     )
 
-    assert "FALLIBLE" in orchestrator.prompt
-    assert "NOT ground truth" in orchestrator.prompt
-    assert "do not merely paraphrase OCR" in orchestrator.prompt
-    assert r"f(z_f)\\neq0" in orchestrator.prompt
+    assert "Sequentially resolved state evidence" in orchestrator.prompt
+    assert "primary local hypothesis" in orchestrator.prompt
+    assert "source_evidence_ids" in orchestrator.prompt
+    assert r"f(z_f)\\neq0" not in orchestrator.prompt
+
+
+def test_raw_windows_for_sequential_resolution_use_only_current_and_lookahead():
+    current = {
+        "id": "obs_1",
+        "window_id": "window_1",
+        "window_ids": ["window_1"],
+        "start": 10.0,
+        "end": 20.0,
+    }
+    lookahead = [
+        {
+            "id": "obs_2",
+            "window_id": "window_2",
+            "window_ids": ["window_2"],
+            "start": 20.0,
+            "end": 30.0,
+        }
+    ]
+    raw_windows = [
+        {"window_id": "window_0", "start": 0.0, "end": 10.0},
+        {"window_id": "window_1", "start": 10.0, "end": 20.0},
+        {"window_id": "window_2", "start": 20.0, "end": 30.0},
+        {"window_id": "window_3", "start": 30.0, "end": 40.0},
+    ]
+
+    selected = knowledge_pipeline_module._raw_windows_for_observation_sequence(
+        current,
+        lookahead,
+        raw_windows,
+        max_windows=6,
+    )
+
+    assert [item["window_id"] for item in selected] == ["window_1", "window_2"]
+    assert selected[0]["role"] == "current"
+    assert selected[1]["role"] == "lookahead"
+
+
+def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_path):
+    prompts = []
+
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def _structured(self, prompt, schema, **kwargs):
+            del schema, kwargs
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return GeneratedObservationResolution(
+                    text="Resolved first",
+                    latex=r"f(z_f)\neq0",
+                )
+            return GeneratedObservationResolution(
+                text="Resolved second",
+                latex=r"y=x-\frac{f(x)}{f(z_f)}z_f",
+            )
+
+    evidence = {
+        "observations": [
+            {
+                "id": "obs_1",
+                "window_id": "window_1",
+                "window_ids": ["window_1"],
+                "episode_id": "episode_1",
+                "start": 0.0,
+                "end": 1.0,
+                "kind": "claim",
+                "text": "First",
+                "latex": r"f(z_f)=0",
+            },
+            {
+                "id": "obs_2",
+                "window_id": "window_2",
+                "window_ids": ["window_2"],
+                "episode_id": "episode_1",
+                "start": 1.0,
+                "end": 2.0,
+                "kind": "equation",
+                "text": "Second",
+                "latex": r"y=x-z_f",
+            },
+        ],
+        "claims": [],
+        "symbols": [],
+        "episodes": [{"id": "episode_1", "observation_ids": ["obs_1", "obs_2"]}],
+    }
+    section = OutlineSection(
+        id="section_1",
+        title="Proof",
+        start=0.0,
+        end=2.0,
+        episode_ids=["episode_1"],
+    )
+    config = NotesConfig(
+        state_observation_lookahead=1,
+        state_observation_history=12,
+        state_observation_max_raw_windows=6,
+    )
+    history = []
+
+    resolved, corrections, unresolved, cache_hits = (
+        knowledge_pipeline_module._resolve_state_batch_sequential(
+            FakeOrchestrator(),
+            section=section,
+            evidence=evidence,
+            section_observations=list(evidence["observations"]),
+            resolved_history=history,
+            raw_windows=[
+                {
+                    "window_id": "window_1",
+                    "start": 0.0,
+                    "end": 1.0,
+                    "asr": "",
+                    "visual_latex": [],
+                    "math_ocr_candidates": [],
+                },
+                {
+                    "window_id": "window_2",
+                    "start": 1.0,
+                    "end": 2.0,
+                    "asr": "",
+                    "visual_latex": [],
+                    "math_ocr_candidates": [],
+                },
+            ],
+            work=tmp_path,
+            config=config,
+            llm_config={},
+            force=True,
+        )
+    )
+
+    assert cache_hits == 0
+    assert corrections == []
+    assert unresolved == []
+    assert [item["latex"] for item in resolved["observations"]] == [
+        r"f(z_f)\neq0",
+        r"y=x-\frac{f(x)}{f(z_f)}z_f",
+    ]
+    assert len(history) == 2
+    assert r"f(z_f)\\neq0" in prompts[1]
+    assert "Earlier resolved history is immutable" in prompts[1]
+
+
+def test_resolved_episode_split_preserves_resolved_observation_values():
+    evidence = {
+        "episodes": [
+            {"id": "episode_1", "observation_ids": ["obs_1"]},
+            {"id": "episode_2", "observation_ids": ["obs_2"]},
+        ],
+        "observations": [
+            {
+                "id": "obs_1",
+                "episode_id": "episode_1",
+                "start": 0.0,
+                "end": 1.0,
+                "text": "resolved one",
+                "latex": r"f(z_f)\neq0",
+                "sequentially_resolved": True,
+            },
+            {
+                "id": "obs_2",
+                "episode_id": "episode_2",
+                "start": 1.0,
+                "end": 2.0,
+                "text": "resolved two",
+                "latex": r"y=x-\frac{f(x)}{f(z_f)}z_f",
+                "sequentially_resolved": True,
+            },
+        ],
+        "claims": [],
+        "symbols": [],
+        "sequential_resolution": {
+            "resolved_observation_ids": ["obs_1", "obs_2"],
+        },
+    }
+
+    child = knowledge_pipeline_module._subset_state_evidence_by_episode_ids(
+        evidence,
+        ["episode_2"],
+    )
+
+    assert [item["id"] for item in child["observations"]] == ["obs_2"]
+    assert child["observations"][0]["latex"] == r"y=x-\frac{f(x)}{f(z_f)}z_f"
+    assert child["observations"][0]["sequentially_resolved"] is True
+    assert child["sequential_resolution"]["resolved_observation_ids"] == ["obs_2"]
 
 
 def test_episode_tracking_derives_symbol_introduced_at_from_evidence():
@@ -441,6 +627,9 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.visual_chunk_board_scan is True
     assert config.notes.state_section_raw_context_seconds == 90
     assert config.notes.state_section_raw_evidence_chars == 16000
+    assert config.notes.state_observation_lookahead == 2
+    assert config.notes.state_observation_history == 12
+    assert config.notes.state_observation_max_raw_windows == 6
     assert config.vision.board_sampling_mode == "change"
     assert config.vision.board_crop_max_vlm_images == 5
     assert config.vision.board_change_probe_seconds == 4.0

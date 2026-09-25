@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
-from .generated_notes import GeneratedChunkNotes
+from .generated_notes import GeneratedChunkNotes, GeneratedObservationResolution
 from .episode_graph import (
     apply_episode_tracking,
     build_outline_from_episodes,
@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 2
+STATE_PIPELINE_VERSION = 3
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -76,6 +76,9 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_section_max_evidence_chars",
     "state_section_raw_context_seconds",
     "state_section_raw_evidence_chars",
+    "state_observation_lookahead",
+    "state_observation_history",
+    "state_observation_max_raw_windows",
 }
 
 
@@ -200,6 +203,21 @@ def _load_episode_batch(path: Path, fingerprint: str) -> ChunkNotes | None:
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
 
+
+
+def _load_observation_resolution(
+    path: Path,
+    fingerprint: str,
+) -> GeneratedObservationResolution | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("fingerprint") != fingerprint:
+            return None
+        return GeneratedObservationResolution.model_validate(payload["resolution"])
+    except (json.JSONDecodeError, KeyError, ValidationError):
+        return None
 
 
 def _state_outline_context(outline: LectureOutline) -> list[dict[str, Any]]:
@@ -371,6 +389,329 @@ def _state_raw_evidence_context(
     return selected
 
 
+def _observation_window_ids(observation: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    window_id = observation.get("window_id")
+    if window_id:
+        ids.add(str(window_id))
+    ids.update(str(item) for item in observation.get("window_ids", []) if item)
+    return ids
+
+
+def _raw_windows_for_observation_sequence(
+    current: dict[str, Any],
+    lookahead: list[dict[str, Any]],
+    raw_windows: list[dict[str, Any]],
+    *,
+    max_windows: int,
+) -> list[dict[str, Any]]:
+    """Return literal sensor windows attached only to current/look-ahead observations."""
+
+    current_ids = _observation_window_ids(current)
+    future_ids: set[str] = set()
+    for item in lookahead:
+        future_ids.update(_observation_window_ids(item))
+
+    selected: list[dict[str, Any]] = []
+    for raw in raw_windows:
+        window_id = str(raw.get("window_id", ""))
+        if window_id in current_ids:
+            role = "current"
+        elif window_id in future_ids:
+            role = "lookahead"
+        else:
+            continue
+        item = dict(raw)
+        item["role"] = role
+        selected.append(item)
+
+    if not selected:
+        center = 0.5 * (
+            float(current.get("start", 0.0)) + float(current.get("end", 0.0))
+        )
+        nearest = sorted(
+            raw_windows,
+            key=lambda item: abs(
+                0.5 * (float(item.get("start", 0.0)) + float(item.get("end", 0.0))) - center
+            ),
+        )
+        for raw in nearest[:1]:
+            item = dict(raw)
+            item["role"] = "current_fallback"
+            selected.append(item)
+
+    selected.sort(
+        key=lambda item: (
+            item.get("role") != "current",
+            float(item.get("start", 0.0)),
+            str(item.get("window_id", "")),
+        )
+    )
+    return selected[:max_windows]
+
+
+def _claims_for_observation(
+    evidence: dict[str, Any],
+    observation_id: str,
+) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in evidence.get("claims", [])
+        if observation_id in {str(value) for value in item.get("evidence_ids", [])}
+    ]
+
+
+def _symbols_for_observation(
+    evidence: dict[str, Any],
+    observation: dict[str, Any],
+) -> list[dict[str, Any]]:
+    cutoff = float(observation.get("end", observation.get("start", 0.0)))
+    return [
+        item
+        for item in evidence.get("symbols", [])
+        if float(item.get("introduced_at", 0.0)) <= cutoff
+    ]
+
+
+def _resolved_observation_from_result(
+    original: dict[str, Any],
+    resolution: GeneratedObservationResolution,
+) -> dict[str, Any]:
+    resolved = dict(original)
+    if resolution.text.strip():
+        resolved["text"] = resolution.text.strip()
+    if resolution.latex is not None and resolution.latex.strip():
+        resolved["latex"] = resolution.latex.strip()
+    resolved["sequentially_resolved"] = True
+    return resolved
+
+
+def _resolve_single_state_observation(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    section: OutlineSection,
+    evidence: dict[str, Any],
+    current: dict[str, Any],
+    lookahead: list[dict[str, Any]],
+    resolved_history: list[dict[str, Any]],
+    raw_windows: list[dict[str, Any]],
+    config,
+) -> GeneratedObservationResolution:
+    observation_id = str(current.get("id", ""))
+    claims = _claims_for_observation(evidence, observation_id)
+    symbols = _symbols_for_observation(evidence, current)
+    raw = _raw_windows_for_observation_sequence(
+        current,
+        lookahead,
+        raw_windows,
+        max_windows=int(config.state_observation_max_raw_windows),
+    )
+    history_limit = int(config.state_observation_history)
+    history = resolved_history[-history_limit:] if history_limit else []
+
+    prompt = f"""Resolve exactly ONE chronological lecture observation into its best supported
+mathematical meaning. This call is one step of a sequential state update; it must not rewrite
+earlier accepted observations.
+
+Current fixed section:
+{json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
+
+Already resolved immutable history:
+{json.dumps(history, ensure_ascii=False, separators=(",", ":"))}
+
+CURRENT observation to resolve:
+{json.dumps(current, ensure_ascii=False, separators=(",", ":"))}
+
+Claims currently derived from this observation (fallible):
+{json.dumps(claims, ensure_ascii=False, separators=(",", ":"))}
+
+Symbols established no later than this observation:
+{json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
+
+Next observations, provided only as fixed-lag look-ahead to disambiguate CURRENT:
+{json.dumps(lookahead, ensure_ascii=False, separators=(",", ":"))}
+
+Literal ASR/OCR windows attached only to CURRENT/look-ahead observations:
+{json.dumps(raw, ensure_ascii=False, separators=(",", ":"))}
+
+Rules:
+- Output the resolved form of CURRENT observation only.
+- Earlier resolved history is immutable. Do not revise, summarize, or replace it.
+- Look-ahead may clarify the scope, notation, sign, denominator, or role of CURRENT, but material
+  belonging only to a later observation must not be moved into CURRENT.
+- OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly.
+- Prefer repeated/consistent local evidence over a single cleaner-looking OCR fragment.
+- Never delete a coefficient, denominator, quantifier, membership, subscript, or relation sign merely
+  because one OCR candidate omitted it.
+- Reject readings that contradict established history or elementary consequences of it, for example
+  a zero denominator, incompatible kernel membership, or a violated linearity relation.
+- Standard mathematics is a bounded consistency prior: it may reject an impossible reading but must
+  not invent lecture-specific notation or a missing theorem statement.
+- If the intermediate observation must change semantically, return a CorrectionRecord. If the
+  ambiguity cannot be resolved, preserve only the common supported content and record the ambiguity
+  in unresolved.
+- Do not emit a no-op correction.
+- Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
+"""
+    return orchestrator._structured(
+        prompt,
+        GeneratedObservationResolution,
+        operation="state_observation_resolve",
+        max_tokens=1536,
+        split_oversized_task=True,
+    )
+
+
+def _section_observation_sequence(
+    kb: LectureKnowledgeBase,
+    section: OutlineSection,
+) -> list[dict[str, Any]]:
+    episode_ids = set(section.episode_ids)
+    return [
+        item.model_dump(mode="json")
+        for item in sorted(
+            kb.observations,
+            key=lambda item: (item.start, item.end, item.id),
+        )
+        if item.episode_id in episode_ids
+    ]
+
+
+def _resolve_state_batch_sequential(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    section: OutlineSection,
+    evidence: dict[str, Any],
+    section_observations: list[dict[str, Any]],
+    resolved_history: list[dict[str, Any]],
+    raw_windows: list[dict[str, Any]],
+    work: Path,
+    config,
+    llm_config: dict[str, Any],
+    force: bool,
+) -> tuple[dict[str, Any], list[Any], list[str], int]:
+    """Resolve batch observations one-by-one with bounded future look-ahead."""
+
+    by_id = {
+        str(item.get("id", "")): index
+        for index, item in enumerate(section_observations)
+        if item.get("id")
+    }
+    batch_ids = {
+        str(item.get("id", ""))
+        for item in evidence.get("observations", [])
+        if item.get("id")
+    }
+    resolved_batch: list[dict[str, Any]] = []
+    corrections: list[Any] = []
+    unresolved: list[str] = []
+    cache_hits = 0
+    lookahead_count = int(config.state_observation_lookahead)
+
+    for original in sorted(
+        evidence.get("observations", []),
+        key=lambda item: (
+            float(item.get("start", 0.0)),
+            float(item.get("end", 0.0)),
+            str(item.get("id", "")),
+        ),
+    ):
+        observation_id = str(original.get("id", ""))
+        position = by_id.get(observation_id)
+        lookahead = (
+            section_observations[position + 1 : position + 1 + lookahead_count]
+            if position is not None
+            else []
+        )
+
+        raw = _raw_windows_for_observation_sequence(
+            original,
+            lookahead,
+            raw_windows,
+            max_windows=int(config.state_observation_max_raw_windows),
+        )
+        history_limit = int(config.state_observation_history)
+        history = resolved_history[-history_limit:] if history_limit else []
+        fingerprint = stable_hash(
+            {
+                "state_pipeline_version": STATE_PIPELINE_VERSION,
+                "section_id": section.id,
+                "current": original,
+                "claims": _claims_for_observation(evidence, observation_id),
+                "symbols": _symbols_for_observation(evidence, original),
+                "lookahead": lookahead,
+                "history": history,
+                "raw_windows": raw,
+                "llm": llm_config,
+            }
+        )
+        path = (
+            work
+            / "state_observation_resolutions"
+            / section.id
+            / f"{observation_id}.json"
+        )
+        resolution = None if force else _load_observation_resolution(path, fingerprint)
+        if resolution is not None:
+            cache_hits += 1
+        else:
+            try:
+                resolution = _resolve_single_state_observation(
+                    orchestrator,
+                    section=section,
+                    evidence=evidence,
+                    current=original,
+                    lookahead=lookahead,
+                    resolved_history=resolved_history,
+                    raw_windows=raw_windows,
+                    config=config,
+                )
+            except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
+                resolution = GeneratedObservationResolution(
+                    text=str(original.get("text") or ""),
+                    latex=original.get("latex"),
+                    unresolved=[
+                        "Sequential observation resolution failed for "
+                        f"{observation_id}: {type(exc).__name__}: {exc}"
+                    ],
+                )
+            atomic_json_dump(
+                path,
+                {
+                    "fingerprint": fingerprint,
+                    "current": original,
+                    "history_before": history,
+                    "claims": _claims_for_observation(evidence, observation_id),
+                    "symbols": _symbols_for_observation(evidence, original),
+                    "lookahead": lookahead,
+                    "raw_windows": raw,
+                    "resolution": resolution.model_dump(mode="json"),
+                },
+            )
+
+        resolved = _resolved_observation_from_result(original, resolution)
+        resolved_batch.append(resolved)
+        resolved_history.append(resolved)
+        if resolution.correction is not None:
+            correction = resolution.correction
+            if correction.original.strip() != correction.corrected.strip():
+                corrections.append(correction)
+        unresolved.extend(resolution.unresolved)
+
+    payload = dict(evidence)
+    payload["observations"] = resolved_batch
+    # Claims are derived from pre-resolution observations and may now be stale. Ground final blocks
+    # directly in resolved observation ids instead of exposing contradictory duplicate semantics.
+    payload["claims"] = []
+    payload["sequential_resolution"] = {
+        "resolved_observation_ids": [
+            str(item.get("id", "")) for item in resolved_batch
+        ],
+        "batch_observation_ids": sorted(batch_ids),
+    }
+    return payload, corrections, list(dict.fromkeys(unresolved)), cache_hits
+
+
 def _state_section_payload(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
@@ -536,10 +877,8 @@ def _write_state_section_batch(
     guided_json: bool = True,
     max_tokens: int = 6144,
 ) -> ChunkNotes:
-    prompt = f"""Write one contiguous part of a FINAL lecture-note section. You are the semantic
-resolver at the end of a noisy multimodal reconstruction pipeline. Evidence extraction, episode
-tracking and outline planning happened before this call, but their mathematical interpretation may
-still be wrong.
+    prompt = f"""Write one contiguous part of a FINAL lecture-note section from a chronological
+state whose observations have already been resolved one-by-one against their local ASR/OCR evidence.
 
 Global lecture outline (read-only narrative context):
 {json.dumps(outline_context, ensure_ascii=False, separators=(",", ":"))}
@@ -547,45 +886,29 @@ Global lecture outline (read-only narrative context):
 Current fixed section:
 {json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
 
-Intermediate semantic reconstruction for this batch (useful but FALLIBLE):
+Sequentially resolved state evidence for this batch:
 {json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
-
-Nearby raw sensory evidence (bounded bidirectional context; literal/noisy, not authoritative):
-{json.dumps(raw_evidence_context or [], ensure_ascii=False, separators=(",", ":"))}
 
 Previously written blocks from THIS section only:
 {json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
-- Interpret the lecture; do not merely paraphrase OCR or the intermediate reconstruction.
-- Canonical observations/active claims/symbol records are fallible hypotheses produced earlier,
-  NOT ground truth. Raw ASR/OCR candidates are also fallible observations.
-- Compare all available evidence. Prefer the interpretation jointly supported by temporal
-  continuity, notation/type information, neighboring board states, speech and mathematical
-  consistency.
-- A forward raw window may only disambiguate material already being written/discussed in this
-  batch. Do not import a later theorem, definition or symbol merely because it appears in look-ahead
-  sensory evidence.
-- You MAY correct an intermediate claim or formula when raw evidence or an elementary consequence
-  of accepted context shows that reading is inconsistent. When you do, add a CorrectionRecord with
-  the original reading, corrected reading, reason, basis and confidence.
-- Before finalizing, explicitly test your chosen reading for local contradictions. Reject readings
-  that make a displayed denominator zero, contradict a simultaneous membership/equation, violate an
-  already established type/linearity relation, or conflict with clearer adjacent board states.
-- OCR token adjacency does not determine mathematical scope. A trailing membership/relation may
-  apply to the whole left-hand expression rather than to the nearest symbol; resolve scope from the
-  equation and surrounding evidence.
-- If two readings remain genuinely ambiguous, write only their common supported content and record
-  the ambiguity in unresolved. Do not invent a textbook completion.
-- Follow the fixed episode order and the lecture's actual narrative line.
-- Preserve lecturer corrections, notation evolution, theorem/proof continuity and level of detail.
-- Never resurrect superseded/retracted content as a current fact.
-- Do not introduce textbook material merely because it would make the exposition nicer.
+- Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
+  their wording.
+- The mathematical content of a sequentially resolved observation is the primary local hypothesis.
+  Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
+  relation merely to make the exposition look more familiar.
+- You may still correct a resolved reading if it directly contradicts another supplied resolved fact
+  or an elementary consequence of established context. Log every such semantic change in
+  corrections. Do not emit no-op corrections.
+- Preserve lecturer notation, theorem/proof continuity, order, and level of detail.
+- Do not add material from future outline entries or unrelated textbook exposition.
 - Avoid repeating a definition/proof step already present in previous_context unless this batch
   genuinely develops it further.
-- Every substantive block must cite source_claim_ids and/or source_evidence_ids present in the
-  supplied intermediate semantic evidence. A corrected interpretation should cite the evidence it
-  corrects and uses.
+- Every substantive block must cite source_evidence_ids from the supplied resolved observations;
+  source_claim_ids may be empty because pre-resolution claims are intentionally removed.
+- If a remaining ambiguity cannot be resolved from this state, put it in unresolved instead of
+  inventing a specific formula.
 - Return block bodies only; renderer owns section/theorem/proof wrappers.
 - Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
 """
@@ -620,8 +943,79 @@ Rules:
             continue
         kept.append(block)
     notes.blocks = kept
+    notes.corrections = [
+        item
+        for item in notes.corrections
+        if item.original.strip() != item.corrected.strip()
+    ]
     notes.unresolved = list(dict.fromkeys(notes.unresolved))
     return notes
+
+
+def _subset_state_evidence_by_episode_ids(
+    evidence: dict[str, Any],
+    episode_ids: list[str],
+) -> dict[str, Any]:
+    selected_episode_ids = set(episode_ids)
+    episodes = [
+        dict(item)
+        for item in evidence.get("episodes", [])
+        if str(item.get("id", "")) in selected_episode_ids
+    ]
+    observation_ids: set[str] = set()
+    for episode in episodes:
+        observation_ids.update(str(item) for item in episode.get("observation_ids", []))
+
+    observations = [
+        dict(item)
+        for item in evidence.get("observations", [])
+        if (
+            str(item.get("episode_id", "")) in selected_episode_ids
+            or str(item.get("id", "")) in observation_ids
+        )
+    ]
+    selected_observation_ids = {
+        str(item.get("id", "")) for item in observations if item.get("id")
+    }
+    claims = [
+        dict(item)
+        for item in evidence.get("claims", [])
+        if not item.get("evidence_ids")
+        or selected_observation_ids.intersection(
+            str(value) for value in item.get("evidence_ids", [])
+        )
+    ]
+    cutoff = max(
+        (float(item.get("end", item.get("start", 0.0))) for item in observations),
+        default=0.0,
+    )
+    symbols = [
+        dict(item)
+        for item in evidence.get("symbols", [])
+        if (
+            str(item.get("episode_id", "")) in selected_episode_ids
+            or float(item.get("introduced_at", 0.0)) <= cutoff
+        )
+    ]
+
+    child = dict(evidence)
+    child["episodes"] = episodes
+    child["observations"] = observations
+    child["claims"] = claims
+    child["symbols"] = symbols
+    if "sequential_resolution" in child:
+        child["sequential_resolution"] = {
+            **dict(child["sequential_resolution"]),
+            "resolved_observation_ids": [
+                item
+                for item in child["sequential_resolution"].get(
+                    "resolved_observation_ids",
+                    [],
+                )
+                if str(item) in selected_observation_ids
+            ],
+        }
+    return child
 
 
 def _state_section_for_episode_ids(
@@ -655,13 +1049,6 @@ def _write_state_section_batch_resilient(
 ) -> ChunkNotes:
     """Recursively split final-writer work that cannot fit in one structured request."""
 
-    if raw_evidence_context is None:
-        raw_evidence_context = _state_raw_evidence_context(
-            evidence,
-            raw_window_index or [],
-            config,
-        )
-
     try:
         return _write_state_section_batch(
             orchestrator,
@@ -669,7 +1056,7 @@ def _write_state_section_batch_resilient(
             evidence,
             outline_context=outline_context,
             previous_context=previous_context,
-            raw_evidence_context=raw_evidence_context,
+            raw_evidence_context=None,
         )
     except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
@@ -693,8 +1080,8 @@ def _write_state_section_batch_resilient(
 
             left_section = _state_section_for_episode_ids(section, left_ids)
             right_section = _state_section_for_episode_ids(section, right_ids)
-            left_evidence = _state_section_payload(kb, left_section, transcript, config)
-            right_evidence = _state_section_payload(kb, right_section, transcript, config)
+            left_evidence = _subset_state_evidence_by_episode_ids(evidence, left_ids)
+            right_evidence = _subset_state_evidence_by_episode_ids(evidence, right_ids)
 
             left_notes = _write_state_section_batch_resilient(
                 orchestrator,
@@ -795,7 +1182,7 @@ def _write_state_section_batch_resilient(
                 evidence,
                 outline_context=outline_context,
                 previous_context=previous_context,
-                raw_evidence_context=raw_evidence_context,
+                raw_evidence_context=None,
                 guided_json=False,
                 max_tokens=8192,
             )
@@ -1038,6 +1425,9 @@ def run_knowledge_pipeline(
     state_mode = pipeline.config.notes.architecture == "state"
     state_section_cache_hits = 0
     state_section_batches_total = 0
+    state_observation_resolution_cache_hits = 0
+    state_observations_resolved = 0
+    state_resolution_seconds = 0.0
     state_synthesis_seconds = 0.0
 
     if state_mode:
@@ -1051,22 +1441,39 @@ def run_knowledge_pipeline(
                 transcript,
                 pipeline.config.notes,
             )
+            section_observations = _section_observation_sequence(kb, section)
+            resolved_history: list[dict[str, Any]] = []
             state_section_batches_total += len(evidence_batches)
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
-                raw_evidence_context = _state_raw_evidence_context(
-                    evidence_payload,
-                    raw_window_index,
-                    pipeline.config.notes,
+                resolution_started = time.perf_counter()
+                (
+                    resolved_evidence,
+                    resolution_corrections,
+                    resolution_unresolved,
+                    resolution_cache_hits,
+                ) = _resolve_state_batch_sequential(
+                    orchestrator,
+                    section=section,
+                    evidence=evidence_payload,
+                    section_observations=section_observations,
+                    resolved_history=resolved_history,
+                    raw_windows=raw_window_index,
+                    work=work,
+                    config=pipeline.config.notes,
+                    llm_config=pipeline.config.llm.model_dump(mode="json"),
+                    force=force,
                 )
+                state_resolution_seconds += time.perf_counter() - resolution_started
+                state_observation_resolution_cache_hits += resolution_cache_hits
+                state_observations_resolved += len(resolved_evidence.get("observations", []))
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
-                        "evidence": evidence_payload,
-                        "raw_evidence_context": raw_evidence_context,
+                        "resolved_evidence": resolved_evidence,
                         "previous_context": previous_context,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
@@ -1087,22 +1494,26 @@ def run_knowledge_pipeline(
                 notes = _write_state_section_batch_resilient(
                     orchestrator,
                     section,
-                    evidence_payload,
+                    resolved_evidence,
                     outline_context=outline_context,
                     previous_context=previous_context,
                     kb=kb,
                     transcript=transcript,
                     config=pipeline.config.notes,
-                    raw_window_index=raw_window_index,
-                    raw_evidence_context=raw_evidence_context,
+                    raw_window_index=None,
+                    raw_evidence_context=None,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
+                notes.corrections.extend(resolution_corrections)
+                notes.unresolved = list(
+                    dict.fromkeys([*notes.unresolved, *resolution_unresolved])
+                )
                 atomic_json_dump(
                     path,
                     {
                         "fingerprint": fingerprint,
                         "evidence": evidence_payload,
-                        "raw_evidence_context": raw_evidence_context,
+                        "resolved_evidence": resolved_evidence,
                         "notes": notes.model_dump(mode="json"),
                     },
                 )
@@ -1259,6 +1670,7 @@ def run_knowledge_pipeline(
             "hierarchy_seconds": round(hierarchy_seconds, 3),
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
+            "state_resolution_seconds": round(state_resolution_seconds, 3),
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "windows_total": len(chunks),
@@ -1269,6 +1681,10 @@ def run_knowledge_pipeline(
             "episode_batch_cache_hits": episode_batch_cache_hits,
             "state_section_batches_total": state_section_batches_total,
             "state_section_cache_hits": state_section_cache_hits,
+            "state_observations_resolved": state_observations_resolved,
+            "state_observation_resolution_cache_hits": (
+                state_observation_resolution_cache_hits
+            ),
             "topic_sections_total": len(outline.sections),
             "subtopics_total": sum(len(item.subsections) for item in outline.sections),
             "sections_total": len(note_sections),

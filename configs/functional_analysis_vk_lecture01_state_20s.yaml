@@ -84,6 +84,11 @@ notes:
   # OCR/ASR interpretation as ground truth. This context is writer-only and does not rerun OCR.
   state_section_raw_context_seconds: 90
   state_section_raw_evidence_chars: 16000
+  # Resolve observations chronologically. Two future observations are visible only as fixed-lag
+  # disambiguation context; the accepted history is immutable.
+  state_observation_lookahead: 2
+  state_observation_history: 12
+  state_observation_max_raw_windows: 6
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
