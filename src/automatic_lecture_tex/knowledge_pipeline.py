@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from difflib import SequenceMatcher
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -398,6 +399,49 @@ def _observation_window_ids(observation: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _compact_formula_similarity_text(value: str) -> str:
+    return (
+        "".join(value.split())
+        .replace(r"\parallel", "|")
+        .replace(r"\|", "|")
+        .replace(r"\left", "")
+        .replace(r"\right", "")
+    )
+
+
+def _filter_current_window_ocr_candidates(
+    current: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep OCR readings plausibly describing the current formula, not later board lines."""
+
+    anchor = str(current.get("latex") or "").strip()
+    if not anchor:
+        return list(candidates[:6])
+
+    normalized_anchor = _compact_formula_similarity_text(anchor)
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for candidate in candidates:
+        text = str(candidate.get("text") or "").strip()
+        if not text:
+            continue
+        score = SequenceMatcher(
+            None,
+            normalized_anchor,
+            _compact_formula_similarity_text(text),
+        ).ratio()
+        ranked.append((score, candidate))
+
+    # A weakly related crop is more likely to be another formula from the same board state. The
+    # semantic look-ahead observation remains available separately if the next proof step is needed
+    # to disambiguate the current one.
+    return [
+        dict(candidate)
+        for score, candidate in sorted(ranked, key=lambda item: item[0], reverse=True)
+        if score >= 0.45
+    ][:4]
+
+
 def _raw_windows_for_observation_sequence(
     current: dict[str, Any],
     lookahead: list[dict[str, Any]],
@@ -405,24 +449,27 @@ def _raw_windows_for_observation_sequence(
     *,
     max_windows: int,
 ) -> list[dict[str, Any]]:
-    """Return literal sensor windows attached only to current/look-ahead observations."""
+    """Return literal sensor evidence only from windows that generated CURRENT.
 
+    Future observations are supplied semantically through fixed-lag look-ahead. Their raw windows
+    are intentionally excluded because one 20 s board window can contain several adjacent proof
+    steps; exposing all later OCR candidates lets the resolver replace CURRENT with the next formula.
+    """
+
+    del lookahead
     current_ids = _observation_window_ids(current)
-    future_ids: set[str] = set()
-    for item in lookahead:
-        future_ids.update(_observation_window_ids(item))
 
     selected: list[dict[str, Any]] = []
     for raw in raw_windows:
         window_id = str(raw.get("window_id", ""))
-        if window_id in current_ids:
-            role = "current"
-        elif window_id in future_ids:
-            role = "lookahead"
-        else:
+        if window_id not in current_ids:
             continue
         item = dict(raw)
-        item["role"] = role
+        item["role"] = "current"
+        item["math_ocr_candidates"] = _filter_current_window_ocr_candidates(
+            current,
+            list(raw.get("math_ocr_candidates", [])),
+        )
         selected.append(item)
 
     if not selected:
@@ -438,17 +485,19 @@ def _raw_windows_for_observation_sequence(
         for raw in nearest[:1]:
             item = dict(raw)
             item["role"] = "current_fallback"
+            item["math_ocr_candidates"] = _filter_current_window_ocr_candidates(
+                current,
+                list(raw.get("math_ocr_candidates", [])),
+            )
             selected.append(item)
 
     selected.sort(
         key=lambda item: (
-            item.get("role") != "current",
             float(item.get("start", 0.0)),
             str(item.get("window_id", "")),
         )
     )
     return selected[:max_windows]
-
 
 def _claims_for_observation(
     evidence: dict[str, Any],
@@ -530,7 +579,9 @@ Symbols established no later than this observation:
 Next observations, provided only as fixed-lag look-ahead to disambiguate CURRENT:
 {json.dumps(lookahead, ensure_ascii=False, separators=(",", ":"))}
 
-Literal ASR/OCR windows attached only to CURRENT/look-ahead observations:
+Literal ASR/OCR windows attached to CURRENT only. For formula observations the host has already
+filtered OCR crops to readings structurally similar to CURRENT so another formula from the same
+board state cannot masquerade as this observation:
 {json.dumps(raw, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
@@ -541,7 +592,8 @@ Rules:
 - Output the resolved form of CURRENT observation only.
 - Earlier resolved history is immutable. Do not revise, summarize, or replace it.
 - Look-ahead may clarify the scope, notation, sign, denominator, or role of CURRENT, but material
-  belonging only to a later observation must not be moved into CURRENT.
+  belonging only to a later observation must not be moved into CURRENT. A coherent CURRENT formula
+  must not be replaced merely because look-ahead contains a different next proof step.
 - OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly.
 - Prefer repeated/consistent local evidence over a single cleaner-looking OCR fragment.
 - Never delete a coefficient, denominator, quantifier, membership, subscript, or relation sign merely
