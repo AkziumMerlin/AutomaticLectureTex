@@ -174,13 +174,14 @@ vision:
     device: cuda
     unimumer_model: phxember/Uni-MuMER-Qwen3.5-2B
     unimumer_python_path: ../models/formula/unimumer-env/bin/python
-    unimumer_max_tokens: 512
-    unimumer_temperature: 0.2
+    # BF16 ablation: remove NF4 as a possible source of repetition loops. Greedy decoding keeps
+    # OCR deterministic and the short output budget is enough for line-sized formula crops.
+    unimumer_max_tokens: 384
+    unimumer_temperature: 0.0
     unimumer_top_p: 0.8
-    unimumer_load_in_4bit: true
-    # Hard allocator cap for the OCR subprocess. Leaves headroom beside the already resident
-    # ~33 GiB lecture LLM on a 40 GiB A100.
-    unimumer_max_gpu_memory_gib: 5.5
+    unimumer_load_in_4bit: false
+    # Hard allocator cap for the OCR subprocess. The resident lecture LLM is left untouched.
+    unimumer_max_gpu_memory_gib: 6.0
 
     # Baselines / ablations:
     #   backend: unimernet

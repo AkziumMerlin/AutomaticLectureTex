@@ -190,11 +190,11 @@ class MathOCRConfig(BaseModel):
     unimernet_python_path: Path | None = None
     unimumer_model: str = "phxember/Uni-MuMER-Qwen3.5-2B"
     unimumer_python_path: Path | None = None
-    unimumer_max_tokens: int = Field(default=512, ge=64, le=4096)
-    unimumer_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    unimumer_max_tokens: int = Field(default=384, ge=64, le=4096)
+    unimumer_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     unimumer_top_p: float = Field(default=0.8, gt=0.0, le=1.0)
-    unimumer_load_in_4bit: bool = True
-    unimumer_max_gpu_memory_gib: float = Field(default=5.5, ge=1.0, le=80.0)
+    unimumer_load_in_4bit: bool = False
+    unimumer_max_gpu_memory_gib: float = Field(default=6.0, ge=1.0, le=80.0)
     # Deprecated vLLM-era setting retained so older configs still parse; the Transformers worker
     # does not use it.
     unimumer_gpu_memory_utilization: float = Field(default=0.35, gt=0.05, le=0.95)
