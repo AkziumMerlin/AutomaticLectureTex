@@ -233,6 +233,56 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
+def test_state_writer_raw_summary_keeps_direct_windows_and_only_repeated_neighbors():
+    raw_context = [
+        {
+            "window_id": "window_1",
+            "start": 0.0,
+            "end": 10.0,
+            "direct": True,
+            "asr": "current speech",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {"text": r"x=\frac{f(x)}{f(z_f)}z_f+y", "timestamp": 1.0},
+                {"text": r"one\_off=bad", "timestamp": 2.0},
+            ],
+        },
+        {
+            "window_id": "window_2",
+            "start": 10.0,
+            "end": 20.0,
+            "direct": False,
+            "asr": "future speech must not be copied",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {"text": r"x = \frac { f(x) } { f(z_f) } z_f + y", "timestamp": 11.0},
+                {"text": r"future\_singleton=1", "timestamp": 12.0},
+            ],
+        },
+        {
+            "window_id": "window_3",
+            "start": 20.0,
+            "end": 30.0,
+            "direct": False,
+            "asr": "more future speech",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {"text": r"x=\frac{f(x)}{f(z_f)}z_f+y", "timestamp": 21.0},
+            ],
+        },
+    ]
+
+    summary = knowledge_pipeline_module._state_writer_raw_summary(raw_context)
+
+    assert [item["window_id"] for item in summary["direct_windows"]] == ["window_1"]
+    assert "future speech must not be copied" not in str(summary)
+    consensus = summary["temporal_formula_consensus"]
+    assert len(consensus) == 1
+    assert consensus[0]["window_support"] == 3
+    assert set(consensus[0]["window_ids"]) == {"window_1", "window_2", "window_3"}
+    assert "future_singleton" not in str(summary)
+
+
 def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
     class FakeOrchestrator:
         output_language = "ru"
@@ -276,10 +326,43 @@ def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
         raw_evidence_context=raw_context,
     )
 
-    assert "FALLIBLE" in orchestrator.prompt
-    assert "NOT ground truth" in orchestrator.prompt
+    assert "DEFAULT hypothesis" in orchestrator.prompt
+    assert "at least TWO" in orchestrator.prompt
+    assert "temporal_formula_consensus" in orchestrator.prompt
     assert "do not merely paraphrase OCR" in orchestrator.prompt
     assert r"f(z_f)\\neq0" in orchestrator.prompt
+
+
+def test_state_writer_drops_noop_corrections():
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def _structured(self, prompt, schema, **kwargs):
+            del prompt, schema, kwargs
+            return GeneratedChunkNotes(
+                section_title="Topic",
+                blocks=[],
+                corrections=[
+                    {
+                        "original": r"f(z_f)\neq0",
+                        "corrected": r"f(z_f)\neq0",
+                        "reason": "No actual change.",
+                        "basis": "mathematical_consistency",
+                        "confidence": 0.95,
+                    }
+                ],
+            )
+
+    notes = knowledge_pipeline_module._write_state_section_batch(
+        FakeOrchestrator(),
+        OutlineSection(id="section_0", title="Topic", start=0.0, end=1.0),
+        {"claims": [], "observations": [], "symbols": [], "episodes": []},
+        outline_context=[],
+        previous_context=[],
+        raw_evidence_context=[],
+    )
+
+    assert notes.corrections == []
 
 
 def test_episode_tracking_derives_symbol_introduced_at_from_evidence():
