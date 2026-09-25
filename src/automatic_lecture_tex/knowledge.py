@@ -244,10 +244,21 @@ def evidence_for_section(
             if item.end >= section.start and item.start <= section.end
         ]
 
+    if observations:
+        semantic_cutoff = max(item.end for item in observations)
+    elif episodes:
+        semantic_cutoff = max(item.end for item in episodes)
+    else:
+        semantic_cutoff = section.end
+
     symbols = [
         item
         for item in kb.symbols
-        if item.active and (item.episode_id in episode_ids or item.introduced_at <= section.end)
+        if item.active
+        and (
+            item.episode_id in episode_ids
+            or item.introduced_at <= semantic_cutoff
+        )
     ]
     transcript_text = "\n".join(
         f"[{segment.start:.3f}-{segment.end:.3f}] {segment.text}"

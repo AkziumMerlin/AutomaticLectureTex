@@ -3,6 +3,8 @@ from pathlib import Path
 
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex.config import NotesConfig, load_config
+from automatic_lecture_tex.episode_graph import apply_episode_tracking
+from automatic_lecture_tex.generated_notes import GeneratedChunkNotes
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import (
@@ -13,6 +15,7 @@ from automatic_lecture_tex.knowledge_pipeline import (
 from automatic_lecture_tex.schemas import (
     ChunkNotes,
     EpisodeStatus,
+    EpisodeTrackingUpdate,
     LectureKnowledgeBase,
     LectureObservation,
     LectureOutline,
@@ -20,6 +23,7 @@ from automatic_lecture_tex.schemas import (
     OutlineSection,
     SemanticEpisode,
     SourceStatus,
+    SymbolRecord,
     Transcript,
     TranscriptSegment,
 )
@@ -145,6 +149,230 @@ def test_state_section_batches_do_not_reintroduce_raw_asr():
 
 
 
+
+
+def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr():
+    evidence = {
+        "section": {"start": 100.0, "end": 200.0},
+        "episodes": [{"id": "episode_5", "window_ids": ["window_far"]}],
+        "observations": [
+            {
+                "id": "obs_5",
+                "window_id": "window_5",
+                "window_ids": ["window_5"],
+                "start": 100.0,
+                "end": 110.0,
+            }
+        ],
+    }
+    raw_windows = [
+        {
+            "window_id": "window_4",
+            "start": 80.0,
+            "end": 90.0,
+            "asr": "before",
+            "visual_latex": [],
+            "math_ocr_candidates": [],
+        },
+        {
+            "window_id": "window_5",
+            "start": 100.0,
+            "end": 110.0,
+            "asr": "current",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {
+                    "timestamp": 105.0,
+                    "text": r"y=x-\frac{f(x)}{f(z_f)}z_f\in\ker f",
+                    "source_id": "ocr_1",
+                }
+            ],
+        },
+        {
+            "window_id": "window_6",
+            "start": 130.0,
+            "end": 140.0,
+            "asr": "after",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {
+                    "timestamp": 135.0,
+                    "text": r"f(z_f)\neq 0",
+                    "source_id": "ocr_2",
+                }
+            ],
+        },
+        {
+            "window_id": "window_far",
+            "start": 500.0,
+            "end": 510.0,
+            "asr": "unrelated future material",
+            "visual_latex": [],
+            "math_ocr_candidates": [],
+        },
+    ]
+    config = NotesConfig(
+        state_section_raw_context_seconds=40.0,
+        state_section_raw_evidence_chars=16000,
+    )
+
+    context = knowledge_pipeline_module._state_raw_evidence_context(
+        evidence,
+        raw_windows,
+        config,
+    )
+
+    assert [item["window_id"] for item in context] == [
+        "window_4",
+        "window_5",
+        "window_6",
+    ]
+    assert next(item for item in context if item["window_id"] == "window_5")["direct"] is True
+    future = next(item for item in context if item["window_id"] == "window_6")
+    assert future["math_ocr_candidates"][0]["text"] == r"f(z_f)\neq 0"
+    assert "unrelated future material" not in str(context)
+
+
+def test_state_writer_prompt_treats_semantic_state_and_ocr_as_fallible():
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def __init__(self):
+            self.prompt = ""
+
+        def _structured(self, prompt, schema, **kwargs):
+            del schema, kwargs
+            self.prompt = prompt
+            return GeneratedChunkNotes(section_title="Topic", blocks=[])
+
+    orchestrator = FakeOrchestrator()
+    section = OutlineSection(
+        id="section_0",
+        title="Topic",
+        start=0.0,
+        end=1.0,
+        episode_ids=[],
+    )
+    raw_context = [
+        {
+            "window_id": "window_0",
+            "start": 0.0,
+            "end": 1.0,
+            "asr": "",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {"timestamp": 0.5, "text": r"f(z_f)\neq0", "source_id": "ocr"}
+            ],
+            "direct": True,
+        }
+    ]
+
+    knowledge_pipeline_module._write_state_section_batch(
+        orchestrator,
+        section,
+        {"claims": [], "observations": [], "symbols": [], "episodes": []},
+        outline_context=[],
+        previous_context=[],
+        raw_evidence_context=raw_context,
+    )
+
+    assert "FALLIBLE" in orchestrator.prompt
+    assert "NOT ground truth" in orchestrator.prompt
+    assert "do not merely paraphrase OCR" in orchestrator.prompt
+    assert r"f(z_f)\\neq0" in orchestrator.prompt
+
+
+def test_episode_tracking_derives_symbol_introduced_at_from_evidence():
+    observation = LectureObservation(
+        id="obs_1",
+        window_id="window_1",
+        start=12.5,
+        end=13.0,
+        kind=ObservationKind.NOTATION,
+        text="Introduce z_f",
+        source_status=SourceStatus.OBSERVED,
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[observation],
+    )
+    update = EpisodeTrackingUpdate(
+        symbols=[
+            SymbolRecord(
+                symbol="z_f",
+                meaning="chosen vector",
+                evidence_ids=["obs_1"],
+            )
+        ]
+    )
+
+    apply_episode_tracking(kb, update, ["obs_1"], window_id="window_1")
+
+    assert len(kb.symbols) == 1
+    assert kb.symbols[0].introduced_at == 12.5
+
+
+def test_state_section_evidence_excludes_symbols_introduced_after_batch():
+    observation = LectureObservation(
+        id="obs_now",
+        window_id="window_now",
+        start=5.0,
+        end=10.0,
+        kind=ObservationKind.CLAIM,
+        text="Current claim",
+        source_status=SourceStatus.OBSERVED,
+        episode_id="episode_now",
+    )
+    episode = SemanticEpisode(
+        id="episode_now",
+        title="Now",
+        start=5.0,
+        end=10.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=["obs_now"],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[observation],
+        episodes=[episode],
+        symbols=[
+            SymbolRecord(
+                id="past",
+                symbol="x",
+                meaning="current symbol",
+                introduced_at=5.0,
+            ),
+            SymbolRecord(
+                id="future",
+                symbol="y_f",
+                meaning="future symbol",
+                episode_id="episode_future",
+                introduced_at=50.0,
+            ),
+        ],
+    )
+    section = OutlineSection(
+        id="section_0",
+        title="Long section",
+        start=0.0,
+        end=100.0,
+        episode_ids=["episode_now"],
+    )
+    transcript = Transcript(lecture_id="lecture", language="ru", segments=[])
+    config = NotesConfig()
+
+    payload = knowledge_pipeline_module._state_section_payload(
+        kb,
+        section,
+        transcript,
+        config,
+    )
+
+    assert [item["id"] for item in payload["symbols"]] == ["past"]
+
+
 def test_state_section_batches_split_oversized_single_episode_by_observations():
     observations = [
         LectureObservation(
@@ -211,6 +439,8 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.chunk_target_seconds == 20
     assert config.notes.chunk_overlap_seconds == 5
     assert config.notes.visual_chunk_board_scan is True
+    assert config.notes.state_section_raw_context_seconds == 90
+    assert config.notes.state_section_raw_evidence_chars == 16000
     assert config.vision.board_sampling_mode == "change"
     assert config.vision.board_crop_max_vlm_images == 5
     assert config.vision.board_change_probe_seconds == 4.0
