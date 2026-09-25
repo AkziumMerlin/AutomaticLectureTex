@@ -4,7 +4,11 @@ from pathlib import Path
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
-from automatic_lecture_tex.generated_notes import (\n    GeneratedChunkNotes,\n    GeneratedFormulaObservationResolution,\n    GeneratedObservationResolution,\n)
+from automatic_lecture_tex.generated_notes import (
+    GeneratedChunkNotes,
+    GeneratedFormulaObservationResolution,
+    GeneratedObservationResolution,
+)
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import (
