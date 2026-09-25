@@ -154,7 +154,7 @@ def test_state_section_batches_do_not_reintroduce_raw_asr():
 def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr():
     evidence = {
         "section": {"start": 100.0, "end": 200.0},
-        "episodes": [],
+        "episodes": [{"id": "episode_5", "window_ids": ["window_far"]}],
         "observations": [
             {
                 "id": "obs_5",
