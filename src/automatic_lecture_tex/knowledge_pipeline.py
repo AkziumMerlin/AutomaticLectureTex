@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
-from .generated_notes import GeneratedChunkNotes, GeneratedObservationResolution
+from .generated_notes import (GeneratedChunkNotes, GeneratedFormulaObservationResolution, GeneratedObservationResolution)
 from .episode_graph import (
     apply_episode_tracking,
     build_outline_from_episodes,
@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 3
+STATE_PIPELINE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -478,8 +478,7 @@ def _resolved_observation_from_result(
     resolution: GeneratedObservationResolution,
 ) -> dict[str, Any]:
     resolved = dict(original)
-    if resolution.text.strip():
-        resolved["text"] = resolution.text.strip()
+    resolved["text"] = resolution.text.strip()
     if resolution.latex is not None and resolution.latex.strip():
         resolved["latex"] = resolution.latex.strip()
     resolved["sequentially_resolved"] = True
@@ -535,6 +534,10 @@ Literal ASR/OCR windows attached only to CURRENT/look-ahead observations:
 {json.dumps(raw, ensure_ascii=False, separators=(",", ":"))}
 
 Rules:
+- ALWAYS return the final resolved text in the top-level text field, even when no change is needed.
+- If CURRENT contains a non-empty latex field, ALWAYS return the final complete formula in the
+  top-level latex field, even when the formula is unchanged. CorrectionRecord is audit metadata
+  only; never put the resolved value exclusively there.
 - Output the resolved form of CURRENT observation only.
 - Earlier resolved history is immutable. Do not revise, summarize, or replace it.
 - Look-ahead may clarify the scope, notation, sign, denominator, or role of CURRENT, but material
@@ -553,9 +556,14 @@ Rules:
 - Do not emit a no-op correction.
 - Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
 """
+    schema = (
+        GeneratedFormulaObservationResolution
+        if str(current.get("latex") or "").strip()
+        else GeneratedObservationResolution
+    )
     return orchestrator._structured(
         prompt,
-        GeneratedObservationResolution,
+        schema,
         operation="state_observation_resolve",
         max_tokens=1536,
         split_oversized_task=True,
