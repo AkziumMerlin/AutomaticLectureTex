@@ -294,12 +294,14 @@ def test_observation_resolution_requires_authoritative_final_state():
         },
     )
     assert resolution.text == "Resolved observation"
+    assert GeneratedObservationResolution.model_fields["text"].is_required()
 
     formula = GeneratedFormulaObservationResolution(
         text="Resolved formula",
         latex=r"f(z_f)\\neq0",
     )
     assert formula.latex == r"f(z_f)\\neq0"
+    assert GeneratedFormulaObservationResolution.model_fields["latex"].is_required()
 
 
 def test_resolved_observation_uses_top_level_resolution_not_correction_record():
@@ -367,7 +369,7 @@ def test_formula_observation_resolver_uses_formula_schema():
     assert orchestrator.schema is GeneratedFormulaObservationResolution
 
 
-def test_raw_windows_for_sequential_resolution_use_only_current_and_lookahead():
+def test_raw_windows_for_sequential_resolution_use_current_only():
     current = {
         "id": "obs_1",
         "window_id": "window_1",
@@ -398,9 +400,28 @@ def test_raw_windows_for_sequential_resolution_use_only_current_and_lookahead():
         max_windows=6,
     )
 
-    assert [item["window_id"] for item in selected] == ["window_1", "window_2"]
+    assert [item["window_id"] for item in selected] == ["window_1"]
     assert selected[0]["role"] == "current"
-    assert selected[1]["role"] == "lookahead"
+
+
+def test_current_formula_ocr_filter_rejects_next_proof_step():
+    current = {"latex": r"\|f\| \leq \|y_f\|"}
+    candidates = [
+        {
+            "text": (
+                r"| f ( \frac { y _ { f } } { \parallel y _ { f } \parallel } ) | = "
+                r"\parallel y _ { f } \parallel \leq \parallel f \parallel"
+            )
+        },
+        {"text": r"| | f | | = | | y + 1 | |"},
+    ]
+
+    filtered = knowledge_pipeline_module._filter_current_window_ocr_candidates(
+        current,
+        candidates,
+    )
+
+    assert filtered == []
 
 
 def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_path):
