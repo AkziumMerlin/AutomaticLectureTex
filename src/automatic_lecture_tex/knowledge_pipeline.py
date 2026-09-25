@@ -1429,6 +1429,9 @@ def run_knowledge_pipeline(
     state_mode = pipeline.config.notes.architecture == "state"
     state_section_cache_hits = 0
     state_section_batches_total = 0
+    state_observation_resolution_cache_hits = 0
+    state_observations_resolved = 0
+    state_resolution_seconds = 0.0
     state_synthesis_seconds = 0.0
 
     if state_mode:
@@ -1442,22 +1445,40 @@ def run_knowledge_pipeline(
                 transcript,
                 pipeline.config.notes,
             )
+            section_observations = _section_observation_sequence(kb, section)
+            resolved_history: list[dict[str, Any]] = []
             state_section_batches_total += len(evidence_batches)
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
-                raw_evidence_context = _state_raw_evidence_context(
-                    evidence_payload,
-                    raw_window_index,
-                    pipeline.config.notes,
+                resolution_started = time.perf_counter()
+                (
+                    resolved_evidence,
+                    resolution_corrections,
+                    resolution_unresolved,
+                    resolution_cache_hits,
+                ) = _resolve_state_batch_sequential(
+                    orchestrator,
+                    section=section,
+                    evidence=evidence_payload,
+                    section_observations=section_observations,
+                    resolved_history=resolved_history,
+                    previous_context=previous_context,
+                    raw_windows=raw_window_index,
+                    work=work,
+                    config=pipeline.config.notes,
+                    llm_config=pipeline.config.llm.model_dump(mode="json"),
+                    force=force,
                 )
+                state_resolution_seconds += time.perf_counter() - resolution_started
+                state_observation_resolution_cache_hits += resolution_cache_hits
+                state_observations_resolved += len(resolved_evidence.get("observations", []))
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
-                        "evidence": evidence_payload,
-                        "raw_evidence_context": raw_evidence_context,
+                        "resolved_evidence": resolved_evidence,
                         "previous_context": previous_context,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
@@ -1478,22 +1499,26 @@ def run_knowledge_pipeline(
                 notes = _write_state_section_batch_resilient(
                     orchestrator,
                     section,
-                    evidence_payload,
+                    resolved_evidence,
                     outline_context=outline_context,
                     previous_context=previous_context,
                     kb=kb,
                     transcript=transcript,
                     config=pipeline.config.notes,
-                    raw_window_index=raw_window_index,
-                    raw_evidence_context=raw_evidence_context,
+                    raw_window_index=None,
+                    raw_evidence_context=None,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
+                notes.corrections.extend(resolution_corrections)
+                notes.unresolved = list(
+                    dict.fromkeys([*notes.unresolved, *resolution_unresolved])
+                )
                 atomic_json_dump(
                     path,
                     {
                         "fingerprint": fingerprint,
                         "evidence": evidence_payload,
-                        "raw_evidence_context": raw_evidence_context,
+                        "resolved_evidence": resolved_evidence,
                         "notes": notes.model_dump(mode="json"),
                     },
                 )
@@ -1650,6 +1675,7 @@ def run_knowledge_pipeline(
             "hierarchy_seconds": round(hierarchy_seconds, 3),
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
+            "state_resolution_seconds": round(state_resolution_seconds, 3),
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "windows_total": len(chunks),
@@ -1660,6 +1686,10 @@ def run_knowledge_pipeline(
             "episode_batch_cache_hits": episode_batch_cache_hits,
             "state_section_batches_total": state_section_batches_total,
             "state_section_cache_hits": state_section_cache_hits,
+            "state_observations_resolved": state_observations_resolved,
+            "state_observation_resolution_cache_hits": (
+                state_observation_resolution_cache_hits
+            ),
             "topic_sections_total": len(outline.sections),
             "subtopics_total": sum(len(item.subsections) for item in outline.sections),
             "sections_total": len(note_sections),
