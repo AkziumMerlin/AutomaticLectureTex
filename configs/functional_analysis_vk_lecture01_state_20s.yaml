@@ -88,7 +88,8 @@ notes:
   # disambiguation context; the accepted history is immutable.
   state_observation_lookahead: 2
   state_observation_history: 4
-  state_observation_max_raw_windows: 2\n  state_observation_max_images: 2
+  state_observation_max_raw_windows: 2
+  state_observation_max_images: 2
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
