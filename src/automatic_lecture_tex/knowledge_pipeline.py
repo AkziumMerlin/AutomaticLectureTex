@@ -13,7 +13,6 @@ from pydantic import ValidationError
 from .chunking import chunk_transcript
 from .generated_notes import (
     GeneratedChunkNotes,
-    GeneratedObservationResolution,
     GeneratedObservationStatePatch,
 )
 from .episode_graph import (
@@ -1195,7 +1194,7 @@ def _resolve_state_batch_sequential(
                 },
             )
 
-        resolved, patch_accepted, issue = _apply_observation_state_patch(
+        resolved, _patch_accepted, issue = _apply_observation_state_patch(
             original,
             patch,
             allowed_evidence_refs=allowed_refs,
