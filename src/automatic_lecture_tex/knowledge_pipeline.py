@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
-from .generated_notes import (GeneratedChunkNotes, GeneratedFormulaObservationResolution, GeneratedObservationResolution)
+from .generated_notes import (
+    GeneratedChunkNotes,
+    GeneratedObservationResolution,
+    GeneratedObservationStatePatch,
+)
 from .episode_graph import (
     apply_episode_tracking,
     build_outline_from_episodes,
@@ -66,7 +70,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 6
+STATE_PIPELINE_VERSION = 7
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -210,14 +214,14 @@ def _load_episode_batch(path: Path, fingerprint: str) -> ChunkNotes | None:
 def _load_observation_resolution(
     path: Path,
     fingerprint: str,
-) -> GeneratedObservationResolution | None:
+) -> GeneratedObservationStatePatch | None:
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("fingerprint") != fingerprint:
             return None
-        return GeneratedObservationResolution.model_validate(payload["resolution"])
+        return GeneratedObservationStatePatch.model_validate(payload["patch"])
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
 
@@ -453,14 +457,17 @@ def _filter_current_window_ocr_candidates(
     current: dict[str, Any],
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep OCR readings plausibly describing the current formula, not later board lines."""
+    """Bind OCR to CURRENT by formula structure and observation time."""
 
     anchor = str(current.get("latex") or "").strip()
     if not anchor:
         return list(candidates[:6])
 
     normalized_anchor = _compact_formula_similarity_text(anchor)
-    ranked: list[tuple[float, dict[str, Any]]] = []
+    start = float(current.get("start", 0.0))
+    end = float(current.get("end", start))
+    center = 0.5 * (start + end)
+    ranked: list[tuple[bool, float, float, dict[str, Any]]] = []
     for candidate in candidates:
         text = str(candidate.get("text") or "").strip()
         if not text:
@@ -470,17 +477,24 @@ def _filter_current_window_ocr_candidates(
             normalized_anchor,
             _compact_formula_similarity_text(text),
         ).ratio()
-        ranked.append((score, candidate))
+        if score < 0.55:
+            continue
+        timestamp = candidate.get("timestamp")
+        if timestamp is None:
+            in_interval = False
+            distance = float("inf")
+        else:
+            value = float(timestamp)
+            in_interval = start - 1.0 <= value <= end + 1.0
+            distance = abs(value - center)
+        ranked.append((in_interval, score, distance, candidate))
 
-    # A weakly related crop is more likely to be another formula from the same board state. The
-    # semantic look-ahead observation remains available separately if the next proof step is needed
-    # to disambiguate the current one.
-    return [
-        dict(candidate)
-        for score, candidate in sorted(ranked, key=lambda item: item[0], reverse=True)
-        if score >= 0.55
-    ][:4]
-
+    if not ranked:
+        return []
+    has_local = any(item[0] for item in ranked)
+    pool = [item for item in ranked if item[0]] if has_local else ranked
+    pool.sort(key=lambda item: (-item[1], item[2]))
+    return [dict(item[3]) for item in pool[:4]]
 
 def _raw_windows_for_observation_sequence(
     current: dict[str, Any],
@@ -647,17 +661,17 @@ def _resolver_visual_context(
     raw_windows: list[dict[str, Any]],
     *,
     max_images: int = 2,
-) -> tuple[list[Path], list[str]]:
-    """Choose the exact OCR-producing crop first, then one local board-state context image."""
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """Choose temporally bound visual evidence for CURRENT."""
 
     if max_images <= 0:
         return [], []
 
     images: list[Path] = []
-    labels: list[str] = []
+    metadata: list[dict[str, Any]] = []
     seen: set[Path] = set()
 
-    def append(path_value: Any, label: str) -> None:
+    def append(path_value: Any, ref: str, label: str, timestamp: Any = None) -> None:
         if len(images) >= max_images or not path_value:
             return
         path = Path(str(path_value))
@@ -665,7 +679,13 @@ def _resolver_visual_context(
             return
         seen.add(path)
         images.append(path)
-        labels.append(f"Image {len(images) - 1}: {label}")
+        metadata.append(
+            {
+                "ref": ref,
+                "label": label,
+                "timestamp": timestamp,
+            }
+        )
 
     source_ids = [
         str(item.get("source_id"))
@@ -674,23 +694,26 @@ def _resolver_visual_context(
         if item.get("source_id")
     ]
     crops = [
-        crop
+        (str(raw.get("window_id", "")), crop)
         for raw in raw_windows
         for crop in raw.get("formula_crops", [])
     ]
     crops_by_id = {
-        str(crop.get("id")): crop
-        for crop in crops
+        str(crop.get("id")): (window_id, crop)
+        for window_id, crop in crops
         if crop.get("id")
     }
 
     for source_id in source_ids:
-        crop = crops_by_id.get(source_id)
-        if crop is None:
+        matched = crops_by_id.get(source_id)
+        if matched is None:
             continue
+        window_id, crop = matched
         append(
             crop.get("image_path"),
-            f"formula_crop source_id={source_id}, timestamp={crop.get('timestamp')}",
+            f"visual:crop:{source_id}",
+            f"formula crop from {window_id}",
+            crop.get("timestamp"),
         )
         if images:
             break
@@ -699,34 +722,38 @@ def _resolver_visual_context(
         float(current.get("start", 0.0)) + float(current.get("end", 0.0))
     )
     if not images and crops:
-        nearest_crop = min(
+        window_id, nearest_crop = min(
             crops,
-            key=lambda crop: abs(float(crop.get("timestamp") or center) - center),
+            key=lambda pair: abs(float(pair[1].get("timestamp") or center) - center),
         )
+        crop_id = str(nearest_crop.get("id") or "nearest")
         append(
             nearest_crop.get("image_path"),
-            f"nearest_formula_crop id={nearest_crop.get('id')}, "
-            f"timestamp={nearest_crop.get('timestamp')}",
+            f"visual:crop:{crop_id}",
+            f"nearest formula crop from {window_id}",
+            nearest_crop.get("timestamp"),
         )
 
     board_frames = [
-        frame
+        (str(raw.get("window_id", "")), frame)
         for raw in raw_windows
         for frame in raw.get("board_frames", [])
         if frame.get("image_path")
     ]
     if len(images) < max_images and board_frames:
-        nearest_frame = min(
+        window_id, nearest_frame = min(
             board_frames,
-            key=lambda frame: abs(float(frame.get("timestamp") or center) - center),
+            key=lambda pair: abs(float(pair[1].get("timestamp") or center) - center),
         )
+        timestamp = nearest_frame.get("timestamp")
         append(
             nearest_frame.get("image_path"),
-            f"local_board_state timestamp={nearest_frame.get('timestamp')}",
+            f"visual:board:{window_id}",
+            f"local board state from {window_id}",
+            timestamp,
         )
 
-    return images, labels
-
+    return images, metadata
 
 def _resolver_episode_context(
     evidence: dict[str, Any],
