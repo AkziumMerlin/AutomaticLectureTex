@@ -80,6 +80,8 @@ def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
     assert config.notes.global_validation is False
     assert config.vision.board_sampling_mode == "change"
     assert config.notes.visual_chunk_board_scan is True
+    assert config.notes.state_observation_history == 4
+    assert config.notes.state_observation_max_images == 2
 
 
 def test_lecture_state_is_projection_of_semantic_state():
@@ -452,6 +454,162 @@ def test_unsupported_formula_rewrite_is_rejected():
     assert accepted is False
     assert resolved["resolved_text"] == "upper bound"
     assert resolved["resolved_latex"] == r"\|f\| \leq \|y_f\|"
+
+
+def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path):
+    crop = tmp_path / "formula.jpg"
+    board = tmp_path / "board.jpg"
+    crop.write_bytes(b"crop")
+    board.write_bytes(b"board")
+
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def __init__(self):
+            self.prompt = ""
+            self.images = None
+            self.guided_json = None
+            self.max_tokens = None
+
+        def _structured(self, prompt, schema, **kwargs):
+            self.prompt = prompt
+            self.images = kwargs.get("images")
+            self.guided_json = kwargs.get("guided_json")
+            self.max_tokens = kwargs.get("max_tokens")
+            return schema(text="keep", latex=r"f(z_f)\neq0")
+
+    orchestrator = FakeOrchestrator()
+    current = {
+        "id": "obs_current",
+        "episode_id": "episode_1",
+        "kind": "equation",
+        "text": "nonzero denominator",
+        "latex": r"f(z_f)\neq0",
+        "start": 10.0,
+        "end": 11.0,
+        "window_id": "window_1",
+        "window_ids": ["window_1"],
+        "unused_metadata": "must not reach resolver",
+    }
+    history = [
+        {
+            "id": f"obs_{index}",
+            "kind": "claim",
+            "text": f"history_{index}",
+            "latex": None,
+            "resolved_text": f"resolved_history_{index}",
+            "huge_metadata": "x" * 2000,
+        }
+        for index in range(10)
+    ]
+    raw_windows = [
+        {
+            "window_id": "window_1",
+            "start": 0.0,
+            "end": 20.0,
+            "asr": "local ASR",
+            "visual_latex": [],
+            "math_ocr_candidates": [
+                {
+                    "timestamp": 10.5,
+                    "text": r"f(z_f)\neq0",
+                    "source_id": "crop_exact",
+                }
+            ],
+            "formula_crops": [
+                {
+                    "id": "crop_exact",
+                    "timestamp": 10.5,
+                    "image_path": str(crop),
+                    "detector_confidence": 0.9,
+                }
+            ],
+            "board_frames": [
+                {"timestamp": 10.0, "image_path": str(board)}
+            ],
+        }
+    ]
+    evidence = {
+        "claims": [{"id": "claim_that_should_not_be_sent", "content": "duplicate"}],
+        "symbols": [
+            {
+                "symbol": "z_f",
+                "meaning": "Riesz witness",
+                "type_hint": "H",
+                "introduced_at": 1.0,
+            },
+            {
+                "symbol": "unrelated_symbol",
+                "meaning": "irrelevant",
+                "type_hint": None,
+                "introduced_at": 2.0,
+            },
+        ],
+        "episodes": [
+            {"id": "episode_1", "title": "Riesz proof", "kind": "proof"}
+        ],
+    }
+    config = NotesConfig(
+        state_observation_history=4,
+        state_observation_lookahead=2,
+        state_observation_max_raw_windows=2,
+        state_observation_max_images=2,
+    )
+
+    knowledge_pipeline_module._resolve_single_state_observation(
+        orchestrator,
+        section=OutlineSection(
+            id="section_1",
+            title="Riesz",
+            start=0.0,
+            end=20.0,
+            episode_ids=["episode_1"],
+        ),
+        evidence=evidence,
+        current=current,
+        lookahead=[],
+        resolved_history=history,
+        raw_windows=raw_windows,
+        config=config,
+    )
+
+    assert orchestrator.images == [crop, board]
+    assert orchestrator.guided_json is False
+    assert orchestrator.max_tokens == 768
+    assert "claim_that_should_not_be_sent" not in orchestrator.prompt
+    assert "unused_metadata" not in orchestrator.prompt
+    assert "huge_metadata" not in orchestrator.prompt
+    assert "resolved_history_5" not in orchestrator.prompt
+    assert "resolved_history_6" in orchestrator.prompt
+    assert "resolved_history_9" in orchestrator.prompt
+    assert "formula_crop source_id=crop_exact" in orchestrator.prompt
+    assert len(orchestrator.prompt) < 9000
+
+
+def test_resolver_raw_prompt_does_not_leak_visual_paths(tmp_path):
+    raw = [
+        {
+            "window_id": "window_1",
+            "asr": "speech",
+            "visual_latex": [r"x=y"],
+            "math_ocr_candidates": [
+                {"timestamp": 1.0, "text": r"x=y", "source_id": "crop_1"}
+            ],
+            "formula_crops": [
+                {"id": "crop_1", "image_path": str(tmp_path / "secret.jpg")}
+            ],
+            "board_frames": [
+                {"image_path": str(tmp_path / "board.jpg"), "timestamp": 1.0}
+            ],
+        }
+    ]
+
+    prompt_raw = knowledge_pipeline_module._resolver_raw_prompt_windows(raw)
+
+    serialized = json.dumps(prompt_raw)
+    assert "secret.jpg" not in serialized
+    assert "board.jpg" not in serialized
+    assert prompt_raw[0]["math_ocr_candidates"][0]["source_id"] == "crop_1"
 
 
 def test_formula_observation_resolver_uses_formula_schema():
