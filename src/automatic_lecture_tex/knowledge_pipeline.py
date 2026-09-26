@@ -692,6 +692,8 @@ def _resolver_visual_context(
             crop.get("image_path"),
             f"formula_crop source_id={source_id}, timestamp={crop.get('timestamp')}",
         )
+        if images:
+            break
 
     center = 0.5 * (
         float(current.get("start", 0.0)) + float(current.get("end", 0.0))
