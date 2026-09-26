@@ -205,7 +205,7 @@ class LectureModelClient(BaseLectureModelClient):
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                "temperature": self.config.temperature,
+                **self._sampling_kwargs(),
                 "max_tokens": current_max_tokens,
                 "extra_body": self._extra_body(),
             }
