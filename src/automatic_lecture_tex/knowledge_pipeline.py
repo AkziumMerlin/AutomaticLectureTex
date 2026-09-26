@@ -80,6 +80,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_lookahead",
     "state_observation_history",
     "state_observation_max_raw_windows",
+    "state_observation_max_images",
 }
 
 
@@ -1006,17 +1007,39 @@ def _resolve_state_batch_sequential(
             if str(item.get("window_id", "")) in current_window_ids
         ]
         history_limit = int(config.state_observation_history)
-        history = resolved_history[-history_limit:] if history_limit else []
+        history = (
+            [
+                _compact_resolver_observation(item)
+                for item in resolved_history[-history_limit:]
+            ]
+            if history_limit
+            else []
+        )
+        compact_lookahead = [
+            _compact_resolver_observation(item)
+            for item in lookahead
+        ]
+        compact_symbols = _resolver_symbol_context(
+            evidence,
+            original,
+            lookahead,
+        )
+        raw_prompt = _resolver_raw_prompt_windows(raw)
+        resolver_images, resolver_image_labels = _resolver_visual_context(
+            original,
+            raw,
+            max_images=int(config.state_observation_max_images),
+        )
         fingerprint = stable_hash(
             {
                 "state_pipeline_version": STATE_PIPELINE_VERSION,
-                "section_id": section.id,
-                "current": original,
-                "claims": _claims_for_observation(evidence, observation_id),
-                "symbols": _symbols_for_observation(evidence, original),
-                "lookahead": lookahead,
+                "episode": _resolver_episode_context(evidence, original, section),
+                "current": _compact_resolver_observation(original),
+                "symbols": compact_symbols,
+                "lookahead": compact_lookahead,
                 "history": history,
-                "raw_windows": raw,
+                "raw_windows": raw_prompt,
+                "images": [str(path) for path in resolver_images],
                 "llm": llm_config,
             }
         )
@@ -1054,13 +1077,22 @@ def _resolve_state_batch_sequential(
                 path,
                 {
                     "fingerprint": fingerprint,
-                    "current": original,
+                    "current": _compact_resolver_observation(original),
                     "history_before": history,
-                    "claims": _claims_for_observation(evidence, observation_id),
-                    "symbols": _symbols_for_observation(evidence, original),
-                    "lookahead": lookahead,
-                    "raw_windows": raw,
-                    "support_raw_windows": support_raw,
+                    "symbols": compact_symbols,
+                    "lookahead": compact_lookahead,
+                    "raw_windows": raw_prompt,
+                    "images": [
+                        {
+                            "path": str(path),
+                            "label": (
+                                resolver_image_labels[index]
+                                if index < len(resolver_image_labels)
+                                else None
+                            ),
+                        }
+                        for index, path in enumerate(resolver_images)
+                    ],
                     "resolution": resolution.model_dump(mode="json"),
                 },
             )
