@@ -1057,7 +1057,7 @@ def _resolve_state_batch_sequential(
     llm_config: dict[str, Any],
     force: bool,
 ) -> tuple[dict[str, Any], list[Any], list[str], int]:
-    """Resolve batch observations one-by-one with bounded future look-ahead."""
+    """Resolve pending observations into canonical state via bounded transactions."""
 
     by_id = {
         str(item.get("id", "")): index
@@ -1070,7 +1070,6 @@ def _resolve_state_batch_sequential(
         if item.get("id")
     }
     resolved_batch: list[dict[str, Any]] = []
-    corrections: list[Any] = []
     unresolved: list[str] = []
     cache_hits = 0
     lookahead_count = int(config.state_observation_lookahead)
@@ -1097,12 +1096,6 @@ def _resolve_state_batch_sequential(
             raw_windows,
             max_windows=int(config.state_observation_max_raw_windows),
         )
-        current_window_ids = _observation_window_ids(original)
-        support_raw = [
-            item
-            for item in raw_windows
-            if str(item.get("window_id", "")) in current_window_ids
-        ]
         history_limit = int(config.state_observation_history)
         history = (
             [
@@ -1122,10 +1115,16 @@ def _resolve_state_batch_sequential(
             lookahead,
         )
         raw_prompt = _resolver_raw_prompt_windows(raw)
-        resolver_images, resolver_image_labels = _resolver_visual_context(
+        resolver_images, resolver_visual_metadata = _resolver_visual_context(
             original,
             raw,
             max_images=int(config.state_observation_max_images),
+        )
+        evidence_catalog, allowed_refs, direct_refs = _resolver_evidence_catalog(
+            raw_prompt,
+            resolver_visual_metadata,
+            history,
+            compact_lookahead,
         )
         fingerprint = stable_hash(
             {
@@ -1136,6 +1135,7 @@ def _resolve_state_batch_sequential(
                 "lookahead": compact_lookahead,
                 "history": history,
                 "raw_windows": raw_prompt,
+                "visual_metadata": resolver_visual_metadata,
                 "images": [str(path) for path in resolver_images],
                 "llm": llm_config,
             }
@@ -1146,12 +1146,12 @@ def _resolve_state_batch_sequential(
             / section.id
             / f"{observation_id}.json"
         )
-        resolution = None if force else _load_observation_resolution(path, fingerprint)
-        if resolution is not None:
+        patch = None if force else _load_observation_resolution(path, fingerprint)
+        if patch is not None:
             cache_hits += 1
         else:
             try:
-                resolution = _resolve_single_state_observation(
+                patch = _resolve_single_state_observation(
                     orchestrator,
                     section=section,
                     evidence=evidence,
@@ -1162,14 +1162,14 @@ def _resolve_state_batch_sequential(
                     config=config,
                 )
             except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
-                resolution = GeneratedObservationResolution(
-                    text=str(original.get("text") or ""),
-                    latex=original.get("latex"),
+                patch = GeneratedObservationStatePatch(
+                    action="keep",
                     unresolved=[
-                        "Sequential observation resolution failed for "
+                        "State repair failed for "
                         f"{observation_id}: {type(exc).__name__}: {exc}"
                     ],
                 )
+
             atomic_json_dump(
                 path,
                 {
@@ -1179,52 +1179,64 @@ def _resolve_state_batch_sequential(
                     "symbols": compact_symbols,
                     "lookahead": compact_lookahead,
                     "raw_windows": raw_prompt,
+                    "evidence_catalog": evidence_catalog,
                     "images": [
                         {
-                            "path": str(path),
-                            "label": (
-                                resolver_image_labels[index]
-                                if index < len(resolver_image_labels)
-                                else None
+                            "path": str(image_path),
+                            **(
+                                resolver_visual_metadata[index]
+                                if index < len(resolver_visual_metadata)
+                                else {}
                             ),
                         }
-                        for index, path in enumerate(resolver_images)
+                        for index, image_path in enumerate(resolver_images)
                     ],
-                    "resolution": resolution.model_dump(mode="json"),
+                    "patch": patch.model_dump(mode="json"),
                 },
             )
 
-        resolved, resolution_accepted = _resolved_observation_from_result(
+        resolved, patch_accepted, issue = _apply_observation_state_patch(
             original,
-            resolution,
-            support_raw or raw,
+            patch,
+            allowed_evidence_refs=allowed_refs,
+            direct_evidence_refs=direct_refs,
         )
         resolved_batch.append(resolved)
-        resolved_history.append(resolved)
-        if not resolution_accepted:
-            unresolved.append(
-                "Rejected unsupported sequential rewrite for "
-                f"{observation_id}; preserved the source observation."
-            )
-        elif resolution.correction is not None:
-            correction = resolution.correction
-            if correction.original.strip() != correction.corrected.strip():
-                corrections.append(correction)
-        unresolved.extend(resolution.unresolved)
 
+        if resolved.get("resolution_status") in {"kept", "replaced"}:
+            resolved_history.append(resolved)
+        if issue:
+            unresolved.append(f"{observation_id}: {issue}")
+        unresolved.extend(patch.unresolved)
+
+    canonical = [
+        item
+        for item in resolved_batch
+        if item.get("resolution_status") in {"kept", "replaced"}
+    ]
     payload = dict(evidence)
-    payload["observations"] = resolved_batch
-    # Claims are derived from pre-resolution observations and may now be stale. Ground final blocks
-    # directly in resolved observation ids instead of exposing contradictory duplicate semantics.
+    payload["observations"] = canonical
     payload["claims"] = []
+
+    status_ids = {
+        status: [
+            str(item.get("id", ""))
+            for item in resolved_batch
+            if item.get("resolution_status") == status
+        ]
+        for status in ("kept", "replaced", "rejected", "unresolved")
+    }
     payload["sequential_resolution"] = {
         "resolved_observation_ids": [
-            str(item.get("id", "")) for item in resolved_batch
+            str(item.get("id", "")) for item in canonical
         ],
         "batch_observation_ids": sorted(batch_ids),
+        "kept_observation_ids": status_ids["kept"],
+        "replaced_observation_ids": status_ids["replaced"],
+        "rejected_observation_ids": status_ids["rejected"],
+        "unresolved_observation_ids": status_ids["unresolved"],
     }
-    return payload, corrections, list(dict.fromkeys(unresolved)), cache_hits
-
+    return payload, [], list(dict.fromkeys(unresolved)), cache_hits
 
 def _state_section_payload(
     kb: LectureKnowledgeBase,
