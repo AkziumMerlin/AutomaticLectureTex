@@ -47,6 +47,7 @@ from .schemas import (
     EpisodeTrackingUpdate,
     LectureIR,
     LectureKnowledgeBase,
+    LectureObservation,
     LectureOutline,
     OutlineSection,
     VisualEvidence,
@@ -1241,6 +1242,140 @@ def _resolve_state_batch_sequential(
     }
     return payload, [], list(dict.fromkeys(unresolved)), cache_hits
 
+
+def _canonical_observation_from_repaired(item: dict[str, Any]) -> LectureObservation:
+    payload = {
+        name: item.get(name)
+        for name in LectureObservation.model_fields
+        if name in item
+    }
+    payload["text"] = str(item.get("resolved_text") or item.get("text") or "").strip()
+    payload["latex"] = (
+        item.get("resolved_latex")
+        if "resolved_latex" in item
+        else item.get("latex")
+    )
+    return LectureObservation.model_validate(payload)
+
+
+def _repair_lecture_state(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    kb: LectureKnowledgeBase,
+    raw_windows: list[dict[str, Any]],
+    work: Path,
+    config,
+    llm_config: dict[str, Any],
+    force: bool,
+) -> tuple[LectureKnowledgeBase, dict[str, int], list[str]]:
+    """Resolve every pending observation once, then persist a canonical repaired state."""
+
+    repaired = kb.model_copy(deep=True)
+    all_observations = [
+        item.model_dump(mode="json")
+        for item in sorted(
+            kb.observations,
+            key=lambda item: (item.start, item.end, item.id),
+        )
+    ]
+    by_id = {str(item.get("id", "")): item for item in all_observations}
+    resolved_history: list[dict[str, Any]] = []
+    canonical_by_id: dict[str, LectureObservation] = {}
+    unresolved: list[str] = []
+    stats = {
+        "processed": 0,
+        "cache_hits": 0,
+        "kept": 0,
+        "replaced": 0,
+        "rejected": 0,
+        "unresolved": 0,
+    }
+
+    for episode in sorted(kb.episodes, key=lambda item: (item.start, item.end, item.id)):
+        episode_observations = [
+            by_id[observation_id]
+            for observation_id in episode.observation_ids
+            if observation_id in by_id
+        ]
+        if not episode_observations:
+            continue
+
+        section = OutlineSection(
+            id=f"repair_{episode.id}",
+            title=episode.title,
+            start=episode.start,
+            end=episode.end,
+            episode_ids=[episode.id],
+        )
+        evidence = {
+            "section": section.model_dump(mode="json"),
+            "episodes": [episode.model_dump(mode="json")],
+            "observations": episode_observations,
+            "claims": [],
+            "symbols": [
+                item.model_dump(mode="json")
+                for item in kb.symbols
+                if item.active and item.introduced_at <= episode.end
+            ],
+        }
+        (
+            repaired_evidence,
+            _corrections,
+            batch_unresolved,
+            cache_hits,
+        ) = _resolve_state_batch_sequential(
+            orchestrator,
+            section=section,
+            evidence=evidence,
+            section_observations=all_observations,
+            resolved_history=resolved_history,
+            raw_windows=raw_windows,
+            work=work,
+            config=config,
+            llm_config=llm_config,
+            force=force,
+        )
+        summary = repaired_evidence.get("sequential_resolution", {})
+        stats["processed"] += len(summary.get("batch_observation_ids", []))
+        stats["cache_hits"] += cache_hits
+        stats["kept"] += len(summary.get("kept_observation_ids", []))
+        stats["replaced"] += len(summary.get("replaced_observation_ids", []))
+        stats["rejected"] += len(summary.get("rejected_observation_ids", []))
+        stats["unresolved"] += len(summary.get("unresolved_observation_ids", []))
+        unresolved.extend(batch_unresolved)
+
+        for item in repaired_evidence.get("observations", []):
+            canonical = _canonical_observation_from_repaired(item)
+            canonical_by_id[canonical.id] = canonical
+
+    # Episode tracking already established structural boundaries. Repair changes semantic event
+    # content/acceptance, not past boundary decisions; empty episodes naturally disappear downstream.
+    repaired.observations = sorted(
+        canonical_by_id.values(),
+        key=lambda item: (item.start, item.end, item.id),
+    )
+    canonical_ids = {item.id for item in repaired.observations}
+    for episode in repaired.episodes:
+        episode.observation_ids = [
+            observation_id
+            for observation_id in episode.observation_ids
+            if observation_id in canonical_ids
+        ]
+
+    for symbol in repaired.symbols:
+        if not symbol.evidence_ids:
+            continue
+        symbol.evidence_ids = [
+            evidence_id
+            for evidence_id in symbol.evidence_ids
+            if evidence_id in canonical_ids
+        ]
+        if not symbol.evidence_ids:
+            symbol.active = False
+
+    repaired.unresolved = list(dict.fromkeys([*repaired.unresolved, *unresolved]))
+    return repaired, stats, list(dict.fromkeys(unresolved))
+
 def _state_section_payload(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
@@ -1249,6 +1384,8 @@ def _state_section_payload(
 ) -> dict[str, Any]:
     payload = evidence_for_section(kb, section, transcript, config)
     payload.pop("transcript", None)
+    # State repair owns canonical semantics. Pre-repair claims can no longer override repaired events.
+    payload["claims"] = []
     return payload
 
 
