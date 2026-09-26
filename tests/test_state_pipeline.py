@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex import pipeline_robust as pipeline_robust_module
 from automatic_lecture_tex.config import NotesConfig, load_config
