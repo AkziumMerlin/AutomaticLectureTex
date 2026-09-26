@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 5
+STATE_PIPELINE_VERSION = 6
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -261,13 +261,50 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
         chunk = payload.get("chunk") or {}
         visual_latex: list[str] = []
         ocr_candidates: list[dict[str, Any]] = []
+        formula_crops: list[dict[str, Any]] = []
+        board_frames: list[dict[str, Any]] = []
         seen_ocr: set[tuple[Any, str]] = set()
+        seen_crops: set[str] = set()
+        seen_frames: set[str] = set()
 
         for visual in payload.get("visual_evidence", []):
             for key in ("raw_latex", "latex"):
                 value = _clip_state_raw_text(str(visual.get(key) or ""), 400)
                 if value and value not in visual_latex:
                     visual_latex.append(value)
+
+            for crop in visual.get("formula_crops", []):
+                crop_id = str(crop.get("id") or "")
+                image_path = str(crop.get("image_path") or "")
+                if not crop_id or not image_path or crop_id in seen_crops:
+                    continue
+                seen_crops.add(crop_id)
+                formula_crops.append(
+                    {
+                        "id": crop_id,
+                        "timestamp": crop.get("timestamp"),
+                        "detector_confidence": crop.get("detector_confidence"),
+                        "image_path": image_path,
+                    }
+                )
+
+            frame_paths = list(visual.get("frame_paths", []))
+            frame_timestamps = list(visual.get("frame_timestamps", []))
+            for index, image_path in enumerate(frame_paths):
+                image_path = str(image_path or "")
+                if not image_path or image_path in seen_frames:
+                    continue
+                seen_frames.add(image_path)
+                board_frames.append(
+                    {
+                        "image_path": image_path,
+                        "timestamp": (
+                            frame_timestamps[index]
+                            if index < len(frame_timestamps)
+                            else None
+                        ),
+                    }
+                )
 
             for candidate in visual.get("math_ocr_candidates", []):
                 value = _clip_state_raw_text(str(candidate.get("text") or ""), 400)
@@ -301,6 +338,8 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
                 ),
                 "visual_latex": visual_latex[:3],
                 "math_ocr_candidates": ocr_candidates,
+                "formula_crops": formula_crops,
+                "board_frames": board_frames,
             }
         )
 
