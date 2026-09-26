@@ -778,88 +778,144 @@ def _resolver_episode_context(
     return {"id": section.id, "title": section.title, "kind": "section"}
 
 
-def _resolution_formula_supported(
-    original: dict[str, Any],
-    resolution: GeneratedObservationResolution,
-    raw_windows: list[dict[str, Any]],
-) -> bool:
-    original_latex = str(original.get("latex") or "").strip()
-    proposed_latex = str(resolution.latex or "").strip()
-    if not original_latex or not proposed_latex:
-        return proposed_latex == original_latex
+def _resolver_evidence_catalog(
+    raw_prompt: list[dict[str, Any]],
+    visual_metadata: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    lookahead: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+    """Enumerate exactly the provenance ids a state patch is allowed to cite."""
 
-    original_norm = _compact_formula_similarity_text(original_latex)
-    proposed_norm = _compact_formula_similarity_text(proposed_latex)
-    if proposed_norm == original_norm:
-        return True
+    catalog: list[dict[str, Any]] = []
+    allowed: set[str] = set()
+    direct: set[str] = set()
 
-    candidates: list[str] = []
-    for raw in raw_windows:
-        candidates.extend(
-            str(item.get("text") or "").strip()
-            for item in raw.get("math_ocr_candidates", [])
-            if str(item.get("text") or "").strip()
+    def add(ref: str, kind: str, summary: str, *, is_direct: bool) -> None:
+        if not ref or ref in allowed:
+            return
+        allowed.add(ref)
+        if is_direct:
+            direct.add(ref)
+        catalog.append({"ref": ref, "kind": kind, "summary": summary})
+
+    for raw in raw_prompt:
+        window_id = str(raw.get("window_id") or "")
+        asr = str(raw.get("asr") or "").strip()
+        if asr and window_id:
+            add(f"asr:{window_id}", "asr", asr, is_direct=True)
+        for index, candidate in enumerate(raw.get("math_ocr_candidates", [])):
+            source_id = str(candidate.get("source_id") or "")
+            ref = f"ocr:{source_id}" if source_id else f"ocr:{window_id}:{index}"
+            add(ref, "ocr", str(candidate.get("text") or ""), is_direct=True)
+        for index, value in enumerate(raw.get("visual_latex", [])):
+            add(
+                f"visual_latex:{window_id}:{index}",
+                "visual_latex",
+                str(value),
+                is_direct=True,
+            )
+
+    for item in visual_metadata:
+        add(
+            str(item.get("ref") or ""),
+            "visual",
+            str(item.get("label") or ""),
+            is_direct=True,
         )
-        candidates.extend(
-            str(item).strip()
-            for item in raw.get("visual_latex", [])
-            if str(item).strip()
-        )
 
-    return any(
-        SequenceMatcher(
-            None,
-            proposed_norm,
-            _compact_formula_similarity_text(candidate),
-        ).ratio()
-        >= 0.88
-        for candidate in candidates
-    )
+    for item in history:
+        observation_id = str(item.get("id") or "")
+        if observation_id:
+            add(
+                f"history:{observation_id}",
+                "accepted_state",
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                is_direct=False,
+            )
+    for item in lookahead:
+        observation_id = str(item.get("id") or "")
+        if observation_id:
+            add(
+                f"lookahead:{observation_id}",
+                "lookahead",
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                is_direct=False,
+            )
 
-
-def _resolution_text_correction_supported(
-    resolution: GeneratedObservationResolution,
-) -> bool:
-    correction = resolution.correction
-    if correction is None:
-        return True
-    return (
-        str(correction.basis) in {"visual", "audio_context", "multimodal"}
-        and float(correction.confidence) >= 0.8
-    )
+    return catalog, allowed, direct
 
 
-def _resolved_observation_from_result(
+def _apply_observation_state_patch(
     original: dict[str, Any],
-    resolution: GeneratedObservationResolution,
-    raw_windows: list[dict[str, Any]],
-) -> tuple[dict[str, Any], bool]:
-    """Attach a resolution overlay without mutating the source observation."""
+    patch: GeneratedObservationStatePatch,
+    *,
+    allowed_evidence_refs: set[str],
+    direct_evidence_refs: set[str],
+) -> tuple[dict[str, Any], bool, str | None]:
+    """Apply one model patch while enforcing scope/provenance, not mathematical similarity."""
 
     resolved = dict(original)
     original_text = str(original.get("text") or "").strip()
-    original_latex = str(original.get("latex") or "").strip()
-    proposed_latex = str(resolution.latex or "").strip()
-
-    formula_supported = _resolution_formula_supported(original, resolution, raw_windows)
-    text_supported = _resolution_text_correction_supported(resolution)
-
-    accepted = True
-    if original_latex:
-        accepted = formula_supported
-    elif resolution.correction is not None:
-        accepted = text_supported
-
-    if accepted:
-        resolved["resolved_text"] = resolution.text.strip()
-        resolved["resolved_latex"] = proposed_latex or original_latex or None
-    else:
-        resolved["resolved_text"] = original_text
-        resolved["resolved_latex"] = original_latex or None
-
+    original_latex = str(original.get("latex") or "").strip() or None
     resolved["sequentially_resolved"] = True
-    resolved["resolution_accepted"] = accepted
-    return resolved, accepted
+    resolved["state_patch_action"] = patch.action
+
+    unknown = [ref for ref in patch.evidence_refs if ref not in allowed_evidence_refs]
+
+    def mark_unresolved(issue: str) -> tuple[dict[str, Any], bool, str]:
+        resolved["resolution_status"] = "unresolved"
+        resolved["resolution_accepted"] = False
+        resolved["resolved_text"] = None
+        resolved["resolved_latex"] = None
+        return resolved, False, issue
+
+    if patch.action == "keep":
+        resolved["resolution_status"] = "kept"
+        resolved["resolution_accepted"] = True
+        resolved["resolved_text"] = original_text
+        resolved["resolved_latex"] = original_latex
+        return resolved, True, None
+
+    if unknown:
+        return mark_unresolved(
+            "State patch cited unknown evidence refs: " + ", ".join(unknown)
+        )
+    if not direct_evidence_refs.intersection(patch.evidence_refs):
+        return mark_unresolved(
+            "State patch attempted to change CURRENT without direct local evidence."
+        )
+
+    if patch.action == "reject":
+        resolved["resolution_status"] = "rejected"
+        resolved["resolution_accepted"] = True
+        resolved["resolved_text"] = None
+        resolved["resolved_latex"] = None
+        return resolved, True, None
+
+    replacement_text = str(patch.replacement_text or "").strip()
+    replacement_latex = (
+        str(patch.replacement_latex).strip()
+        if patch.replacement_latex is not None
+        else original_latex
+    )
+    if original_latex is not None and not replacement_latex:
+        return mark_unresolved(
+            "State patch removed an existing formula instead of replacing or rejecting CURRENT."
+        )
+
+    if replacement_text == original_text and replacement_latex == original_latex:
+        resolved["state_patch_action"] = "keep"
+        resolved["resolution_status"] = "kept"
+        resolved["resolution_accepted"] = True
+        resolved["resolved_text"] = original_text
+        resolved["resolved_latex"] = original_latex
+        return resolved, True, None
+
+    resolved["resolution_status"] = "replaced"
+    resolved["resolution_accepted"] = True
+    resolved["resolved_text"] = replacement_text
+    resolved["resolved_latex"] = replacement_latex
+    return resolved, True, None
 
 
 def _resolve_single_state_observation(
@@ -872,8 +928,8 @@ def _resolve_single_state_observation(
     resolved_history: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
     config,
-) -> GeneratedObservationResolution:
-    """Resolve one state transition from a small local state/evidence slice."""
+) -> GeneratedObservationStatePatch:
+    """Propose one bounded transaction against CURRENT; accepted history is immutable."""
 
     raw = _raw_windows_for_observation_sequence(
         current,
@@ -882,7 +938,7 @@ def _resolve_single_state_observation(
         max_windows=int(config.state_observation_max_raw_windows),
     )
     raw_prompt = _resolver_raw_prompt_windows(raw)
-    images, image_labels = _resolver_visual_context(
+    images, visual_metadata = _resolver_visual_context(
         current,
         raw,
         max_images=int(config.state_observation_max_images),
@@ -902,62 +958,74 @@ def _resolve_single_state_observation(
         _compact_resolver_observation(item)
         for item in lookahead
     ]
-    symbols = _resolver_symbol_context(
-        evidence,
-        current,
-        lookahead,
-    )
+    symbols = _resolver_symbol_context(evidence, current, lookahead)
     episode = _resolver_episode_context(evidence, current, section)
+    evidence_catalog, _, _ = _resolver_evidence_catalog(
+        raw_prompt,
+        visual_metadata,
+        history,
+        lookahead_compact,
+    )
+    image_index = "\n".join(
+        f"Image {index}: ref={item['ref']}; {item['label']}; timestamp={item.get('timestamp')}"
+        for index, item in enumerate(visual_metadata)
+    )
 
-    prompt = f"""Resolve CURRENT as one local update of an existing mathematical lecture state.
+    prompt = f"""Repair exactly one pending event in a chronological mathematical lecture state.
+Accepted history is immutable. Return a TRANSACTION for CURRENT, not a rewritten copy by default.
 
 Local episode:
 {json.dumps(episode, ensure_ascii=False, separators=(",", ":"))}
 
-Immutable accepted state immediately before CURRENT:
+Accepted state immediately before CURRENT:
 {json.dumps(history, ensure_ascii=False, separators=(",", ":"))}
 
-CURRENT:
+CURRENT pending event:
 {json.dumps(current_compact, ensure_ascii=False, separators=(",", ":"))}
 
 Relevant established notation:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
-Next observations (disambiguation only; never move their content into CURRENT):
+Fixed-lag look-ahead (context only):
 {json.dumps(lookahead_compact, ensure_ascii=False, separators=(",", ":"))}
 
-Direct local ASR/OCR evidence for CURRENT:
+Direct local sensor hypotheses:
 {json.dumps(raw_prompt, ensure_ascii=False, separators=(",", ":"))}
 
-Attached visual evidence:
-{chr(10).join(image_labels) if image_labels else "No local image available."}
+Allowed evidence refs:
+{json.dumps(evidence_catalog, ensure_ascii=False, separators=(",", ":"))}
 
-Rules:
-- CURRENT is the default. Keep it unchanged unless direct local evidence or immutable state shows a
-  concrete semantic error.
-- Attached pixels are direct evidence. OCR/ASR are fallible hypotheses about those pixels/speech.
-- If CURRENT has latex, return the complete final latex even when unchanged.
-- Do not replace CURRENT with the next proof step from look-ahead or another board line.
-- Preserve coefficients, denominators, signs, quantifiers, memberships, subscripts and relation signs
-  unless direct evidence supports changing them.
-- Standard mathematics may reject an impossible reading, but may not invent missing lecture content.
-- Pure reformatting is not a correction. If meaning is unchanged, copy CURRENT text/latex.
-- A semantic change requires CorrectionRecord; otherwise correction=null.
-- If evidence is genuinely ambiguous, keep the supported common content and record unresolved.
-- Return CURRENT only. Write prose in {orchestrator.output_language} and formulas in LaTeX.
+Attached images:
+{image_index or "No local image available."}
+
+Choose exactly one action:
+- keep: CURRENT is a faithful canonical event. Do not return replacement fields.
+- replace: CURRENT has a concrete semantic error and direct local evidence supports a corrected
+  canonical event. Return replacement_text; if CURRENT has latex, return the COMPLETE corrected
+  replacement_latex. Cite evidence_refs from the allowed catalog.
+- reject: CURRENT itself is unsupported/contradictory and no defensible replacement is locally
+  evidenced. Cite evidence_refs. The host will keep the source artifact for audit but suppress this
+  event from canonical synthesis.
+
+Constraints:
+- replace/reject MUST cite at least one direct CURRENT sensor ref: asr:, ocr:, visual_latex:, or
+  visual:. history:/lookahead: may support disambiguation but cannot alone authorize a state change.
+- Do not alter accepted history and do not import a later proof step into CURRENT.
+- Pixels are direct evidence; OCR/ASR are fallible hypotheses about them.
+- Do not change notation merely for style or textbook convention. Pure reformatting => keep.
+- Preserve coefficients, denominators, signs, quantifiers, memberships, subscripts and relation
+  signs unless local evidence supports changing them.
+- Standard mathematics is only a consistency prior. It cannot by itself authorize replace.
+- If CURRENT is wrong but the correct statement is not locally recoverable, reject rather than guess.
+- Do not emit confidence scores. Write prose in {orchestrator.output_language} and formulas in LaTeX.
 """
-    schema = (
-        GeneratedFormulaObservationResolution
-        if str(current.get("latex") or "").strip()
-        else GeneratedObservationResolution
-    )
     return orchestrator._structured(
         prompt,
-        schema,
+        GeneratedObservationStatePatch,
         images=images or None,
         guided_json=not bool(images),
         operation="state_observation_resolve",
-        max_tokens=768,
+        max_tokens=512,
         split_oversized_task=True,
     )
 
