@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from .llm import LectureModelClient
 
 
+KNOWLEDGE_EXTRACT_MAX_TOKENS = 32768
+
+
 def _merge_unique(left: list[str], right: Iterable[str]) -> list[str]:
     seen = set(left)
     result = list(left)
@@ -451,7 +454,7 @@ Write descriptive strings in language code `{self.output_language}`.
             prompt,
             WindowObservations,
             operation="knowledge_extract",
-            max_tokens=4096,
+            max_tokens=KNOWLEDGE_EXTRACT_MAX_TOKENS,
         )
         result.window_id = chunk.id
         result.start = chunk.start
