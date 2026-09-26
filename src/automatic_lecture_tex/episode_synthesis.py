@@ -158,7 +158,6 @@ Write titles in language code `{orchestrator.output_language}`.
                 prompt,
                 EpisodeHierarchyPlan,
                 operation="episode_hierarchy",
-                max_tokens=2048,
                 split_oversized_task=True,
             )
         except (StructuredTaskTooLargeError, json.JSONDecodeError, ValidationError) as exc:
@@ -384,7 +383,6 @@ Rules:
         prompt,
         GeneratedChunkNotes,
         operation="episode_write",
-        max_tokens=4096,
         split_oversized_task=True,
     )
     notes = generated.to_chunk_notes()
@@ -452,7 +450,6 @@ outer section/theorem/proof/definition wrappers are not. Write reasons in langua
         prompt,
         MathAudit,
         operation="episode_validation",
-        max_tokens=2048,
         split_oversized_task=True,
     )
 
