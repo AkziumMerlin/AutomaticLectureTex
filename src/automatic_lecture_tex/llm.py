@@ -359,7 +359,6 @@ Mean ASR confidence (when available): {chunk.asr_confidence}
         analysis = self._structured(
             prompt,
             ChunkAnalysis,
-            max_tokens=1024,
             operation="visual_selector",
         )
         analysis.visual_requests = [
@@ -414,7 +413,6 @@ Write descriptions in language code `{self.config.output_language}`.
             prompt,
             VisualEvidence,
             images=frame_paths,
-            max_tokens=2048 if request.reason == "chunk_board_scan" else 1024,
             guided_json=False,
             operation="visual_ocr",
         )
@@ -609,7 +607,6 @@ Draft blocks:
                 prompt,
                 MathAudit,
                 images=images,
-                max_tokens=4096,
                 guided_json=not bool(images),
                 operation="math_audit",
             )
