@@ -177,12 +177,29 @@ class LectureModelClient:
                 per_operation[key] += value
 
     def _extra_body(self) -> dict:
-        return {
+        body: dict[str, Any] = {
             "chat_template_kwargs": {
                 "enable_thinking": self.config.thinking,
                 "preserve_thinking": False,
             }
         }
+        if self.config.reasoning_effort is not None:
+            body["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.top_k is not None:
+            body["top_k"] = self.config.top_k
+        if self.config.min_p is not None:
+            body["min_p"] = self.config.min_p
+        if self.config.repetition_penalty is not None:
+            body["repetition_penalty"] = self.config.repetition_penalty
+        return body
+
+    def _sampling_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"temperature": self.config.temperature}
+        if self.config.top_p is not None:
+            kwargs["top_p"] = self.config.top_p
+        if self.config.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.config.presence_penalty
+        return kwargs
 
     def _response_format(self, schema: type[T]) -> dict:
         return {
@@ -280,7 +297,7 @@ class LectureModelClient:
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                "temperature": self.config.temperature,
+                **self._sampling_kwargs(),
                 "max_tokens": current_max_tokens,
                 "extra_body": self._extra_body(),
             }
