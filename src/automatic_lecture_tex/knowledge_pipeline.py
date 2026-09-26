@@ -2008,6 +2008,10 @@ def run_knowledge_pipeline(
     state_section_batches_total = 0
     state_observation_resolution_cache_hits = 0
     state_observations_resolved = 0
+    state_patches_kept = 0
+    state_patches_replaced = 0
+    state_patches_rejected = 0
+    state_patches_unresolved = 0
     state_resolution_seconds = 0.0
     state_synthesis_seconds = 0.0
 
@@ -2048,7 +2052,22 @@ def run_knowledge_pipeline(
                 )
                 state_resolution_seconds += time.perf_counter() - resolution_started
                 state_observation_resolution_cache_hits += resolution_cache_hits
-                state_observations_resolved += len(resolved_evidence.get("observations", []))
+                resolution_summary = resolved_evidence.get("sequential_resolution", {})
+                state_observations_resolved += len(
+                    resolution_summary.get("batch_observation_ids", [])
+                )
+                state_patches_kept += len(
+                    resolution_summary.get("kept_observation_ids", [])
+                )
+                state_patches_replaced += len(
+                    resolution_summary.get("replaced_observation_ids", [])
+                )
+                state_patches_rejected += len(
+                    resolution_summary.get("rejected_observation_ids", [])
+                )
+                state_patches_unresolved += len(
+                    resolution_summary.get("unresolved_observation_ids", [])
+                )
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
@@ -2263,6 +2282,10 @@ def run_knowledge_pipeline(
             "state_section_batches_total": state_section_batches_total,
             "state_section_cache_hits": state_section_cache_hits,
             "state_observations_resolved": state_observations_resolved,
+            "state_patches_kept": state_patches_kept,
+            "state_patches_replaced": state_patches_replaced,
+            "state_patches_rejected": state_patches_rejected,
+            "state_patches_unresolved": state_patches_unresolved,
             "state_observation_resolution_cache_hits": (
                 state_observation_resolution_cache_hits
             ),
