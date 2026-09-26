@@ -85,6 +85,63 @@ class GeneratedNoteBlock(BaseModel):
         )
 
 
+ObservationStateAction = Literal["keep", "replace", "reject"]
+
+
+class GeneratedObservationStatePatch(BaseModel):
+    """One transactional update to the CURRENT observation.
+
+    The model never rewrites accepted history. keep carries no replacement payload;
+    replace atomically provides the new canonical value; reject removes CURRENT from
+    canonical synthesis when the local evidence cannot support it.
+    """
+
+    action: ObservationStateAction
+    replacement_text: str | None = None
+    replacement_latex: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    reason: str = ""
+    unresolved: list[str] = Field(default_factory=list)
+
+    @field_validator("replacement_text")
+    @classmethod
+    def sanitize_replacement_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = strip_control_chars(value).strip()
+        return value or None
+
+    @field_validator("replacement_latex")
+    @classmethod
+    def sanitize_replacement_latex(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = strip_control_chars(value).strip()
+        return value or None
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def clean_evidence_refs(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item and item.strip()))
+
+    @model_validator(mode="after")
+    def validate_transaction(self) -> GeneratedObservationStatePatch:
+        if self.action == "keep":
+            if self.replacement_text is not None or self.replacement_latex is not None:
+                raise ValueError("keep must not carry replacement fields")
+            return self
+        if not self.reason.strip():
+            raise ValueError("replace/reject must explain the local evidence conflict")
+        if not self.evidence_refs:
+            raise ValueError("replace/reject must cite local evidence refs")
+        if self.action == "replace" and self.replacement_text is None:
+            raise ValueError("replace requires replacement_text")
+        if self.action == "reject" and (
+            self.replacement_text is not None or self.replacement_latex is not None
+        ):
+            raise ValueError("reject must not carry replacement fields")
+        return self
+
 class GeneratedObservationResolution(BaseModel):
     """Final value for exactly one chronological lecture observation.
 

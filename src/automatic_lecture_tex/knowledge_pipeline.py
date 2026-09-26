@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
-from .generated_notes import (GeneratedChunkNotes, GeneratedFormulaObservationResolution, GeneratedObservationResolution)
+from .generated_notes import (
+    GeneratedChunkNotes,
+    GeneratedObservationStatePatch,
+)
 from .episode_graph import (
     apply_episode_tracking,
     build_outline_from_episodes,
@@ -44,6 +47,7 @@ from .schemas import (
     EpisodeTrackingUpdate,
     LectureIR,
     LectureKnowledgeBase,
+    LectureObservation,
     LectureOutline,
     OutlineSection,
     VisualEvidence,
@@ -66,7 +70,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 6
+STATE_PIPELINE_VERSION = 7
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -210,14 +214,14 @@ def _load_episode_batch(path: Path, fingerprint: str) -> ChunkNotes | None:
 def _load_observation_resolution(
     path: Path,
     fingerprint: str,
-) -> GeneratedObservationResolution | None:
+) -> GeneratedObservationStatePatch | None:
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("fingerprint") != fingerprint:
             return None
-        return GeneratedObservationResolution.model_validate(payload["resolution"])
+        return GeneratedObservationStatePatch.model_validate(payload["patch"])
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
 
@@ -453,34 +457,48 @@ def _filter_current_window_ocr_candidates(
     current: dict[str, Any],
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep OCR readings plausibly describing the current formula, not later board lines."""
+    """Select temporally local OCR; similarity only orders evidence, never hides corrections."""
 
     anchor = str(current.get("latex") or "").strip()
-    if not anchor:
-        return list(candidates[:6])
-
     normalized_anchor = _compact_formula_similarity_text(anchor)
-    ranked: list[tuple[float, dict[str, Any]]] = []
+    start = float(current.get("start", 0.0))
+    end = float(current.get("end", start))
+    center = 0.5 * (start + end)
+
+    ranked: list[tuple[bool, float, float, dict[str, Any]]] = []
     for candidate in candidates:
         text = str(candidate.get("text") or "").strip()
         if not text:
             continue
-        score = SequenceMatcher(
-            None,
-            normalized_anchor,
-            _compact_formula_similarity_text(text),
-        ).ratio()
-        ranked.append((score, candidate))
+        score = (
+            SequenceMatcher(
+                None,
+                normalized_anchor,
+                _compact_formula_similarity_text(text),
+            ).ratio()
+            if normalized_anchor
+            else 0.0
+        )
+        timestamp = candidate.get("timestamp")
+        if timestamp is None:
+            in_interval = False
+            distance = float("inf")
+        else:
+            value = float(timestamp)
+            in_interval = start - 1.0 <= value <= end + 1.0
+            distance = abs(value - center)
+        ranked.append((in_interval, score, distance, candidate))
 
-    # A weakly related crop is more likely to be another formula from the same board state. The
-    # semantic look-ahead observation remains available separately if the next proof step is needed
-    # to disambiguate the current one.
-    return [
-        dict(candidate)
-        for score, candidate in sorted(ranked, key=lambda item: item[0], reverse=True)
-        if score >= 0.55
-    ][:4]
+    if not ranked:
+        return []
 
+    # If the sensor provides observations from CURRENT's own time span, exclude other board steps.
+    # Otherwise fall back to the nearest candidates from the same technical window. Formula
+    # similarity is only a ranking hint: a badly reconstructed CURRENT must still be repairable.
+    has_local = any(item[0] for item in ranked)
+    pool = [item for item in ranked if item[0]] if has_local else ranked
+    pool.sort(key=lambda item: (-item[1], item[2]))
+    return [dict(item[3]) for item in pool[:4]]
 
 def _raw_windows_for_observation_sequence(
     current: dict[str, Any],
@@ -647,17 +665,17 @@ def _resolver_visual_context(
     raw_windows: list[dict[str, Any]],
     *,
     max_images: int = 2,
-) -> tuple[list[Path], list[str]]:
-    """Choose the exact OCR-producing crop first, then one local board-state context image."""
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """Choose temporally bound visual evidence for CURRENT."""
 
     if max_images <= 0:
         return [], []
 
     images: list[Path] = []
-    labels: list[str] = []
+    metadata: list[dict[str, Any]] = []
     seen: set[Path] = set()
 
-    def append(path_value: Any, label: str) -> None:
+    def append(path_value: Any, ref: str, label: str, timestamp: Any = None) -> None:
         if len(images) >= max_images or not path_value:
             return
         path = Path(str(path_value))
@@ -665,7 +683,13 @@ def _resolver_visual_context(
             return
         seen.add(path)
         images.append(path)
-        labels.append(f"Image {len(images) - 1}: {label}")
+        metadata.append(
+            {
+                "ref": ref,
+                "label": label,
+                "timestamp": timestamp,
+            }
+        )
 
     source_ids = [
         str(item.get("source_id"))
@@ -674,23 +698,26 @@ def _resolver_visual_context(
         if item.get("source_id")
     ]
     crops = [
-        crop
+        (str(raw.get("window_id", "")), crop)
         for raw in raw_windows
         for crop in raw.get("formula_crops", [])
     ]
     crops_by_id = {
-        str(crop.get("id")): crop
-        for crop in crops
+        str(crop.get("id")): (window_id, crop)
+        for window_id, crop in crops
         if crop.get("id")
     }
 
     for source_id in source_ids:
-        crop = crops_by_id.get(source_id)
-        if crop is None:
+        matched = crops_by_id.get(source_id)
+        if matched is None:
             continue
+        window_id, crop = matched
         append(
             crop.get("image_path"),
-            f"formula_crop source_id={source_id}, timestamp={crop.get('timestamp')}",
+            f"visual:crop:{source_id}",
+            f"formula crop from {window_id}",
+            crop.get("timestamp"),
         )
         if images:
             break
@@ -699,34 +726,38 @@ def _resolver_visual_context(
         float(current.get("start", 0.0)) + float(current.get("end", 0.0))
     )
     if not images and crops:
-        nearest_crop = min(
+        window_id, nearest_crop = min(
             crops,
-            key=lambda crop: abs(float(crop.get("timestamp") or center) - center),
+            key=lambda pair: abs(float(pair[1].get("timestamp") or center) - center),
         )
+        crop_id = str(nearest_crop.get("id") or "nearest")
         append(
             nearest_crop.get("image_path"),
-            f"nearest_formula_crop id={nearest_crop.get('id')}, "
-            f"timestamp={nearest_crop.get('timestamp')}",
+            f"visual:crop:{crop_id}",
+            f"nearest formula crop from {window_id}",
+            nearest_crop.get("timestamp"),
         )
 
     board_frames = [
-        frame
+        (str(raw.get("window_id", "")), frame)
         for raw in raw_windows
         for frame in raw.get("board_frames", [])
         if frame.get("image_path")
     ]
     if len(images) < max_images and board_frames:
-        nearest_frame = min(
+        window_id, nearest_frame = min(
             board_frames,
-            key=lambda frame: abs(float(frame.get("timestamp") or center) - center),
+            key=lambda pair: abs(float(pair[1].get("timestamp") or center) - center),
         )
+        timestamp = nearest_frame.get("timestamp")
         append(
             nearest_frame.get("image_path"),
-            f"local_board_state timestamp={nearest_frame.get('timestamp')}",
+            f"visual:board:{window_id}",
+            f"local board state from {window_id}",
+            timestamp,
         )
 
-    return images, labels
-
+    return images, metadata
 
 def _resolver_episode_context(
     evidence: dict[str, Any],
@@ -751,88 +782,144 @@ def _resolver_episode_context(
     return {"id": section.id, "title": section.title, "kind": "section"}
 
 
-def _resolution_formula_supported(
-    original: dict[str, Any],
-    resolution: GeneratedObservationResolution,
-    raw_windows: list[dict[str, Any]],
-) -> bool:
-    original_latex = str(original.get("latex") or "").strip()
-    proposed_latex = str(resolution.latex or "").strip()
-    if not original_latex or not proposed_latex:
-        return proposed_latex == original_latex
+def _resolver_evidence_catalog(
+    raw_prompt: list[dict[str, Any]],
+    visual_metadata: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    lookahead: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+    """Enumerate exactly the provenance ids a state patch is allowed to cite."""
 
-    original_norm = _compact_formula_similarity_text(original_latex)
-    proposed_norm = _compact_formula_similarity_text(proposed_latex)
-    if proposed_norm == original_norm:
-        return True
+    catalog: list[dict[str, Any]] = []
+    allowed: set[str] = set()
+    direct: set[str] = set()
 
-    candidates: list[str] = []
-    for raw in raw_windows:
-        candidates.extend(
-            str(item.get("text") or "").strip()
-            for item in raw.get("math_ocr_candidates", [])
-            if str(item.get("text") or "").strip()
+    def add(ref: str, kind: str, summary: str, *, is_direct: bool) -> None:
+        if not ref or ref in allowed:
+            return
+        allowed.add(ref)
+        if is_direct:
+            direct.add(ref)
+        catalog.append({"ref": ref, "kind": kind, "summary": summary})
+
+    for raw in raw_prompt:
+        window_id = str(raw.get("window_id") or "")
+        asr = str(raw.get("asr") or "").strip()
+        if asr and window_id:
+            add(f"asr:{window_id}", "asr", asr, is_direct=True)
+        for index, candidate in enumerate(raw.get("math_ocr_candidates", [])):
+            source_id = str(candidate.get("source_id") or "")
+            ref = f"ocr:{source_id}" if source_id else f"ocr:{window_id}:{index}"
+            add(ref, "ocr", str(candidate.get("text") or ""), is_direct=True)
+        for index, value in enumerate(raw.get("visual_latex", [])):
+            add(
+                f"visual_latex:{window_id}:{index}",
+                "visual_latex",
+                str(value),
+                is_direct=True,
+            )
+
+    for item in visual_metadata:
+        add(
+            str(item.get("ref") or ""),
+            "visual",
+            str(item.get("label") or ""),
+            is_direct=True,
         )
-        candidates.extend(
-            str(item).strip()
-            for item in raw.get("visual_latex", [])
-            if str(item).strip()
-        )
 
-    return any(
-        SequenceMatcher(
-            None,
-            proposed_norm,
-            _compact_formula_similarity_text(candidate),
-        ).ratio()
-        >= 0.88
-        for candidate in candidates
-    )
+    for item in history:
+        observation_id = str(item.get("id") or "")
+        if observation_id:
+            add(
+                f"history:{observation_id}",
+                "accepted_state",
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                is_direct=False,
+            )
+    for item in lookahead:
+        observation_id = str(item.get("id") or "")
+        if observation_id:
+            add(
+                f"lookahead:{observation_id}",
+                "lookahead",
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                is_direct=False,
+            )
 
-
-def _resolution_text_correction_supported(
-    resolution: GeneratedObservationResolution,
-) -> bool:
-    correction = resolution.correction
-    if correction is None:
-        return True
-    return (
-        str(correction.basis) in {"visual", "audio_context", "multimodal"}
-        and float(correction.confidence) >= 0.8
-    )
+    return catalog, allowed, direct
 
 
-def _resolved_observation_from_result(
+def _apply_observation_state_patch(
     original: dict[str, Any],
-    resolution: GeneratedObservationResolution,
-    raw_windows: list[dict[str, Any]],
-) -> tuple[dict[str, Any], bool]:
-    """Attach a resolution overlay without mutating the source observation."""
+    patch: GeneratedObservationStatePatch,
+    *,
+    allowed_evidence_refs: set[str],
+    direct_evidence_refs: set[str],
+) -> tuple[dict[str, Any], bool, str | None]:
+    """Apply one model patch while enforcing scope/provenance, not mathematical similarity."""
 
     resolved = dict(original)
     original_text = str(original.get("text") or "").strip()
-    original_latex = str(original.get("latex") or "").strip()
-    proposed_latex = str(resolution.latex or "").strip()
-
-    formula_supported = _resolution_formula_supported(original, resolution, raw_windows)
-    text_supported = _resolution_text_correction_supported(resolution)
-
-    accepted = True
-    if original_latex:
-        accepted = formula_supported
-    elif resolution.correction is not None:
-        accepted = text_supported
-
-    if accepted:
-        resolved["resolved_text"] = resolution.text.strip()
-        resolved["resolved_latex"] = proposed_latex or original_latex or None
-    else:
-        resolved["resolved_text"] = original_text
-        resolved["resolved_latex"] = original_latex or None
-
+    original_latex = str(original.get("latex") or "").strip() or None
     resolved["sequentially_resolved"] = True
-    resolved["resolution_accepted"] = accepted
-    return resolved, accepted
+    resolved["state_patch_action"] = patch.action
+
+    unknown = [ref for ref in patch.evidence_refs if ref not in allowed_evidence_refs]
+
+    def mark_unresolved(issue: str) -> tuple[dict[str, Any], bool, str]:
+        resolved["resolution_status"] = "unresolved"
+        resolved["resolution_accepted"] = False
+        resolved["resolved_text"] = None
+        resolved["resolved_latex"] = None
+        return resolved, False, issue
+
+    if patch.action == "keep":
+        resolved["resolution_status"] = "kept"
+        resolved["resolution_accepted"] = True
+        resolved["resolved_text"] = original_text
+        resolved["resolved_latex"] = original_latex
+        return resolved, True, None
+
+    if unknown:
+        return mark_unresolved(
+            "State patch cited unknown evidence refs: " + ", ".join(unknown)
+        )
+    if not direct_evidence_refs.intersection(patch.evidence_refs):
+        return mark_unresolved(
+            "State patch attempted to change CURRENT without direct local evidence."
+        )
+
+    if patch.action == "reject":
+        resolved["resolution_status"] = "rejected"
+        resolved["resolution_accepted"] = True
+        resolved["resolved_text"] = None
+        resolved["resolved_latex"] = None
+        return resolved, True, None
+
+    replacement_text = str(patch.replacement_text or "").strip()
+    replacement_latex = (
+        str(patch.replacement_latex).strip()
+        if patch.replacement_latex is not None
+        else original_latex
+    )
+    if original_latex is not None and not replacement_latex:
+        return mark_unresolved(
+            "State patch removed an existing formula instead of replacing or rejecting CURRENT."
+        )
+
+    if replacement_text == original_text and replacement_latex == original_latex:
+        resolved["state_patch_action"] = "keep"
+        resolved["resolution_status"] = "kept"
+        resolved["resolution_accepted"] = True
+        resolved["resolved_text"] = original_text
+        resolved["resolved_latex"] = original_latex
+        return resolved, True, None
+
+    resolved["resolution_status"] = "replaced"
+    resolved["resolution_accepted"] = True
+    resolved["resolved_text"] = replacement_text
+    resolved["resolved_latex"] = replacement_latex
+    return resolved, True, None
 
 
 def _resolve_single_state_observation(
@@ -845,8 +932,8 @@ def _resolve_single_state_observation(
     resolved_history: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
     config,
-) -> GeneratedObservationResolution:
-    """Resolve one state transition from a small local state/evidence slice."""
+) -> GeneratedObservationStatePatch:
+    """Propose one bounded transaction against CURRENT; accepted history is immutable."""
 
     raw = _raw_windows_for_observation_sequence(
         current,
@@ -855,7 +942,7 @@ def _resolve_single_state_observation(
         max_windows=int(config.state_observation_max_raw_windows),
     )
     raw_prompt = _resolver_raw_prompt_windows(raw)
-    images, image_labels = _resolver_visual_context(
+    images, visual_metadata = _resolver_visual_context(
         current,
         raw,
         max_images=int(config.state_observation_max_images),
@@ -875,62 +962,74 @@ def _resolve_single_state_observation(
         _compact_resolver_observation(item)
         for item in lookahead
     ]
-    symbols = _resolver_symbol_context(
-        evidence,
-        current,
-        lookahead,
-    )
+    symbols = _resolver_symbol_context(evidence, current, lookahead)
     episode = _resolver_episode_context(evidence, current, section)
+    evidence_catalog, _, _ = _resolver_evidence_catalog(
+        raw_prompt,
+        visual_metadata,
+        history,
+        lookahead_compact,
+    )
+    image_index = "\n".join(
+        f"Image {index}: ref={item['ref']}; {item['label']}; timestamp={item.get('timestamp')}"
+        for index, item in enumerate(visual_metadata)
+    )
 
-    prompt = f"""Resolve CURRENT as one local update of an existing mathematical lecture state.
+    prompt = f"""Repair exactly one pending event in a chronological mathematical lecture state.
+Accepted history is immutable. Return a TRANSACTION for CURRENT, not a rewritten copy by default.
 
 Local episode:
 {json.dumps(episode, ensure_ascii=False, separators=(",", ":"))}
 
-Immutable accepted state immediately before CURRENT:
+Accepted state immediately before CURRENT:
 {json.dumps(history, ensure_ascii=False, separators=(",", ":"))}
 
-CURRENT:
+CURRENT pending event:
 {json.dumps(current_compact, ensure_ascii=False, separators=(",", ":"))}
 
 Relevant established notation:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
-Next observations (disambiguation only; never move their content into CURRENT):
+Fixed-lag look-ahead (context only):
 {json.dumps(lookahead_compact, ensure_ascii=False, separators=(",", ":"))}
 
-Direct local ASR/OCR evidence for CURRENT:
+Direct local sensor hypotheses:
 {json.dumps(raw_prompt, ensure_ascii=False, separators=(",", ":"))}
 
-Attached visual evidence:
-{chr(10).join(image_labels) if image_labels else "No local image available."}
+Allowed evidence refs:
+{json.dumps(evidence_catalog, ensure_ascii=False, separators=(",", ":"))}
 
-Rules:
-- CURRENT is the default. Keep it unchanged unless direct local evidence or immutable state shows a
-  concrete semantic error.
-- Attached pixels are direct evidence. OCR/ASR are fallible hypotheses about those pixels/speech.
-- If CURRENT has latex, return the complete final latex even when unchanged.
-- Do not replace CURRENT with the next proof step from look-ahead or another board line.
-- Preserve coefficients, denominators, signs, quantifiers, memberships, subscripts and relation signs
-  unless direct evidence supports changing them.
-- Standard mathematics may reject an impossible reading, but may not invent missing lecture content.
-- Pure reformatting is not a correction. If meaning is unchanged, copy CURRENT text/latex.
-- A semantic change requires CorrectionRecord; otherwise correction=null.
-- If evidence is genuinely ambiguous, keep the supported common content and record unresolved.
-- Return CURRENT only. Write prose in {orchestrator.output_language} and formulas in LaTeX.
+Attached images:
+{image_index or "No local image available."}
+
+Choose exactly one action:
+- keep: CURRENT is a faithful canonical event. Do not return replacement fields.
+- replace: CURRENT has a concrete semantic error and direct local evidence supports a corrected
+  canonical event. Return replacement_text; if CURRENT has latex, return the COMPLETE corrected
+  replacement_latex. Cite evidence_refs from the allowed catalog.
+- reject: CURRENT itself is unsupported/contradictory and no defensible replacement is locally
+  evidenced. Cite evidence_refs. The host will keep the source artifact for audit but suppress this
+  event from canonical synthesis.
+
+Constraints:
+- replace/reject MUST cite at least one direct CURRENT sensor ref: asr:, ocr:, visual_latex:, or
+  visual:. history:/lookahead: may support disambiguation but cannot alone authorize a state change.
+- Do not alter accepted history and do not import a later proof step into CURRENT.
+- Pixels are direct evidence; OCR/ASR are fallible hypotheses about them.
+- Do not change notation merely for style or textbook convention. Pure reformatting => keep.
+- Preserve coefficients, denominators, signs, quantifiers, memberships, subscripts and relation
+  signs unless local evidence supports changing them.
+- Standard mathematics is only a consistency prior. It cannot by itself authorize replace.
+- If CURRENT is wrong but the correct statement is not locally recoverable, reject rather than guess.
+- Do not emit confidence scores. Write prose in {orchestrator.output_language} and formulas in LaTeX.
 """
-    schema = (
-        GeneratedFormulaObservationResolution
-        if str(current.get("latex") or "").strip()
-        else GeneratedObservationResolution
-    )
     return orchestrator._structured(
         prompt,
-        schema,
+        GeneratedObservationStatePatch,
         images=images or None,
         guided_json=not bool(images),
         operation="state_observation_resolve",
-        max_tokens=768,
+        max_tokens=512,
         split_oversized_task=True,
     )
 
@@ -962,7 +1061,7 @@ def _resolve_state_batch_sequential(
     llm_config: dict[str, Any],
     force: bool,
 ) -> tuple[dict[str, Any], list[Any], list[str], int]:
-    """Resolve batch observations one-by-one with bounded future look-ahead."""
+    """Resolve pending observations into canonical state via bounded transactions."""
 
     by_id = {
         str(item.get("id", "")): index
@@ -975,7 +1074,6 @@ def _resolve_state_batch_sequential(
         if item.get("id")
     }
     resolved_batch: list[dict[str, Any]] = []
-    corrections: list[Any] = []
     unresolved: list[str] = []
     cache_hits = 0
     lookahead_count = int(config.state_observation_lookahead)
@@ -1002,12 +1100,6 @@ def _resolve_state_batch_sequential(
             raw_windows,
             max_windows=int(config.state_observation_max_raw_windows),
         )
-        current_window_ids = _observation_window_ids(original)
-        support_raw = [
-            item
-            for item in raw_windows
-            if str(item.get("window_id", "")) in current_window_ids
-        ]
         history_limit = int(config.state_observation_history)
         history = (
             [
@@ -1027,10 +1119,16 @@ def _resolve_state_batch_sequential(
             lookahead,
         )
         raw_prompt = _resolver_raw_prompt_windows(raw)
-        resolver_images, resolver_image_labels = _resolver_visual_context(
+        resolver_images, resolver_visual_metadata = _resolver_visual_context(
             original,
             raw,
             max_images=int(config.state_observation_max_images),
+        )
+        evidence_catalog, allowed_refs, direct_refs = _resolver_evidence_catalog(
+            raw_prompt,
+            resolver_visual_metadata,
+            history,
+            compact_lookahead,
         )
         fingerprint = stable_hash(
             {
@@ -1041,6 +1139,7 @@ def _resolve_state_batch_sequential(
                 "lookahead": compact_lookahead,
                 "history": history,
                 "raw_windows": raw_prompt,
+                "visual_metadata": resolver_visual_metadata,
                 "images": [str(path) for path in resolver_images],
                 "llm": llm_config,
             }
@@ -1051,12 +1150,12 @@ def _resolve_state_batch_sequential(
             / section.id
             / f"{observation_id}.json"
         )
-        resolution = None if force else _load_observation_resolution(path, fingerprint)
-        if resolution is not None:
+        patch = None if force else _load_observation_resolution(path, fingerprint)
+        if patch is not None:
             cache_hits += 1
         else:
             try:
-                resolution = _resolve_single_state_observation(
+                patch = _resolve_single_state_observation(
                     orchestrator,
                     section=section,
                     evidence=evidence,
@@ -1067,14 +1166,14 @@ def _resolve_state_batch_sequential(
                     config=config,
                 )
             except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
-                resolution = GeneratedObservationResolution(
-                    text=str(original.get("text") or ""),
-                    latex=original.get("latex"),
+                patch = GeneratedObservationStatePatch(
+                    action="keep",
                     unresolved=[
-                        "Sequential observation resolution failed for "
+                        "State repair failed for "
                         f"{observation_id}: {type(exc).__name__}: {exc}"
                     ],
                 )
+
             atomic_json_dump(
                 path,
                 {
@@ -1084,52 +1183,198 @@ def _resolve_state_batch_sequential(
                     "symbols": compact_symbols,
                     "lookahead": compact_lookahead,
                     "raw_windows": raw_prompt,
+                    "evidence_catalog": evidence_catalog,
                     "images": [
                         {
-                            "path": str(path),
-                            "label": (
-                                resolver_image_labels[index]
-                                if index < len(resolver_image_labels)
-                                else None
+                            "path": str(image_path),
+                            **(
+                                resolver_visual_metadata[index]
+                                if index < len(resolver_visual_metadata)
+                                else {}
                             ),
                         }
-                        for index, path in enumerate(resolver_images)
+                        for index, image_path in enumerate(resolver_images)
                     ],
-                    "resolution": resolution.model_dump(mode="json"),
+                    "patch": patch.model_dump(mode="json"),
                 },
             )
 
-        resolved, resolution_accepted = _resolved_observation_from_result(
+        resolved, _patch_accepted, issue = _apply_observation_state_patch(
             original,
-            resolution,
-            support_raw or raw,
+            patch,
+            allowed_evidence_refs=allowed_refs,
+            direct_evidence_refs=direct_refs,
         )
         resolved_batch.append(resolved)
-        resolved_history.append(resolved)
-        if not resolution_accepted:
-            unresolved.append(
-                "Rejected unsupported sequential rewrite for "
-                f"{observation_id}; preserved the source observation."
-            )
-        elif resolution.correction is not None:
-            correction = resolution.correction
-            if correction.original.strip() != correction.corrected.strip():
-                corrections.append(correction)
-        unresolved.extend(resolution.unresolved)
 
+        if resolved.get("resolution_status") in {"kept", "replaced"}:
+            resolved_history.append(resolved)
+        if issue:
+            unresolved.append(f"{observation_id}: {issue}")
+        unresolved.extend(patch.unresolved)
+
+    canonical = [
+        item
+        for item in resolved_batch
+        if item.get("resolution_status") in {"kept", "replaced"}
+    ]
     payload = dict(evidence)
-    payload["observations"] = resolved_batch
-    # Claims are derived from pre-resolution observations and may now be stale. Ground final blocks
-    # directly in resolved observation ids instead of exposing contradictory duplicate semantics.
+    payload["observations"] = canonical
     payload["claims"] = []
+
+    status_ids = {
+        status: [
+            str(item.get("id", ""))
+            for item in resolved_batch
+            if item.get("resolution_status") == status
+        ]
+        for status in ("kept", "replaced", "rejected", "unresolved")
+    }
     payload["sequential_resolution"] = {
         "resolved_observation_ids": [
-            str(item.get("id", "")) for item in resolved_batch
+            str(item.get("id", "")) for item in canonical
         ],
         "batch_observation_ids": sorted(batch_ids),
+        "kept_observation_ids": status_ids["kept"],
+        "replaced_observation_ids": status_ids["replaced"],
+        "rejected_observation_ids": status_ids["rejected"],
+        "unresolved_observation_ids": status_ids["unresolved"],
     }
-    return payload, corrections, list(dict.fromkeys(unresolved)), cache_hits
+    return payload, [], list(dict.fromkeys(unresolved)), cache_hits
 
+
+def _canonical_observation_from_repaired(item: dict[str, Any]) -> LectureObservation:
+    payload = {
+        name: item.get(name)
+        for name in LectureObservation.model_fields
+        if name in item
+    }
+    payload["text"] = str(item.get("resolved_text") or item.get("text") or "").strip()
+    payload["latex"] = (
+        item.get("resolved_latex")
+        if "resolved_latex" in item
+        else item.get("latex")
+    )
+    return LectureObservation.model_validate(payload)
+
+
+def _repair_lecture_state(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    kb: LectureKnowledgeBase,
+    raw_windows: list[dict[str, Any]],
+    work: Path,
+    config,
+    llm_config: dict[str, Any],
+    force: bool,
+) -> tuple[LectureKnowledgeBase, dict[str, int], list[str]]:
+    """Resolve every pending observation once, then persist a canonical repaired state."""
+
+    repaired = kb.model_copy(deep=True)
+    all_observations = [
+        item.model_dump(mode="json")
+        for item in sorted(
+            kb.observations,
+            key=lambda item: (item.start, item.end, item.id),
+        )
+    ]
+    by_id = {str(item.get("id", "")): item for item in all_observations}
+    resolved_history: list[dict[str, Any]] = []
+    canonical_by_id: dict[str, LectureObservation] = {}
+    unresolved: list[str] = []
+    stats = {
+        "processed": 0,
+        "cache_hits": 0,
+        "kept": 0,
+        "replaced": 0,
+        "rejected": 0,
+        "unresolved": 0,
+    }
+
+    for episode in sorted(kb.episodes, key=lambda item: (item.start, item.end, item.id)):
+        episode_observations = [
+            by_id[observation_id]
+            for observation_id in episode.observation_ids
+            if observation_id in by_id
+        ]
+        if not episode_observations:
+            continue
+
+        section = OutlineSection(
+            id=f"repair_{episode.id}",
+            title=episode.title,
+            start=episode.start,
+            end=episode.end,
+            episode_ids=[episode.id],
+        )
+        evidence = {
+            "section": section.model_dump(mode="json"),
+            "episodes": [episode.model_dump(mode="json")],
+            "observations": episode_observations,
+            "claims": [],
+            "symbols": [
+                item.model_dump(mode="json")
+                for item in kb.symbols
+                if item.active and item.introduced_at <= episode.end
+            ],
+        }
+        (
+            repaired_evidence,
+            _corrections,
+            batch_unresolved,
+            cache_hits,
+        ) = _resolve_state_batch_sequential(
+            orchestrator,
+            section=section,
+            evidence=evidence,
+            section_observations=all_observations,
+            resolved_history=resolved_history,
+            raw_windows=raw_windows,
+            work=work,
+            config=config,
+            llm_config=llm_config,
+            force=force,
+        )
+        summary = repaired_evidence.get("sequential_resolution", {})
+        stats["processed"] += len(summary.get("batch_observation_ids", []))
+        stats["cache_hits"] += cache_hits
+        stats["kept"] += len(summary.get("kept_observation_ids", []))
+        stats["replaced"] += len(summary.get("replaced_observation_ids", []))
+        stats["rejected"] += len(summary.get("rejected_observation_ids", []))
+        stats["unresolved"] += len(summary.get("unresolved_observation_ids", []))
+        unresolved.extend(batch_unresolved)
+
+        for item in repaired_evidence.get("observations", []):
+            canonical = _canonical_observation_from_repaired(item)
+            canonical_by_id[canonical.id] = canonical
+
+    # Episode tracking already established structural boundaries. Repair changes semantic event
+    # content/acceptance, not past boundary decisions; empty episodes naturally disappear downstream.
+    repaired.observations = sorted(
+        canonical_by_id.values(),
+        key=lambda item: (item.start, item.end, item.id),
+    )
+    canonical_ids = {item.id for item in repaired.observations}
+    for episode in repaired.episodes:
+        episode.observation_ids = [
+            observation_id
+            for observation_id in episode.observation_ids
+            if observation_id in canonical_ids
+        ]
+
+    for symbol in repaired.symbols:
+        if not symbol.evidence_ids:
+            continue
+        symbol.evidence_ids = [
+            evidence_id
+            for evidence_id in symbol.evidence_ids
+            if evidence_id in canonical_ids
+        ]
+        if not symbol.evidence_ids:
+            symbol.active = False
+
+    repaired.unresolved = list(dict.fromkeys([*repaired.unresolved, *unresolved]))
+    return repaired, stats, list(dict.fromkeys(unresolved))
 
 def _state_section_payload(
     kb: LectureKnowledgeBase,
@@ -1139,6 +1384,8 @@ def _state_section_payload(
 ) -> dict[str, Any]:
     payload = evidence_for_section(kb, section, transcript, config)
     payload.pop("transcript", None)
+    # State repair owns canonical semantics. Pre-repair claims can no longer override repaired events.
+    payload["claims"] = []
     return payload
 
 
@@ -1831,12 +2078,56 @@ def run_knowledge_pipeline(
 
     # A technical window never closes an episode. End-of-lecture is the only unconditional close.
     close_open_episodes(kb)
+
+    state_mode = pipeline.config.notes.architecture == "state"
+    state_section_cache_hits = 0
+    state_section_batches_total = 0
+    state_observation_resolution_cache_hits = 0
+    state_observations_resolved = 0
+    state_patches_kept = 0
+    state_patches_replaced = 0
+    state_patches_rejected = 0
+    state_patches_unresolved = 0
+    state_resolution_seconds = 0.0
+    state_synthesis_seconds = 0.0
+    state_repair_unresolved: list[str] = []
+
+    if state_mode:
+        # Preserve the extraction/episode-tracking state for audit, then repair it exactly once.
+        atomic_json_dump(
+            work / "lecture_state_pre_repair.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+        raw_window_index = _load_state_raw_window_index(work)
+        repair_started = time.perf_counter()
+        kb, repair_stats, state_repair_unresolved = _repair_lecture_state(
+            orchestrator,
+            kb=kb,
+            raw_windows=raw_window_index,
+            work=work,
+            config=pipeline.config.notes,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            force=force,
+        )
+        state_resolution_seconds = time.perf_counter() - repair_started
+        state_observations_resolved = int(repair_stats["processed"])
+        state_observation_resolution_cache_hits = int(repair_stats["cache_hits"])
+        state_patches_kept = int(repair_stats["kept"])
+        state_patches_replaced = int(repair_stats["replaced"])
+        state_patches_rejected = int(repair_stats["rejected"])
+        state_patches_unresolved = int(repair_stats["unresolved"])
+        atomic_json_dump(
+            work / "lecture_state.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+
     kb_fingerprint = stable_hash(
         {
             "kb": kb.model_dump(mode="json"),
             "notes": pipeline.config.notes.model_dump(mode="json"),
             "llm": pipeline.config.llm.model_dump(mode="json"),
             "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
+            "state_pipeline_version": STATE_PIPELINE_VERSION if state_mode else None,
         }
     )
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
@@ -1893,18 +2184,9 @@ def run_knowledge_pipeline(
             make_lecture_state(kb, outline=outline).model_dump(mode="json"),
         )
 
-    state_mode = pipeline.config.notes.architecture == "state"
-    state_section_cache_hits = 0
-    state_section_batches_total = 0
-    state_observation_resolution_cache_hits = 0
-    state_observations_resolved = 0
-    state_resolution_seconds = 0.0
-    state_synthesis_seconds = 0.0
-
     if state_mode:
         note_sections: list[ChunkNotes] = []
         outline_context = _state_outline_context(outline)
-        raw_window_index = _load_state_raw_window_index(work)
         for section in outline.sections:
             evidence_batches = _state_section_batches(
                 kb,
@@ -1912,39 +2194,16 @@ def run_knowledge_pipeline(
                 transcript,
                 pipeline.config.notes,
             )
-            section_observations = _section_observation_sequence(kb, section)
-            resolved_history: list[dict[str, Any]] = []
             state_section_batches_total += len(evidence_batches)
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
-                resolution_started = time.perf_counter()
-                (
-                    resolved_evidence,
-                    resolution_corrections,
-                    resolution_unresolved,
-                    resolution_cache_hits,
-                ) = _resolve_state_batch_sequential(
-                    orchestrator,
-                    section=section,
-                    evidence=evidence_payload,
-                    section_observations=section_observations,
-                    resolved_history=resolved_history,
-                    raw_windows=raw_window_index,
-                    work=work,
-                    config=pipeline.config.notes,
-                    llm_config=pipeline.config.llm.model_dump(mode="json"),
-                    force=force,
-                )
-                state_resolution_seconds += time.perf_counter() - resolution_started
-                state_observation_resolution_cache_hits += resolution_cache_hits
-                state_observations_resolved += len(resolved_evidence.get("observations", []))
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
-                        "resolved_evidence": resolved_evidence,
+                        "repaired_evidence": evidence_payload,
                         "previous_context": previous_context,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
@@ -1965,7 +2224,7 @@ def run_knowledge_pipeline(
                 notes = _write_state_section_batch_resilient(
                     orchestrator,
                     section,
-                    resolved_evidence,
+                    evidence_payload,
                     outline_context=outline_context,
                     previous_context=previous_context,
                     kb=kb,
@@ -1975,22 +2234,22 @@ def run_knowledge_pipeline(
                     raw_evidence_context=None,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
-                notes.corrections.extend(resolution_corrections)
-                notes.unresolved = list(
-                    dict.fromkeys([*notes.unresolved, *resolution_unresolved])
-                )
                 atomic_json_dump(
                     path,
                     {
                         "fingerprint": fingerprint,
-                        "evidence": evidence_payload,
-                        "resolved_evidence": resolved_evidence,
+                        "repaired_evidence": evidence_payload,
                         "notes": notes.model_dump(mode="json"),
                     },
                 )
                 generated_batches.append(notes)
 
             note_sections.append(_merge_state_section_batches(section, generated_batches))
+
+        if state_repair_unresolved and note_sections:
+            note_sections[-1].unresolved = list(
+                dict.fromkeys([*note_sections[-1].unresolved, *state_repair_unresolved])
+            )
 
         episode_batch_cache_hits = 0
         episode_batches_total = 0
@@ -2153,6 +2412,10 @@ def run_knowledge_pipeline(
             "state_section_batches_total": state_section_batches_total,
             "state_section_cache_hits": state_section_cache_hits,
             "state_observations_resolved": state_observations_resolved,
+            "state_patches_kept": state_patches_kept,
+            "state_patches_replaced": state_patches_replaced,
+            "state_patches_rejected": state_patches_rejected,
+            "state_patches_unresolved": state_patches_unresolved,
             "state_observation_resolution_cache_hits": (
                 state_observation_resolution_cache_hits
             ),

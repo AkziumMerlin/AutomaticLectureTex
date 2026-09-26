@@ -1,14 +1,15 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex import pipeline_robust as pipeline_robust_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
 from automatic_lecture_tex.generated_notes import (
     GeneratedChunkNotes,
-    GeneratedFormulaObservationResolution,
-    GeneratedObservationResolution,
+    GeneratedObservationStatePatch,
 )
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
@@ -356,104 +357,104 @@ def test_writer_masks_and_restores_resolved_math_atoms():
     assert generated.blocks[0].latex == r"Получаем $x=\sum_{n=1}^{\infty} x_n$."
 
 
-def test_observation_resolution_requires_authoritative_final_state():
-    resolution = GeneratedObservationResolution(
-        text="Resolved observation",
-        correction={
-            "original": "bad",
-            "corrected": "good",
-            "reason": "evidence",
-            "basis": "mathematical_consistency",
-            "confidence": 0.9,
-        },
+def test_state_patch_schema_is_transactional():
+    keep = GeneratedObservationStatePatch(action="keep")
+    assert keep.replacement_text is None
+    assert keep.evidence_refs == []
+
+    replace = GeneratedObservationStatePatch(
+        action="replace",
+        replacement_text="correct",
+        replacement_latex=r"f(z_f)\neq0",
+        evidence_refs=["ocr:crop_1"],
+        reason="visible formula",
     )
-    assert resolution.text == "Resolved observation"
-    assert GeneratedObservationResolution.model_fields["text"].is_required()
+    assert replace.action == "replace"
+    assert replace.replacement_latex == r"f(z_f)\neq0"
 
-    formula = GeneratedFormulaObservationResolution(
-        text="Resolved formula",
-        latex=r"f(z_f)\\neq0",
-    )
-    assert formula.latex == r"f(z_f)\\neq0"
-    assert GeneratedFormulaObservationResolution.model_fields["latex"].is_required()
+    with pytest.raises(ValueError):
+        GeneratedObservationStatePatch(
+            action="replace",
+            replacement_text="correct",
+            replacement_latex=r"f(z_f)\neq0",
+            reason="missing provenance",
+        )
 
 
-def test_resolved_observation_uses_top_level_resolution_not_correction_record():
+def test_state_patch_replace_applies_without_similarity_gate():
     original = {
         "id": "obs_1",
         "text": "old prose",
         "latex": r"f(z_f)=0",
     }
-    resolution = GeneratedFormulaObservationResolution(
-        text="new prose",
-        latex=r"f(z_f)\\neq0",
-        correction={
-            "original": "old prose",
-            "corrected": "new prose",
-            "reason": "local evidence",
-            "basis": "multimodal",
-            "confidence": 0.95,
-        },
+    patch = GeneratedObservationStatePatch(
+        action="replace",
+        replacement_text="nonzero denominator",
+        replacement_latex=r"f(z_f)\neq0",
+        evidence_refs=["visual:crop:crop_1", "history:obs_0"],
+        reason="crop visibly contains neq",
     )
 
-    resolved, accepted = knowledge_pipeline_module._resolved_observation_from_result(
+    resolved, accepted, issue = knowledge_pipeline_module._apply_observation_state_patch(
         original,
-        resolution,
-        [
-            {
-                "math_ocr_candidates": [{"text": r"f(z_f)\\neq0"}],
-                "visual_latex": [],
-            }
-        ],
+        patch,
+        allowed_evidence_refs={"visual:crop:crop_1", "history:obs_0"},
+        direct_evidence_refs={"visual:crop:crop_1"},
     )
 
     assert accepted is True
+    assert issue is None
     assert resolved["text"] == "old prose"
     assert resolved["latex"] == r"f(z_f)=0"
-    assert resolved["resolved_text"] == "new prose"
-    assert resolved["resolved_latex"] == r"f(z_f)\\neq0"
-    assert resolved["sequentially_resolved"] is True
+    assert resolved["resolved_text"] == "nonzero denominator"
+    assert resolved["resolved_latex"] == r"f(z_f)\neq0"
+    assert resolved["resolution_status"] == "replaced"
 
 
-def test_unsupported_formula_rewrite_is_rejected():
-    original = {
-        "id": "obs_norm",
-        "text": "upper bound",
-        "latex": r"\|f\| \leq \|y_f\|",
-    }
-    resolution = GeneratedFormulaObservationResolution(
-        text="reverse bound",
-        latex=r"\|f\| \geq \|y_f\|",
-        correction={
-            "original": r"\|f\| \leq \|y_f\|",
-            "corrected": r"\|f\| \geq \|y_f\|",
-            "reason": "next proof step",
-            "basis": "mathematical_consistency",
-            "confidence": 0.99,
-        },
+def test_state_patch_cannot_change_state_from_history_only():
+    original = {"id": "obs_1", "text": "claim", "latex": r"x=y"}
+    patch = GeneratedObservationStatePatch(
+        action="replace",
+        replacement_text="different claim",
+        replacement_latex=r"x\neq y",
+        evidence_refs=["history:obs_0"],
+        reason="history disagrees",
     )
 
-    resolved, accepted = knowledge_pipeline_module._resolved_observation_from_result(
+    resolved, accepted, issue = knowledge_pipeline_module._apply_observation_state_patch(
         original,
-        resolution,
-        [
-            {
-                "math_ocr_candidates": [
-                    {
-                        "text": (
-                            r"|f(\frac{y_f}{\|y_f\|})|="
-                            r"\|y_f\|\leq\|f\|"
-                        )
-                    }
-                ],
-                "visual_latex": [],
-            }
-        ],
+        patch,
+        allowed_evidence_refs={"history:obs_0"},
+        direct_evidence_refs=set(),
     )
 
     assert accepted is False
-    assert resolved["resolved_text"] == "upper bound"
-    assert resolved["resolved_latex"] == r"\|f\| \leq \|y_f\|"
+    assert "direct local evidence" in issue
+    assert resolved["resolution_status"] == "unresolved"
+    assert resolved["resolved_text"] is None
+    assert resolved["resolved_latex"] is None
+
+
+def test_state_patch_reject_suppresses_current_from_canonical_state():
+    original = {"id": "obs_bad", "text": "unsupported", "latex": r"0=1"}
+    patch = GeneratedObservationStatePatch(
+        action="reject",
+        evidence_refs=["asr:window_1"],
+        reason="ASR does not support this generated equation",
+    )
+
+    resolved, accepted, issue = knowledge_pipeline_module._apply_observation_state_patch(
+        original,
+        patch,
+        allowed_evidence_refs={"asr:window_1"},
+        direct_evidence_refs={"asr:window_1"},
+    )
+
+    assert accepted is True
+    assert issue is None
+    assert resolved["resolution_status"] == "rejected"
+    assert resolved["resolved_text"] is None
+    assert resolved["resolved_latex"] is None
 
 
 def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path):
@@ -476,7 +477,7 @@ def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path)
             self.images = kwargs.get("images")
             self.guided_json = kwargs.get("guided_json")
             self.max_tokens = kwargs.get("max_tokens")
-            return schema(text="keep", latex=r"f(z_f)\neq0")
+            return schema(action="keep")
 
     orchestrator = FakeOrchestrator()
     current = {
@@ -575,14 +576,14 @@ def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path)
 
     assert orchestrator.images == [crop, board]
     assert orchestrator.guided_json is False
-    assert orchestrator.max_tokens == 768
+    assert orchestrator.max_tokens == 512
     assert "claim_that_should_not_be_sent" not in orchestrator.prompt
     assert "unused_metadata" not in orchestrator.prompt
     assert "huge_metadata" not in orchestrator.prompt
     assert "resolved_history_5" not in orchestrator.prompt
     assert "resolved_history_6" in orchestrator.prompt
     assert "resolved_history_9" in orchestrator.prompt
-    assert "formula_crop source_id=crop_exact" in orchestrator.prompt
+    assert "visual:crop:crop_exact" in orchestrator.prompt
     assert len(orchestrator.prompt) < 9000
 
 
@@ -612,7 +613,7 @@ def test_resolver_raw_prompt_does_not_leak_visual_paths(tmp_path):
     assert prompt_raw[0]["math_ocr_candidates"][0]["source_id"] == "crop_1"
 
 
-def test_formula_observation_resolver_uses_formula_schema():
+def test_observation_resolver_uses_transaction_schema():
     class FakeOrchestrator:
         output_language = "ru"
 
@@ -622,7 +623,7 @@ def test_formula_observation_resolver_uses_formula_schema():
         def _structured(self, prompt, schema, **kwargs):
             del prompt, kwargs
             self.schema = schema
-            return schema(text="final", latex=r"x=y")
+            return schema(action="keep")
 
     orchestrator = FakeOrchestrator()
     current = {
@@ -646,7 +647,7 @@ def test_formula_observation_resolver_uses_formula_schema():
         config=NotesConfig(),
     )
 
-    assert orchestrator.schema is GeneratedFormulaObservationResolution
+    assert orchestrator.schema is GeneratedObservationStatePatch
 
 
 def test_raw_windows_for_sequential_resolution_use_current_only():
@@ -684,16 +685,26 @@ def test_raw_windows_for_sequential_resolution_use_current_only():
     assert selected[0]["role"] == "current"
 
 
-def test_current_formula_ocr_filter_rejects_next_proof_step():
-    current = {"latex": r"\|f\| \leq \|y_f\|"}
+def test_current_formula_ocr_filter_prefers_current_time_span():
+    current = {
+        "latex": r"\|f\| \leq \|y_f\|",
+        "start": 10.0,
+        "end": 12.0,
+    }
     candidates = [
         {
+            "timestamp": 11.0,
+            "text": r"\|f\| \leq \|y_f\|",
+            "source_id": "current_crop",
+        },
+        {
+            "timestamp": 18.0,
             "text": (
                 r"| f ( \frac { y _ { f } } { \parallel y _ { f } \parallel } ) | = "
                 r"\parallel y _ { f } \parallel \leq \parallel f \parallel"
-            )
+            ),
+            "source_id": "next_step_crop",
         },
-        {"text": r"| | f | | = | | y + 1 | |"},
     ]
 
     filtered = knowledge_pipeline_module._filter_current_window_ocr_candidates(
@@ -701,10 +712,10 @@ def test_current_formula_ocr_filter_rejects_next_proof_step():
         candidates,
     )
 
-    assert filtered == []
+    assert [item["source_id"] for item in filtered] == ["current_crop"]
 
 
-def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_path):
+def test_sequential_state_patches_use_accepted_history_without_mutating_source(tmp_path):
     prompts = []
 
     class FakeOrchestrator:
@@ -714,13 +725,19 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
             del schema, kwargs
             prompts.append(prompt)
             if len(prompts) == 1:
-                return GeneratedObservationResolution(
-                    text="Resolved first",
-                    latex=r"f(z_f)\neq0",
+                return GeneratedObservationStatePatch(
+                    action="replace",
+                    replacement_text="First resolved",
+                    replacement_latex=r"f(z_f)\neq0",
+                    evidence_refs=["ocr:ocr_1"],
+                    reason="direct OCR",
                 )
-            return GeneratedObservationResolution(
-                text="Resolved second",
-                latex=r"y=x-\frac{f(x)}{f(z_f)}z_f",
+            return GeneratedObservationStatePatch(
+                action="replace",
+                replacement_text="Second resolved",
+                replacement_latex=r"y=x-\frac{f(x)}{f(z_f)}z_f",
+                evidence_refs=["ocr:ocr_2"],
+                reason="direct OCR",
             )
 
     evidence = {
@@ -761,8 +778,9 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
     )
     config = NotesConfig(
         state_observation_lookahead=1,
-        state_observation_history=12,
-        state_observation_max_raw_windows=6,
+        state_observation_history=4,
+        state_observation_max_raw_windows=2,
+        state_observation_max_images=0,
     )
     history = []
 
@@ -780,7 +798,9 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
                     "end": 1.0,
                     "asr": "",
                     "visual_latex": [],
-                    "math_ocr_candidates": [{"text": r"f(z_f)\neq0"}],
+                    "math_ocr_candidates": [
+                        {"text": r"f(z_f)\neq0", "source_id": "ocr_1"}
+                    ],
                 },
                 {
                     "window_id": "window_2",
@@ -789,7 +809,10 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
                     "asr": "",
                     "visual_latex": [],
                     "math_ocr_candidates": [
-                        {"text": r"y=x-\frac{f(x)}{f(z_f)}z_f"}
+                        {
+                            "text": r"y=x-\frac{f(x)}{f(z_f)}z_f",
+                            "source_id": "ocr_2",
+                        }
                     ],
                 },
             ],
@@ -811,9 +834,13 @@ def test_sequential_resolution_uses_resolved_history_without_mutating_it(tmp_pat
         r"f(z_f)\neq0",
         r"y=x-\frac{f(x)}{f(z_f)}z_f",
     ]
+    assert [item["resolution_status"] for item in resolved["observations"]] == [
+        "replaced",
+        "replaced",
+    ]
     assert len(history) == 2
     assert r"f(z_f)\\neq0" in prompts[1]
-    assert "Immutable accepted state immediately before CURRENT" in prompts[1]
+    assert "Accepted state immediately before CURRENT" in prompts[1]
 
 
 def test_resolved_episode_split_preserves_resolved_observation_values():
