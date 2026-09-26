@@ -33,7 +33,6 @@ from .episode_synthesis import (
     write_episode_batch,
 )
 from .knowledge import (
-    KNOWLEDGE_EXTRACT_MAX_TOKENS,
     KnowledgeOrchestrator,
     compact_knowledge_state,
     evidence_for_section,
@@ -70,9 +69,8 @@ logger = logging.getLogger(__name__)
 
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
-KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 8
-STATE_RESOLVER_MAX_TOKENS = 32768
+KNOWLEDGE_CACHE_VERSION = 3
+STATE_PIPELINE_VERSION = 9
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -1031,7 +1029,6 @@ Constraints:
         images=images or None,
         guided_json=not bool(images),
         operation="state_observation_resolve",
-        max_tokens=STATE_RESOLVER_MAX_TOKENS,
         split_oversized_task=True,
     )
 
@@ -1135,7 +1132,6 @@ def _resolve_state_batch_sequential(
         fingerprint = stable_hash(
             {
                 "state_pipeline_version": STATE_PIPELINE_VERSION,
-                "state_resolver_max_tokens": STATE_RESOLVER_MAX_TOKENS,
                 "episode": _resolver_episode_context(evidence, original, section),
                 "current": _compact_resolver_observation(original),
                 "symbols": compact_symbols,
@@ -1589,7 +1585,6 @@ def _write_state_section_batch(
     previous_context: list[dict[str, Any]],
     raw_evidence_context: list[dict[str, Any]] | None = None,
     guided_json: bool = True,
-    max_tokens: int = 6144,
 ) -> ChunkNotes:
     writer_evidence, math_atoms = _writer_evidence_with_math_atoms(evidence)
     prompt = f"""Write one contiguous part of a FINAL lecture-note section from a chronological
@@ -1636,7 +1631,6 @@ Rules:
         prompt,
         GeneratedChunkNotes,
         operation="state_section_write",
-        max_tokens=max_tokens,
         guided_json=guided_json,
         split_oversized_task=True,
     )
@@ -1905,7 +1899,6 @@ def _write_state_section_batch_resilient(
                 previous_context=previous_context,
                 raw_evidence_context=None,
                 guided_json=False,
-                max_tokens=8192,
             )
         except (
             json.JSONDecodeError,
@@ -2005,7 +1998,6 @@ def run_knowledge_pipeline(
                 "vision": pipeline.config.vision.model_dump(mode="json"),
                 "llm": pipeline.config.llm.model_dump(mode="json"),
                 "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
-                "knowledge_extract_max_tokens": KNOWLEDGE_EXTRACT_MAX_TOKENS,
             }
         )
         artifact = work / "knowledge_windows" / f"{chunk.id}.json"
