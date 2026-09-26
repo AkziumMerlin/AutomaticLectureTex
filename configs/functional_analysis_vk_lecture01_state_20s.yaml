@@ -87,8 +87,9 @@ notes:
   # Resolve observations chronologically. Two future observations are visible only as fixed-lag
   # disambiguation context; the accepted history is immutable.
   state_observation_lookahead: 2
-  state_observation_history: 12
-  state_observation_max_raw_windows: 6
+  state_observation_history: 4
+  state_observation_max_raw_windows: 2
+  state_observation_max_images: 2
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]

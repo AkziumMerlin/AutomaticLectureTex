@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 5
+STATE_PIPELINE_VERSION = 6
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -80,6 +80,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_lookahead",
     "state_observation_history",
     "state_observation_max_raw_windows",
+    "state_observation_max_images",
 }
 
 
@@ -261,13 +262,50 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
         chunk = payload.get("chunk") or {}
         visual_latex: list[str] = []
         ocr_candidates: list[dict[str, Any]] = []
+        formula_crops: list[dict[str, Any]] = []
+        board_frames: list[dict[str, Any]] = []
         seen_ocr: set[tuple[Any, str]] = set()
+        seen_crops: set[str] = set()
+        seen_frames: set[str] = set()
 
         for visual in payload.get("visual_evidence", []):
             for key in ("raw_latex", "latex"):
                 value = _clip_state_raw_text(str(visual.get(key) or ""), 400)
                 if value and value not in visual_latex:
                     visual_latex.append(value)
+
+            for crop in visual.get("formula_crops", []):
+                crop_id = str(crop.get("id") or "")
+                image_path = str(crop.get("image_path") or "")
+                if not crop_id or not image_path or crop_id in seen_crops:
+                    continue
+                seen_crops.add(crop_id)
+                formula_crops.append(
+                    {
+                        "id": crop_id,
+                        "timestamp": crop.get("timestamp"),
+                        "detector_confidence": crop.get("detector_confidence"),
+                        "image_path": image_path,
+                    }
+                )
+
+            frame_paths = list(visual.get("frame_paths", []))
+            frame_timestamps = list(visual.get("frame_timestamps", []))
+            for index, image_path in enumerate(frame_paths):
+                image_path = str(image_path or "")
+                if not image_path or image_path in seen_frames:
+                    continue
+                seen_frames.add(image_path)
+                board_frames.append(
+                    {
+                        "image_path": image_path,
+                        "timestamp": (
+                            frame_timestamps[index]
+                            if index < len(frame_timestamps)
+                            else None
+                        ),
+                    }
+                )
 
             for candidate in visual.get("math_ocr_candidates", []):
                 value = _clip_state_raw_text(str(candidate.get("text") or ""), 400)
@@ -301,6 +339,8 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
                 ),
                 "visual_latex": visual_latex[:3],
                 "math_ocr_candidates": ocr_candidates,
+                "formula_crops": formula_crops,
+                "board_frames": board_frames,
             }
         )
 
@@ -522,6 +562,195 @@ def _symbols_for_observation(
     ]
 
 
+def _compact_resolver_observation(item: dict[str, Any]) -> dict[str, Any]:
+    """Project one observation to the semantic fields the local resolver can actually use."""
+
+    return {
+        "id": str(item.get("id", "")),
+        "kind": str(item.get("kind", "")),
+        "text": str(item.get("resolved_text") or item.get("text") or "").strip(),
+        "latex": (
+            str(item.get("resolved_latex") or item.get("latex") or "").strip()
+            or None
+        ),
+    }
+
+
+def _resolver_symbol_context(
+    evidence: dict[str, Any],
+    current: dict[str, Any],
+    lookahead: list[dict[str, Any]],
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Keep only notation that is lexically relevant to CURRENT/local look-ahead."""
+
+    available = _symbols_for_observation(evidence, current)
+    probe = " ".join(
+        str(value)
+        for item in [current, *lookahead]
+        for value in (item.get("text"), item.get("latex"))
+        if value
+    )
+    compact_probe = _compact_formula_similarity_text(probe)
+
+    relevant: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for item in reversed(available):
+        compact = {
+            "symbol": item.get("symbol"),
+            "meaning": item.get("meaning"),
+            "type_hint": item.get("type_hint"),
+        }
+        fallback.append(compact)
+        symbol = _compact_formula_similarity_text(str(item.get("symbol") or ""))
+        if symbol and symbol in compact_probe:
+            relevant.append(compact)
+        if len(relevant) >= limit:
+            break
+
+    if relevant:
+        return list(reversed(relevant[:limit]))
+    return list(reversed(fallback[: min(limit, 3)]))
+
+
+def _resolver_raw_prompt_windows(raw_windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove host paths and retain only literal local sensor hypotheses."""
+
+    result: list[dict[str, Any]] = []
+    for raw in raw_windows:
+        result.append(
+            {
+                "window_id": raw.get("window_id"),
+                "asr": _clip_state_raw_text(str(raw.get("asr") or ""), 800),
+                "visual_latex": [
+                    _clip_state_raw_text(str(item), 300)
+                    for item in raw.get("visual_latex", [])[:2]
+                    if str(item).strip()
+                ],
+                "math_ocr_candidates": [
+                    {
+                        "timestamp": item.get("timestamp"),
+                        "text": _clip_state_raw_text(str(item.get("text") or ""), 300),
+                        "source_id": item.get("source_id"),
+                    }
+                    for item in raw.get("math_ocr_candidates", [])[:4]
+                    if str(item.get("text") or "").strip()
+                ],
+            }
+        )
+    return result
+
+
+def _resolver_visual_context(
+    current: dict[str, Any],
+    raw_windows: list[dict[str, Any]],
+    *,
+    max_images: int = 2,
+) -> tuple[list[Path], list[str]]:
+    """Choose the exact OCR-producing crop first, then one local board-state context image."""
+
+    if max_images <= 0:
+        return [], []
+
+    images: list[Path] = []
+    labels: list[str] = []
+    seen: set[Path] = set()
+
+    def append(path_value: Any, label: str) -> None:
+        if len(images) >= max_images or not path_value:
+            return
+        path = Path(str(path_value))
+        if path in seen or not path.is_file():
+            return
+        seen.add(path)
+        images.append(path)
+        labels.append(f"Image {len(images) - 1}: {label}")
+
+    source_ids = [
+        str(item.get("source_id"))
+        for raw in raw_windows
+        for item in raw.get("math_ocr_candidates", [])
+        if item.get("source_id")
+    ]
+    crops = [
+        crop
+        for raw in raw_windows
+        for crop in raw.get("formula_crops", [])
+    ]
+    crops_by_id = {
+        str(crop.get("id")): crop
+        for crop in crops
+        if crop.get("id")
+    }
+
+    for source_id in source_ids:
+        crop = crops_by_id.get(source_id)
+        if crop is None:
+            continue
+        append(
+            crop.get("image_path"),
+            f"formula_crop source_id={source_id}, timestamp={crop.get('timestamp')}",
+        )
+        if images:
+            break
+
+    center = 0.5 * (
+        float(current.get("start", 0.0)) + float(current.get("end", 0.0))
+    )
+    if not images and crops:
+        nearest_crop = min(
+            crops,
+            key=lambda crop: abs(float(crop.get("timestamp") or center) - center),
+        )
+        append(
+            nearest_crop.get("image_path"),
+            f"nearest_formula_crop id={nearest_crop.get('id')}, "
+            f"timestamp={nearest_crop.get('timestamp')}",
+        )
+
+    board_frames = [
+        frame
+        for raw in raw_windows
+        for frame in raw.get("board_frames", [])
+        if frame.get("image_path")
+    ]
+    if len(images) < max_images and board_frames:
+        nearest_frame = min(
+            board_frames,
+            key=lambda frame: abs(float(frame.get("timestamp") or center) - center),
+        )
+        append(
+            nearest_frame.get("image_path"),
+            f"local_board_state timestamp={nearest_frame.get('timestamp')}",
+        )
+
+    return images, labels
+
+
+def _resolver_episode_context(
+    evidence: dict[str, Any],
+    current: dict[str, Any],
+    section: OutlineSection,
+) -> dict[str, Any]:
+    episode_id = str(current.get("episode_id") or "")
+    episode = next(
+        (
+            item
+            for item in evidence.get("episodes", [])
+            if str(item.get("id") or "") == episode_id
+        ),
+        None,
+    )
+    if episode is not None:
+        return {
+            "id": episode.get("id"),
+            "title": episode.get("title"),
+            "kind": episode.get("kind"),
+        }
+    return {"id": section.id, "title": section.title, "kind": "section"}
+
+
 def _resolution_formula_supported(
     original: dict[str, Any],
     resolution: GeneratedObservationResolution,
@@ -617,72 +846,78 @@ def _resolve_single_state_observation(
     raw_windows: list[dict[str, Any]],
     config,
 ) -> GeneratedObservationResolution:
-    observation_id = str(current.get("id", ""))
-    claims = _claims_for_observation(evidence, observation_id)
-    symbols = _symbols_for_observation(evidence, current)
+    """Resolve one state transition from a small local state/evidence slice."""
+
     raw = _raw_windows_for_observation_sequence(
         current,
         lookahead,
         raw_windows,
         max_windows=int(config.state_observation_max_raw_windows),
     )
+    raw_prompt = _resolver_raw_prompt_windows(raw)
+    images, image_labels = _resolver_visual_context(
+        current,
+        raw,
+        max_images=int(config.state_observation_max_images),
+    )
+
     history_limit = int(config.state_observation_history)
-    history = resolved_history[-history_limit:] if history_limit else []
+    history = (
+        [
+            _compact_resolver_observation(item)
+            for item in resolved_history[-history_limit:]
+        ]
+        if history_limit
+        else []
+    )
+    current_compact = _compact_resolver_observation(current)
+    lookahead_compact = [
+        _compact_resolver_observation(item)
+        for item in lookahead
+    ]
+    symbols = _resolver_symbol_context(
+        evidence,
+        current,
+        lookahead,
+    )
+    episode = _resolver_episode_context(evidence, current, section)
 
-    prompt = f"""Resolve exactly ONE chronological lecture observation into its best supported
-mathematical meaning. This call is one step of a sequential state update; it must not rewrite
-earlier accepted observations.
+    prompt = f"""Resolve CURRENT as one local update of an existing mathematical lecture state.
 
-Current fixed section:
-{json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
+Local episode:
+{json.dumps(episode, ensure_ascii=False, separators=(",", ":"))}
 
-Already resolved immutable history:
+Immutable accepted state immediately before CURRENT:
 {json.dumps(history, ensure_ascii=False, separators=(",", ":"))}
 
-CURRENT observation to resolve:
-{json.dumps(current, ensure_ascii=False, separators=(",", ":"))}
+CURRENT:
+{json.dumps(current_compact, ensure_ascii=False, separators=(",", ":"))}
 
-Claims currently derived from this observation (fallible):
-{json.dumps(claims, ensure_ascii=False, separators=(",", ":"))}
-
-Symbols established no later than this observation:
+Relevant established notation:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
-Next observations, provided only as fixed-lag look-ahead to disambiguate CURRENT:
-{json.dumps(lookahead, ensure_ascii=False, separators=(",", ":"))}
+Next observations (disambiguation only; never move their content into CURRENT):
+{json.dumps(lookahead_compact, ensure_ascii=False, separators=(",", ":"))}
 
-Literal ASR/OCR windows attached to CURRENT only. For formula observations the host has already
-filtered OCR crops to readings structurally similar to CURRENT so another formula from the same
-board state cannot masquerade as this observation:
-{json.dumps(raw, ensure_ascii=False, separators=(",", ":"))}
+Direct local ASR/OCR evidence for CURRENT:
+{json.dumps(raw_prompt, ensure_ascii=False, separators=(",", ":"))}
+
+Attached visual evidence:
+{chr(10).join(image_labels) if image_labels else "No local image available."}
 
 Rules:
-- ALWAYS return the final resolved text in the top-level text field, even when no change is needed.
-- If CURRENT contains a non-empty latex field, ALWAYS return the final complete formula in the
-  top-level latex field, even when the formula is unchanged. CorrectionRecord is audit metadata
-  only; never put the resolved value exclusively there.
-- Output the resolved form of CURRENT observation only.
-- Earlier resolved history is immutable. Do not revise, summarize, or replace it.
-- Look-ahead may clarify the scope, notation, sign, denominator, or role of CURRENT, but material
-  belonging only to a later observation must not be moved into CURRENT. A coherent CURRENT formula
-  must not be replaced merely because look-ahead contains a different next proof step.
-- Treat CURRENT as the default hypothesis. If its mathematical content is coherent and is not
-  contradicted by immutable history or structurally matching direct evidence, preserve its meaning
-  and return correction=null.
-- OCR, ASR, and the intermediate observation are all noisy. Interpret them jointly, but do not
-  rewrite CURRENT merely to make the prose cleaner or more textbook-like.
-- Prefer repeated/consistent local evidence over a single cleaner-looking OCR fragment.
-- Never delete a coefficient, denominator, quantifier, membership, subscript, or relation sign merely
-  because one OCR candidate omitted it.
-- Reject readings that contradict established history or elementary consequences of it, for example
-  a zero denominator, incompatible kernel membership, or a violated linearity relation.
-- Standard mathematics is a bounded consistency prior: it may reject an impossible reading but must
-  not invent lecture-specific notation or a missing theorem statement.
-- If the intermediate observation must change semantically, return a CorrectionRecord. Pure
-  rephrasing is not a semantic correction and should leave correction=null. If ambiguity cannot be
-  resolved, preserve only the common supported content and record the ambiguity in unresolved.
-- Do not emit a no-op correction.
-- Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
+- CURRENT is the default. Keep it unchanged unless direct local evidence or immutable state shows a
+  concrete semantic error.
+- Attached pixels are direct evidence. OCR/ASR are fallible hypotheses about those pixels/speech.
+- If CURRENT has latex, return the complete final latex even when unchanged.
+- Do not replace CURRENT with the next proof step from look-ahead or another board line.
+- Preserve coefficients, denominators, signs, quantifiers, memberships, subscripts and relation signs
+  unless direct evidence supports changing them.
+- Standard mathematics may reject an impossible reading, but may not invent missing lecture content.
+- Pure reformatting is not a correction. If meaning is unchanged, copy CURRENT text/latex.
+- A semantic change requires CorrectionRecord; otherwise correction=null.
+- If evidence is genuinely ambiguous, keep the supported common content and record unresolved.
+- Return CURRENT only. Write prose in {orchestrator.output_language} and formulas in LaTeX.
 """
     schema = (
         GeneratedFormulaObservationResolution
@@ -692,11 +927,12 @@ Rules:
     return orchestrator._structured(
         prompt,
         schema,
+        images=images or None,
+        guided_json=not bool(images),
         operation="state_observation_resolve",
-        max_tokens=1536,
+        max_tokens=768,
         split_oversized_task=True,
     )
-
 
 def _section_observation_sequence(
     kb: LectureKnowledgeBase,
@@ -773,17 +1009,39 @@ def _resolve_state_batch_sequential(
             if str(item.get("window_id", "")) in current_window_ids
         ]
         history_limit = int(config.state_observation_history)
-        history = resolved_history[-history_limit:] if history_limit else []
+        history = (
+            [
+                _compact_resolver_observation(item)
+                for item in resolved_history[-history_limit:]
+            ]
+            if history_limit
+            else []
+        )
+        compact_lookahead = [
+            _compact_resolver_observation(item)
+            for item in lookahead
+        ]
+        compact_symbols = _resolver_symbol_context(
+            evidence,
+            original,
+            lookahead,
+        )
+        raw_prompt = _resolver_raw_prompt_windows(raw)
+        resolver_images, resolver_image_labels = _resolver_visual_context(
+            original,
+            raw,
+            max_images=int(config.state_observation_max_images),
+        )
         fingerprint = stable_hash(
             {
                 "state_pipeline_version": STATE_PIPELINE_VERSION,
-                "section_id": section.id,
-                "current": original,
-                "claims": _claims_for_observation(evidence, observation_id),
-                "symbols": _symbols_for_observation(evidence, original),
-                "lookahead": lookahead,
+                "episode": _resolver_episode_context(evidence, original, section),
+                "current": _compact_resolver_observation(original),
+                "symbols": compact_symbols,
+                "lookahead": compact_lookahead,
                 "history": history,
-                "raw_windows": raw,
+                "raw_windows": raw_prompt,
+                "images": [str(path) for path in resolver_images],
                 "llm": llm_config,
             }
         )
@@ -821,13 +1079,22 @@ def _resolve_state_batch_sequential(
                 path,
                 {
                     "fingerprint": fingerprint,
-                    "current": original,
+                    "current": _compact_resolver_observation(original),
                     "history_before": history,
-                    "claims": _claims_for_observation(evidence, observation_id),
-                    "symbols": _symbols_for_observation(evidence, original),
-                    "lookahead": lookahead,
-                    "raw_windows": raw,
-                    "support_raw_windows": support_raw,
+                    "symbols": compact_symbols,
+                    "lookahead": compact_lookahead,
+                    "raw_windows": raw_prompt,
+                    "images": [
+                        {
+                            "path": str(path),
+                            "label": (
+                                resolver_image_labels[index]
+                                if index < len(resolver_image_labels)
+                                else None
+                            ),
+                        }
+                        for index, path in enumerate(resolver_images)
+                    ],
                     "resolution": resolution.model_dump(mode="json"),
                 },
             )
