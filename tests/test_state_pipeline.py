@@ -685,16 +685,26 @@ def test_raw_windows_for_sequential_resolution_use_current_only():
     assert selected[0]["role"] == "current"
 
 
-def test_current_formula_ocr_filter_rejects_next_proof_step():
-    current = {"latex": r"\|f\| \leq \|y_f\|"}
+def test_current_formula_ocr_filter_prefers_current_time_span():
+    current = {
+        "latex": r"\|f\| \leq \|y_f\|",
+        "start": 10.0,
+        "end": 12.0,
+    }
     candidates = [
         {
+            "timestamp": 11.0,
+            "text": r"\|f\| \leq \|y_f\|",
+            "source_id": "current_crop",
+        },
+        {
+            "timestamp": 18.0,
             "text": (
                 r"| f ( \frac { y _ { f } } { \parallel y _ { f } \parallel } ) | = "
                 r"\parallel y _ { f } \parallel \leq \parallel f \parallel"
-            )
+            ),
+            "source_id": "next_step_crop",
         },
-        {"text": r"| | f | | = | | y + 1 | |"},
     ]
 
     filtered = knowledge_pipeline_module._filter_current_window_ocr_candidates(
@@ -702,7 +712,7 @@ def test_current_formula_ocr_filter_rejects_next_proof_step():
         candidates,
     )
 
-    assert filtered == []
+    assert [item["source_id"] for item in filtered] == ["current_crop"]
 
 
 def test_sequential_state_patches_use_accepted_history_without_mutating_source(tmp_path):
