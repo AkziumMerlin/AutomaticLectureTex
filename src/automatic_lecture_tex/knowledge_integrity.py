@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .knowledge import KnowledgeOrchestrator, _merge_unique
+from .knowledge import KNOWLEDGE_EXTRACT_MAX_TOKENS, KnowledgeOrchestrator, _merge_unique
 from .schemas import (
     EpisodeStatus,
     LectureChunk,
@@ -379,7 +379,7 @@ Return events in temporal order. Write descriptive strings in language code
                 images=multimodal_images or None,
                 guided_json=not bool(multimodal_images),
                 operation="knowledge_extract",
-                max_tokens=4096,
+                max_tokens=KNOWLEDGE_EXTRACT_MAX_TOKENS,
                 split_oversized_task=True,
             )
             invalid_refs = sorted(

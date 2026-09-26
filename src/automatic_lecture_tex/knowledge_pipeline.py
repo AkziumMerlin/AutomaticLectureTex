@@ -33,6 +33,7 @@ from .episode_synthesis import (
     write_episode_batch,
 )
 from .knowledge import (
+    KNOWLEDGE_EXTRACT_MAX_TOKENS,
     KnowledgeOrchestrator,
     compact_knowledge_state,
     evidence_for_section,
@@ -71,7 +72,7 @@ logger = logging.getLogger(__name__)
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
 STATE_PIPELINE_VERSION = 8
-STATE_RESOLVER_MAX_TOKENS = 16384
+STATE_RESOLVER_MAX_TOKENS = 32768
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -2004,6 +2005,7 @@ def run_knowledge_pipeline(
                 "vision": pipeline.config.vision.model_dump(mode="json"),
                 "llm": pipeline.config.llm.model_dump(mode="json"),
                 "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
+                "knowledge_extract_max_tokens": KNOWLEDGE_EXTRACT_MAX_TOKENS,
             }
         )
         artifact = work / "knowledge_windows" / f"{chunk.id}.json"
