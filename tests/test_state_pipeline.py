@@ -576,7 +576,7 @@ def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path)
 
     assert orchestrator.images == [crop, board]
     assert orchestrator.guided_json is False
-    assert orchestrator.max_tokens == 512
+    assert orchestrator.max_tokens == 2048
     assert "claim_that_should_not_be_sent" not in orchestrator.prompt
     assert "unused_metadata" not in orchestrator.prompt
     assert "huge_metadata" not in orchestrator.prompt
@@ -1054,6 +1054,15 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.state_observation_lookahead == 2
     assert config.notes.state_observation_history == 4
     assert config.notes.state_observation_max_raw_windows == 2
+    assert config.llm.thinking is True
+    assert config.llm.reasoning_effort == "medium"
+    assert config.llm.temperature == 1.0
+    assert config.llm.top_p == 0.95
+    assert config.llm.top_k == 20
+    assert config.llm.min_p == 0.0
+    assert config.llm.presence_penalty == 0.0
+    assert config.llm.repetition_penalty == 1.0
+    assert config.llm.max_tokens == 8192
     assert config.vision.board_sampling_mode == "change"
     assert config.vision.board_crop_max_vlm_images == 5
     assert config.vision.board_change_probe_seconds == 4.0

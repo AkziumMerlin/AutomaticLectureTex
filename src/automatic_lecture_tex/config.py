@@ -66,10 +66,16 @@ class LLMConfig(BaseModel):
     api_key: str = "EMPTY"
     model: str = "Qwen/Qwen3.8-27B-FP8"
     output_language: str = "ru"
-    temperature: float = 0.2
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    repetition_penalty: float | None = Field(default=None, gt=0.0)
     max_tokens: int = 4096
     timeout_seconds: float = 300.0
     thinking: bool = False
+    reasoning_effort: Literal["low", "medium", "xhigh"] | None = None
     max_retries: int = Field(default=2, ge=0, le=5)
     math_audit: bool = True
     math_audit_min_equals: int = Field(default=4, ge=1, le=50)
