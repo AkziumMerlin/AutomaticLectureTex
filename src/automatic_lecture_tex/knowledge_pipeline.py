@@ -456,28 +456,28 @@ def _filter_current_window_ocr_candidates(
     current: dict[str, Any],
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Bind OCR to CURRENT by formula structure and observation time."""
+    """Select temporally local OCR; similarity only orders evidence, never hides corrections."""
 
     anchor = str(current.get("latex") or "").strip()
-    if not anchor:
-        return list(candidates[:6])
-
     normalized_anchor = _compact_formula_similarity_text(anchor)
     start = float(current.get("start", 0.0))
     end = float(current.get("end", start))
     center = 0.5 * (start + end)
+
     ranked: list[tuple[bool, float, float, dict[str, Any]]] = []
     for candidate in candidates:
         text = str(candidate.get("text") or "").strip()
         if not text:
             continue
-        score = SequenceMatcher(
-            None,
-            normalized_anchor,
-            _compact_formula_similarity_text(text),
-        ).ratio()
-        if score < 0.55:
-            continue
+        score = (
+            SequenceMatcher(
+                None,
+                normalized_anchor,
+                _compact_formula_similarity_text(text),
+            ).ratio()
+            if normalized_anchor
+            else 0.0
+        )
         timestamp = candidate.get("timestamp")
         if timestamp is None:
             in_interval = False
@@ -490,6 +490,10 @@ def _filter_current_window_ocr_candidates(
 
     if not ranked:
         return []
+
+    # If the sensor provides observations from CURRENT's own time span, exclude other board steps.
+    # Otherwise fall back to the nearest candidates from the same technical window. Formula
+    # similarity is only a ranking hint: a badly reconstructed CURRENT must still be repairable.
     has_local = any(item[0] for item in ranked)
     pool = [item for item in ranked if item[0]] if has_local else ranked
     pool.sort(key=lambda item: (-item[1], item[2]))
