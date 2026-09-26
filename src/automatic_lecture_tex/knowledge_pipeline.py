@@ -1029,7 +1029,7 @@ Constraints:
         images=images or None,
         guided_json=not bool(images),
         operation="state_observation_resolve",
-        max_tokens=2048,
+        max_tokens=16384,
         split_oversized_task=True,
     )
 
