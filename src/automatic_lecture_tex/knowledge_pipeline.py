@@ -2078,12 +2078,56 @@ def run_knowledge_pipeline(
 
     # A technical window never closes an episode. End-of-lecture is the only unconditional close.
     close_open_episodes(kb)
+
+    state_mode = pipeline.config.notes.architecture == "state"
+    state_section_cache_hits = 0
+    state_section_batches_total = 0
+    state_observation_resolution_cache_hits = 0
+    state_observations_resolved = 0
+    state_patches_kept = 0
+    state_patches_replaced = 0
+    state_patches_rejected = 0
+    state_patches_unresolved = 0
+    state_resolution_seconds = 0.0
+    state_synthesis_seconds = 0.0
+    state_repair_unresolved: list[str] = []
+
+    if state_mode:
+        # Preserve the extraction/episode-tracking state for audit, then repair it exactly once.
+        atomic_json_dump(
+            work / "lecture_state_pre_repair.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+        raw_window_index = _load_state_raw_window_index(work)
+        repair_started = time.perf_counter()
+        kb, repair_stats, state_repair_unresolved = _repair_lecture_state(
+            orchestrator,
+            kb=kb,
+            raw_windows=raw_window_index,
+            work=work,
+            config=pipeline.config.notes,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            force=force,
+        )
+        state_resolution_seconds = time.perf_counter() - repair_started
+        state_observations_resolved = int(repair_stats["processed"])
+        state_observation_resolution_cache_hits = int(repair_stats["cache_hits"])
+        state_patches_kept = int(repair_stats["kept"])
+        state_patches_replaced = int(repair_stats["replaced"])
+        state_patches_rejected = int(repair_stats["rejected"])
+        state_patches_unresolved = int(repair_stats["unresolved"])
+        atomic_json_dump(
+            work / "lecture_state.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+
     kb_fingerprint = stable_hash(
         {
             "kb": kb.model_dump(mode="json"),
             "notes": pipeline.config.notes.model_dump(mode="json"),
             "llm": pipeline.config.llm.model_dump(mode="json"),
             "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
+            "state_pipeline_version": STATE_PIPELINE_VERSION if state_mode else None,
         }
     )
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
@@ -2140,22 +2184,9 @@ def run_knowledge_pipeline(
             make_lecture_state(kb, outline=outline).model_dump(mode="json"),
         )
 
-    state_mode = pipeline.config.notes.architecture == "state"
-    state_section_cache_hits = 0
-    state_section_batches_total = 0
-    state_observation_resolution_cache_hits = 0
-    state_observations_resolved = 0
-    state_patches_kept = 0
-    state_patches_replaced = 0
-    state_patches_rejected = 0
-    state_patches_unresolved = 0
-    state_resolution_seconds = 0.0
-    state_synthesis_seconds = 0.0
-
     if state_mode:
         note_sections: list[ChunkNotes] = []
         outline_context = _state_outline_context(outline)
-        raw_window_index = _load_state_raw_window_index(work)
         for section in outline.sections:
             evidence_batches = _state_section_batches(
                 kb,
@@ -2163,54 +2194,16 @@ def run_knowledge_pipeline(
                 transcript,
                 pipeline.config.notes,
             )
-            section_observations = _section_observation_sequence(kb, section)
-            resolved_history: list[dict[str, Any]] = []
             state_section_batches_total += len(evidence_batches)
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
-                resolution_started = time.perf_counter()
-                (
-                    resolved_evidence,
-                    resolution_corrections,
-                    resolution_unresolved,
-                    resolution_cache_hits,
-                ) = _resolve_state_batch_sequential(
-                    orchestrator,
-                    section=section,
-                    evidence=evidence_payload,
-                    section_observations=section_observations,
-                    resolved_history=resolved_history,
-                    raw_windows=raw_window_index,
-                    work=work,
-                    config=pipeline.config.notes,
-                    llm_config=pipeline.config.llm.model_dump(mode="json"),
-                    force=force,
-                )
-                state_resolution_seconds += time.perf_counter() - resolution_started
-                state_observation_resolution_cache_hits += resolution_cache_hits
-                resolution_summary = resolved_evidence.get("sequential_resolution", {})
-                state_observations_resolved += len(
-                    resolution_summary.get("batch_observation_ids", [])
-                )
-                state_patches_kept += len(
-                    resolution_summary.get("kept_observation_ids", [])
-                )
-                state_patches_replaced += len(
-                    resolution_summary.get("replaced_observation_ids", [])
-                )
-                state_patches_rejected += len(
-                    resolution_summary.get("rejected_observation_ids", [])
-                )
-                state_patches_unresolved += len(
-                    resolution_summary.get("unresolved_observation_ids", [])
-                )
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
-                        "resolved_evidence": resolved_evidence,
+                        "repaired_evidence": evidence_payload,
                         "previous_context": previous_context,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
@@ -2231,7 +2224,7 @@ def run_knowledge_pipeline(
                 notes = _write_state_section_batch_resilient(
                     orchestrator,
                     section,
-                    resolved_evidence,
+                    evidence_payload,
                     outline_context=outline_context,
                     previous_context=previous_context,
                     kb=kb,
@@ -2241,22 +2234,22 @@ def run_knowledge_pipeline(
                     raw_evidence_context=None,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
-                notes.corrections.extend(resolution_corrections)
-                notes.unresolved = list(
-                    dict.fromkeys([*notes.unresolved, *resolution_unresolved])
-                )
                 atomic_json_dump(
                     path,
                     {
                         "fingerprint": fingerprint,
-                        "evidence": evidence_payload,
-                        "resolved_evidence": resolved_evidence,
+                        "repaired_evidence": evidence_payload,
                         "notes": notes.model_dump(mode="json"),
                     },
                 )
                 generated_batches.append(notes)
 
             note_sections.append(_merge_state_section_batches(section, generated_batches))
+
+        if state_repair_unresolved and note_sections:
+            note_sections[-1].unresolved = list(
+                dict.fromkeys([*note_sections[-1].unresolved, *state_repair_unresolved])
+            )
 
         episode_batch_cache_hits = 0
         episode_batches_total = 0
