@@ -576,7 +576,7 @@ def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path)
 
     assert orchestrator.images == [crop, board]
     assert orchestrator.guided_json is False
-    assert orchestrator.max_tokens == 2048
+    assert orchestrator.max_tokens == 16384
     assert "claim_that_should_not_be_sent" not in orchestrator.prompt
     assert "unused_metadata" not in orchestrator.prompt
     assert "huge_metadata" not in orchestrator.prompt

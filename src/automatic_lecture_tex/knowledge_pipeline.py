@@ -70,7 +70,8 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 2
-STATE_PIPELINE_VERSION = 7
+STATE_PIPELINE_VERSION = 8
+STATE_RESOLVER_MAX_TOKENS = 16384
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -1029,7 +1030,7 @@ Constraints:
         images=images or None,
         guided_json=not bool(images),
         operation="state_observation_resolve",
-        max_tokens=2048,
+        max_tokens=STATE_RESOLVER_MAX_TOKENS,
         split_oversized_task=True,
     )
 
@@ -1133,6 +1134,7 @@ def _resolve_state_batch_sequential(
         fingerprint = stable_hash(
             {
                 "state_pipeline_version": STATE_PIPELINE_VERSION,
+                "state_resolver_max_tokens": STATE_RESOLVER_MAX_TOKENS,
                 "episode": _resolver_episode_context(evidence, original, section),
                 "current": _compact_resolver_observation(original),
                 "symbols": compact_symbols,
