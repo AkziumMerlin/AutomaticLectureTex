@@ -1612,6 +1612,8 @@ Rules:
         operation="state_section_write",
         guided_json=guided_json,
         split_oversized_task=True,
+        temperature=float(orchestrator.config.state_section_writer_temperature),
+        thinking=bool(orchestrator.config.state_section_writer_thinking),
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
@@ -2176,6 +2178,10 @@ def run_knowledge_pipeline(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "state_section_writer_cache_version": STATE_SECTION_WRITER_CACHE_VERSION,
+                        "state_section_writer_policy": {
+                            "thinking": pipeline.config.notes.state_section_writer_thinking,
+                            "temperature": pipeline.config.notes.state_section_writer_temperature,
+                        },
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
                         "repaired_evidence": evidence_payload,
