@@ -96,7 +96,7 @@ class NotesConfig(BaseModel):
     linear_global_editor_conventions: list[str] = Field(default_factory=list, exclude=True)
     hierarchy_batch_episodes: int = Field(default=24, ge=2, le=100)
     episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
-    state_section_max_evidence_chars: int = Field(default=28000, ge=8000, le=120000)
+    state_section_max_evidence_chars: int = Field(default=100000, ge=8000, le=200000)
     state_section_raw_context_seconds: float = Field(default=90.0, ge=0.0, le=300.0)
     state_section_raw_evidence_chars: int = Field(default=16000, ge=2000, le=60000)
     state_observation_lookahead: int = Field(default=2, ge=0, le=4)
