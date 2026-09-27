@@ -97,6 +97,41 @@ def test_state_ir_fingerprint_depends_on_writer_cache_version(monkeypatch):
     assert before != after
 
 
+def test_hierarchy_fingerprint_ignores_writer_only_configuration():
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[],
+        episodes=[],
+    )
+    base_notes = NotesConfig(state_section_writer_temperature=0.7)
+    changed_writer = NotesConfig(state_section_writer_temperature=1.1)
+    changed_hierarchy = NotesConfig(
+        state_section_writer_temperature=1.1,
+        hierarchy_batch_episodes=base_notes.hierarchy_batch_episodes + 1,
+    )
+    llm_config = {"model": "test-model", "temperature": 1.0}
+
+    base = knowledge_pipeline_module._hierarchy_fingerprint(
+        kb,
+        llm_config=llm_config,
+        hierarchy_batch_episodes=base_notes.hierarchy_batch_episodes,
+    )
+    writer_only = knowledge_pipeline_module._hierarchy_fingerprint(
+        kb,
+        llm_config=llm_config,
+        hierarchy_batch_episodes=changed_writer.hierarchy_batch_episodes,
+    )
+    hierarchy_changed = knowledge_pipeline_module._hierarchy_fingerprint(
+        kb,
+        llm_config=llm_config,
+        hierarchy_batch_episodes=changed_hierarchy.hierarchy_batch_episodes,
+    )
+
+    assert base == writer_only
+    assert base != hierarchy_changed
+
+
 def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
     config_path = (
         Path(__file__).resolve().parents[1]
