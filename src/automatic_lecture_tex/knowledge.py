@@ -341,11 +341,17 @@ class KnowledgeOrchestrator:
         images: list[Path] | None = None,
         guided_json: bool = True,
         split_oversized_task: bool = False,
+        temperature: float | None = None,
+        thinking: bool | None = None,
     ):
         kwargs = {
             "operation": operation,
             "max_tokens": max_tokens,
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if thinking is not None:
+            kwargs["thinking"] = thinking
         # Keep text-only callers compatible with lightweight/test LLM adapters that predate
         # multimodal kwargs. Only the actual multimodal path needs these extra arguments.
         if images is not None:
@@ -361,15 +367,20 @@ class KnowledgeOrchestrator:
                 **kwargs,
             )
         except TypeError as exc:
-            # Keep lightweight/test adapters that predate semantic splitting usable. The production
-            # robust client accepts this keyword; retry without it only for the exact legacy
-            # signature mismatch.
-            if (
-                split_oversized_task
-                and "split_oversized_task" in str(exc)
-                and "unexpected keyword" in str(exc)
-            ):
-                kwargs.pop("split_oversized_task", None)
+            # Keep lightweight/test adapters that predate optional structured-call controls usable.
+            # Production clients accept these keywords; legacy test doubles may not.
+            message = str(exc)
+            optional_keys = (
+                "split_oversized_task",
+                "temperature",
+                "thinking",
+            )
+            removed = False
+            for key in optional_keys:
+                if key in kwargs and key in message and "unexpected keyword" in message:
+                    kwargs.pop(key, None)
+                    removed = True
+            if removed:
                 return self.llm._structured(  # noqa: SLF001
                     prompt,
                     schema,
