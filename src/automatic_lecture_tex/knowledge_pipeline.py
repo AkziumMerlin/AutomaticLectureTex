@@ -42,6 +42,7 @@ from .knowledge import (
 from .llm import LectureModelClient, StructuredTaskTooLargeError
 from .media import copy_asset
 from .schemas import (
+    BlockType,
     ChunkNotes,
     EpisodeHierarchyPlan,
     EpisodeTrackingUpdate,
@@ -49,6 +50,8 @@ from .schemas import (
     LectureKnowledgeBase,
     LectureObservation,
     LectureOutline,
+    NoteBlock,
+    ObservationKind,
     OutlineSection,
     VisualEvidence,
     WindowObservations,
@@ -80,6 +83,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "episode_synthesis_max_evidence_chars",
     "episode_symbol_context_limit",
     "state_section_max_evidence_chars",
+    "state_section_assembly",
     "state_section_raw_context_seconds",
     "state_section_raw_evidence_chars",
     "state_section_writer_thinking",
@@ -1524,6 +1528,85 @@ def _state_section_batches(
     for index, payload in enumerate(batches):
         payload["batch"] = {"index": index, "count": len(batches)}
     return batches
+
+
+def _state_section_observations(
+    kb: LectureKnowledgeBase,
+    section: OutlineSection,
+) -> list[LectureObservation]:
+    episode_ids = set(section.episode_ids)
+    observation_ids = {
+        observation_id
+        for episode in kb.episodes
+        if episode.id in episode_ids
+        for observation_id in episode.observation_ids
+    }
+    selected = [
+        item
+        for item in kb.observations
+        if item.id in observation_ids or item.episode_id in episode_ids
+    ]
+    unique: dict[str, LectureObservation] = {}
+    for item in sorted(selected, key=lambda obs: (obs.start, obs.end, obs.id)):
+        unique.setdefault(item.id, item)
+    return list(unique.values())
+
+
+def _deterministic_text_block_type(kind: ObservationKind) -> BlockType:
+    return {
+        ObservationKind.DEFINITION: BlockType.DEFINITION,
+        ObservationKind.EXAMPLE: BlockType.EXAMPLE,
+        ObservationKind.REMARK: BlockType.REMARK,
+        ObservationKind.CORRECTION: BlockType.REMARK,
+        ObservationKind.RETRACTION: BlockType.REMARK,
+    }.get(kind, BlockType.PARAGRAPH)
+
+
+def _assemble_state_section_deterministically(
+    kb: LectureKnowledgeBase,
+    section: OutlineSection,
+) -> ChunkNotes:
+    """Render canonical repaired observations without another generative model pass."""
+
+    blocks: list[NoteBlock] = []
+    unresolved: list[str] = []
+    for observation in _state_section_observations(kb, section):
+        source_ids = [observation.id] if observation.id else []
+        text = observation.text.strip()
+        latex = (observation.latex or "").strip()
+
+        if observation.kind == ObservationKind.UNRESOLVED:
+            if text:
+                unresolved.append(text)
+            continue
+
+        # Keep the canonical prose literally. If the text is itself exactly the canonical
+        # formula, avoid rendering the same payload twice.
+        if text and text != latex:
+            blocks.append(
+                NoteBlock(
+                    type=_deterministic_text_block_type(observation.kind),
+                    latex=text,
+                    source_evidence_ids=source_ids,
+                )
+            )
+        if latex:
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.EQUATION,
+                    latex=latex,
+                    source_evidence_ids=source_ids,
+                )
+            )
+
+    return ChunkNotes(
+        chunk_id=section.id,
+        start=section.start,
+        end=section.end,
+        section_title=section.title.replace("$", ""),
+        blocks=blocks,
+        unresolved=list(dict.fromkeys(unresolved)),
+    )
 
 
 def _hierarchy_fingerprint(
