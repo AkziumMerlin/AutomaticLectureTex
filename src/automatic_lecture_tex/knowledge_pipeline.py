@@ -12,7 +12,6 @@ from pydantic import ValidationError
 
 from .chunking import chunk_transcript
 from .generated_notes import (
-    GeneratedChunkNotes,
     GeneratedObservationStatePatch,
     GeneratedStateSectionNotes,
 )
