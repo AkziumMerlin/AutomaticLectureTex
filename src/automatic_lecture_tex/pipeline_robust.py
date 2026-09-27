@@ -6,7 +6,7 @@ from . import pipeline as _base_pipeline
 from .asr import make_asr_backend
 from .episode_synthesis_resilient import EPISODE_SYNTHESIS_CACHE_VERSION
 from .gigaam_vad import VadGigaAMBackend
-from .knowledge_pipeline import STATE_PIPELINE_VERSION, STATE_SECTION_WRITER_CACHE_VERSION
+from .knowledge_pipeline import (\n    STATE_PIPELINE_VERSION,\n    STATE_SECTION_WRITER_CACHE_VERSION,\n)
 from .knowledge_pipeline_resilient import (
     KNOWLEDGE_CACHE_VERSION,
     run_knowledge_pipeline as resilient_knowledge_pipeline,
