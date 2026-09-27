@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -165,7 +166,13 @@ class GeneratedObservationStatePatch(BaseModel):
         if value is None:
             return None
         value = strip_control_chars(value).strip()
-        return value or None
+        if not value:
+            return None
+        if "$" in value or re.search(r"\\(?:[A-Za-z]+|[()[\]{}|])", value):
+            raise ValueError(
+                "semantic_text must be plain prose without LaTeX commands or math delimiters"
+            )
+        return value
 
     @field_validator("replacement_latex")
     @classmethod
