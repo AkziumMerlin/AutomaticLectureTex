@@ -232,6 +232,46 @@ class LectureModelClient:
             kwargs["presence_penalty"] = effective_presence_penalty
         return kwargs
 
+    def _extra_body_for_call(
+        self,
+        *,
+        thinking: bool | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+    ) -> dict:
+        try:
+            return self._extra_body(
+                thinking=thinking,
+                top_k=top_k,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+            )
+        except TypeError as exc:
+            # Lightweight tests and third-party adapters may monkeypatch the historical
+            # zero-argument helper. Production clients support the override-aware signature.
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self._extra_body()
+
+    def _sampling_kwargs_for_call(
+        self,
+        *,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._sampling_kwargs(
+                temperature=temperature,
+                top_p=top_p,
+                presence_penalty=presence_penalty,
+            )
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self._sampling_kwargs()
+
     def _response_format(self, schema: type[T]) -> dict:
         return {
             "type": "json_schema",
@@ -335,13 +375,13 @@ class LectureModelClient:
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                **self._sampling_kwargs(
+                **self._sampling_kwargs_for_call(
                     temperature=temperature,
                     top_p=top_p,
                     presence_penalty=presence_penalty,
                 ),
                 "max_tokens": current_max_tokens,
-                "extra_body": self._extra_body(
+                "extra_body": self._extra_body_for_call(
                     thinking=thinking,
                     top_k=top_k,
                     min_p=min_p,
