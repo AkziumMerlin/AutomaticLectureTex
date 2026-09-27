@@ -148,13 +148,13 @@ class GeneratedStateSectionNotes(BaseModel):
 class GeneratedObservationStatePatch(BaseModel):
     """One transactional update to the CURRENT observation.
 
-    The model never rewrites accepted history. keep carries no replacement payload;
-    replace atomically provides the new canonical value; reject removes CURRENT from
-    canonical synthesis when the local evidence cannot support it.
+    The model never rewrites accepted history. keep preserves the mathematical event while
+    providing clean semantic prose; replace provides corrected semantic prose/LaTeX; reject
+    removes CURRENT from canonical synthesis when local evidence cannot support it.
     """
 
     action: ObservationStateAction
-    replacement_text: str | None = None
+    semantic_text: str | None = None
     replacement_latex: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
