@@ -159,9 +159,9 @@ class GeneratedObservationStatePatch(BaseModel):
     reason: str = ""
     unresolved: list[str] = Field(default_factory=list)
 
-    @field_validator("replacement_text")
+    @field_validator("semantic_text")
     @classmethod
-    def sanitize_replacement_text(cls, value: str | None) -> str | None:
+    def sanitize_semantic_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         value = strip_control_chars(value).strip()
@@ -182,20 +182,20 @@ class GeneratedObservationStatePatch(BaseModel):
 
     @model_validator(mode="after")
     def validate_transaction(self) -> GeneratedObservationStatePatch:
+        if self.action in {"keep", "replace"} and self.semantic_text is None:
+            raise ValueError(f"{self.action} requires semantic_text")
         if self.action == "keep":
-            if self.replacement_text is not None or self.replacement_latex is not None:
-                raise ValueError("keep must not carry replacement fields")
+            if self.replacement_latex is not None:
+                raise ValueError("keep must not carry replacement_latex")
             return self
         if not self.reason.strip():
             raise ValueError("replace/reject must explain the local evidence conflict")
         if not self.evidence_refs:
             raise ValueError("replace/reject must cite local evidence refs")
-        if self.action == "replace" and self.replacement_text is None:
-            raise ValueError("replace requires replacement_text")
         if self.action == "reject" and (
-            self.replacement_text is not None or self.replacement_latex is not None
+            self.semantic_text is not None or self.replacement_latex is not None
         ):
-            raise ValueError("reject must not carry replacement fields")
+            raise ValueError("reject must not carry semantic/replacement fields")
         return self
 
 class GeneratedObservationResolution(BaseModel):
