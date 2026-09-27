@@ -1527,6 +1527,24 @@ def _state_section_batches(
     return batches
 
 
+def _hierarchy_fingerprint(
+    kb: LectureKnowledgeBase,
+    *,
+    llm_config: dict[str, Any],
+    hierarchy_batch_episodes: int,
+) -> str:
+    """Hierarchy depends on canonical KB + hierarchy LLM policy, not writer configuration."""
+
+    return stable_hash(
+        {
+            "kb": kb.model_dump(mode="json"),
+            "llm": llm_config,
+            "hierarchy_batch_episodes": hierarchy_batch_episodes,
+            "hierarchy_cache_version": HIERARCHY_CACHE_VERSION,
+        }
+    )
+
+
 def _writer_canonical_observations(evidence: dict[str, Any]) -> list[dict[str, Any]]:
     """Project repaired state to the only fields final prose synthesis is allowed to use."""
 
@@ -2054,13 +2072,10 @@ def run_knowledge_pipeline(
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
     hierarchy_path = work / "episode_hierarchy.json"
-    hierarchy_fingerprint = stable_hash(
-        {
-            "kb": kb.model_dump(mode="json"),
-            "llm": pipeline.config.llm.model_dump(mode="json"),
-            "hierarchy_batch_episodes": pipeline.config.notes.hierarchy_batch_episodes,
-            "hierarchy_cache_version": HIERARCHY_CACHE_VERSION,
-        }
+    hierarchy_fingerprint = _hierarchy_fingerprint(
+        kb,
+        llm_config=pipeline.config.llm.model_dump(mode="json"),
+        hierarchy_batch_episodes=pipeline.config.notes.hierarchy_batch_episodes,
     )
     hierarchy: EpisodeHierarchyPlan | None = None
     if hierarchy_path.exists() and not force:
