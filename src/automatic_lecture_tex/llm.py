@@ -176,10 +176,11 @@ class LectureModelClient:
                 self._usage[key] += value
                 per_operation[key] += value
 
-    def _extra_body(self) -> dict:
+    def _extra_body(self, *, thinking: bool | None = None) -> dict:
+        enable_thinking = self.config.thinking if thinking is None else thinking
         body: dict[str, Any] = {
             "chat_template_kwargs": {
-                "enable_thinking": self.config.thinking,
+                "enable_thinking": enable_thinking,
                 "preserve_thinking": False,
             }
         }
@@ -197,8 +198,11 @@ class LectureModelClient:
             body["repetition_penalty"] = repetition_penalty
         return body
 
-    def _sampling_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"temperature": self.config.temperature}
+    def _sampling_kwargs(self, *, temperature: float | None = None) -> dict[str, Any]:
+        effective_temperature = (
+            self.config.temperature if temperature is None else temperature
+        )
+        kwargs: dict[str, Any] = {"temperature": effective_temperature}
         top_p = getattr(self.config, "top_p", None)
         presence_penalty = getattr(self.config, "presence_penalty", None)
         if top_p is not None:
@@ -253,6 +257,8 @@ class LectureModelClient:
         *,
         guided_json: bool = True,
         operation: str = "structured",
+        temperature: float | None = None,
+        thinking: bool | None = None,
     ) -> T:
         schema_instruction = ""
         if not guided_json:
@@ -303,9 +309,9 @@ class LectureModelClient:
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                **self._sampling_kwargs(),
+                **self._sampling_kwargs(temperature=temperature),
                 "max_tokens": current_max_tokens,
-                "extra_body": self._extra_body(),
+                "extra_body": self._extra_body(thinking=thinking),
             }
             if guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)
