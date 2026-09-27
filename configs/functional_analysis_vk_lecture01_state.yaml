@@ -85,6 +85,14 @@ notes:
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
   state_section_max_evidence_chars: 100000
+  # Qwen3.8 official instruct/non-thinking sampling preset for final section synthesis.
+  state_section_writer_thinking: false
+  state_section_writer_temperature: 0.7
+  state_section_writer_top_p: 0.80
+  state_section_writer_top_k: 20
+  state_section_writer_min_p: 0.0
+  state_section_writer_presence_penalty: 1.5
+  state_section_writer_repetition_penalty: 1.0
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
