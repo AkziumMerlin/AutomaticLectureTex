@@ -343,6 +343,11 @@ class KnowledgeOrchestrator:
         split_oversized_task: bool = False,
         temperature: float | None = None,
         thinking: bool | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
     ):
         kwargs = {
             "operation": operation,
@@ -352,6 +357,16 @@ class KnowledgeOrchestrator:
             kwargs["temperature"] = temperature
         if thinking is not None:
             kwargs["thinking"] = thinking
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if top_k is not None:
+            kwargs["top_k"] = top_k
+        if min_p is not None:
+            kwargs["min_p"] = min_p
+        if presence_penalty is not None:
+            kwargs["presence_penalty"] = presence_penalty
+        if repetition_penalty is not None:
+            kwargs["repetition_penalty"] = repetition_penalty
         # Keep text-only callers compatible with lightweight/test LLM adapters that predate
         # multimodal kwargs. Only the actual multimodal path needs these extra arguments.
         if images is not None:
@@ -374,6 +389,11 @@ class KnowledgeOrchestrator:
                 "split_oversized_task",
                 "temperature",
                 "thinking",
+                "top_p",
+                "top_k",
+                "min_p",
+                "presence_penalty",
+                "repetition_penalty",
             )
             removed = False
             for key in optional_keys:
