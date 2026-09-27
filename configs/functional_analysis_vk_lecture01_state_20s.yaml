@@ -87,6 +87,8 @@ notes:
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
   state_section_max_evidence_chars: 100000
+  # Baseline: render repaired state directly without a final generative writer.
+  state_section_assembly: deterministic
   # Qwen3.8 official instruct/non-thinking sampling preset for final section synthesis.
   state_section_writer_thinking: false
   state_section_writer_temperature: 0.7

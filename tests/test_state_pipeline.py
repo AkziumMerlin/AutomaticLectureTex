@@ -337,6 +337,70 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
+def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
+    observations = [
+        LectureObservation(
+            id="obs_definition",
+            window_id="window_0",
+            start=0.0,
+            end=1.0,
+            kind=ObservationKind.DEFINITION,
+            text="Определение нормы функционала.",
+            latex=r"\|f\|=\sup_{\|x\|\le 1}|f(x)|",
+            source_status=SourceStatus.RECONSTRUCTED,
+            episode_id="episode_0",
+        ),
+        LectureObservation(
+            id="obs_formula",
+            window_id="window_1",
+            start=1.0,
+            end=2.0,
+            kind=ObservationKind.PROOF_STEP,
+            text="Разложим вектор.",
+            latex=r"x=\frac{f(x)}{f(z_f)}\,z_f+y,\qquad y\in\operatorname{Ker}f",
+            source_status=SourceStatus.RECONSTRUCTED,
+            episode_id="episode_0",
+        ),
+    ]
+    episode = SemanticEpisode(
+        id="episode_0",
+        title="Topic",
+        start=0.0,
+        end=2.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=[item.id for item in observations],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        episodes=[episode],
+    )
+    section = OutlineSection(
+        id="section_0",
+        title="Topic",
+        start=0.0,
+        end=2.0,
+        episode_ids=["episode_0"],
+    )
+
+    notes = knowledge_pipeline_module._assemble_state_section_deterministically(kb, section)
+
+    assert [block.type for block in notes.blocks] == [
+        "definition",
+        "equation",
+        "paragraph",
+        "equation",
+    ]
+    assert notes.blocks[1].latex == r"\|f\|=\sup_{\|x\|\le 1}|f(x)|"
+    assert (
+        notes.blocks[3].latex
+        == r"x=\frac{f(x)}{f(z_f)}\,z_f+y,\qquad y\in\operatorname{Ker}f"
+    )
+    assert notes.blocks[1].source_evidence_ids == ["obs_definition"]
+    assert notes.blocks[3].source_evidence_ids == ["obs_formula"]
+
+
 def test_state_writer_uses_minimal_canonical_prompt_and_host_provenance():
     class FakeOrchestrator:
         output_language = "ru"
@@ -1148,6 +1212,7 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.chunk_overlap_seconds == 5
     assert config.notes.visual_chunk_board_scan is True
     assert config.notes.state_section_max_evidence_chars == 100000
+    assert config.notes.state_section_assembly == "deterministic"
     assert config.notes.state_section_raw_context_seconds == 90
     assert config.notes.state_section_raw_evidence_chars == 16000
     assert config.notes.state_observation_lookahead == 2
