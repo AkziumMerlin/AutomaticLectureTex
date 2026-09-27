@@ -100,7 +100,12 @@ class NotesConfig(BaseModel):
     state_section_raw_context_seconds: float = Field(default=90.0, ge=0.0, le=300.0)
     state_section_raw_evidence_chars: int = Field(default=16000, ge=2000, le=60000)
     state_section_writer_thinking: bool = False
-    state_section_writer_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    state_section_writer_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    state_section_writer_top_p: float = Field(default=0.80, gt=0.0, le=1.0)
+    state_section_writer_top_k: int = Field(default=20, ge=1)
+    state_section_writer_min_p: float = Field(default=0.0, ge=0.0, le=1.0)
+    state_section_writer_presence_penalty: float = Field(default=1.5, ge=-2.0, le=2.0)
+    state_section_writer_repetition_penalty: float = Field(default=1.0, gt=0.0)
     state_observation_lookahead: int = Field(default=2, ge=0, le=4)
     state_observation_history: int = Field(default=4, ge=0, le=20)
     state_observation_max_raw_windows: int = Field(default=2, ge=1, le=8)
