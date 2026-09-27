@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 9
-STATE_SECTION_WRITER_CACHE_VERSION = 2
+STATE_SECTION_WRITER_CACHE_VERSION = 3
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -82,6 +82,8 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_section_max_evidence_chars",
     "state_section_raw_context_seconds",
     "state_section_raw_evidence_chars",
+    "state_section_writer_thinking",
+    "state_section_writer_temperature",
     "state_observation_lookahead",
     "state_observation_history",
     "state_observation_max_raw_windows",
