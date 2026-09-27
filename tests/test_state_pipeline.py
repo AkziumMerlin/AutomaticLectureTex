@@ -66,6 +66,37 @@ def test_state_ir_fingerprint_depends_on_state_pipeline_version(monkeypatch):
     assert before != after
 
 
+def test_state_ir_fingerprint_depends_on_writer_cache_version(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state.yaml"
+    )
+    config = load_config(config_path)
+    pipeline = pipeline_robust_module.Pipeline(config)
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[
+            TranscriptSegment(
+                id="seg_0",
+                start=0.0,
+                end=1.0,
+                text="test",
+            )
+        ],
+    )
+
+    before = pipeline._ir_fingerprint(transcript, {})
+    monkeypatch.setattr(
+        pipeline_robust_module,
+        "STATE_SECTION_WRITER_CACHE_VERSION",
+        pipeline_robust_module.STATE_SECTION_WRITER_CACHE_VERSION + 1,
+    )
+    after = pipeline._ir_fingerprint(transcript, {})
+
+    assert before != after
+
+
 def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
     config_path = (
         Path(__file__).resolve().parents[1]
@@ -317,12 +348,13 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
 
     assert "Sequentially resolved state evidence" in orchestrator.prompt
     assert "primary local hypothesis" in orchestrator.prompt
-    assert "CANONICAL MATH ATOM" in orchestrator.prompt
+    assert "actual canonical repaired LaTeX" in orchestrator.prompt
+    assert "MATHATOM" not in orchestrator.prompt
     assert "source_evidence_ids" in orchestrator.prompt
     assert r"f(z_f)\\neq0" not in orchestrator.prompt
 
 
-def test_writer_masks_and_restores_resolved_math_atoms():
+def test_writer_exposes_resolved_math_directly():
     evidence = {
         "observations": [
             {
@@ -335,26 +367,14 @@ def test_writer_masks_and_restores_resolved_math_atoms():
         ]
     }
 
-    masked, atoms = knowledge_pipeline_module._writer_evidence_with_math_atoms(evidence)
-    token = masked["observations"][0]["latex"]
+    visible = knowledge_pipeline_module._writer_evidence_with_resolved_math(evidence)
+    observation = visible["observations"][0]
 
-    assert token.startswith("MATHATOM__")
-    assert r"\sum" not in str(masked)
-    assert atoms[token] == r"x=\sum_{n=1}^{\infty} x_n"
-
-    generated = GeneratedChunkNotes(
-        section_title="Topic",
-        blocks=[
-            {
-                "type": "paragraph",
-                "latex": f"Получаем {token}.",
-                "source_evidence_ids": ["obs_formula"],
-            }
-        ],
-    )
-    knowledge_pipeline_module._restore_generated_math_atoms(generated, atoms)
-
-    assert generated.blocks[0].latex == r"Получаем $x=\sum_{n=1}^{\infty} x_n$."
+    assert observation["text"] == "resolved formula"
+    assert observation["latex"] == r"x=\sum_{n=1}^{\infty} x_n"
+    assert "resolved_text" not in observation
+    assert "resolved_latex" not in observation
+    assert "MATHATOM" not in str(visible)
 
 
 def test_state_patch_schema_is_transactional():

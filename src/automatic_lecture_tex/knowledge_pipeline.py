@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 9
+STATE_SECTION_WRITER_CACHE_VERSION = 2
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -1531,50 +1532,26 @@ def _state_section_batches(
     return batches
 
 
-def _math_atom_token(observation_id: str) -> str:
-    safe = "".join(char if char.isalnum() else "_" for char in observation_id)
-    return f"MATHATOM__{safe}__"
+def _writer_evidence_with_resolved_math(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Expose canonical repaired text and LaTeX directly to section synthesis."""
 
-
-def _writer_evidence_with_math_atoms(
-    evidence: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, str]]:
-    """Mask resolved LaTeX before prose synthesis so the LLM cannot rewrite it."""
-
-    masked = dict(evidence)
+    visible = dict(evidence)
     observations: list[dict[str, Any]] = []
-    atoms: dict[str, str] = {}
     for item in evidence.get("observations", []):
         observation = dict(item)
-        observation_id = str(observation.get("id", ""))
         resolved_text = str(
             observation.get("resolved_text") or observation.get("text") or ""
         ).strip()
-        resolved_latex = str(
-            observation.get("resolved_latex") or observation.get("latex") or ""
-        ).strip()
-        observation["text"] = resolved_text
+        if resolved_text:
+            observation["text"] = resolved_text
+        if "resolved_latex" in observation:
+            observation["latex"] = observation.get("resolved_latex")
         observation.pop("resolved_text", None)
         observation.pop("resolved_latex", None)
-        if resolved_latex and observation_id:
-            token = _math_atom_token(observation_id)
-            observation["latex"] = token
-            atoms[token] = resolved_latex
         observations.append(observation)
-    masked["observations"] = observations
-    return masked, atoms
+    visible["observations"] = observations
+    return visible
 
-
-def _restore_generated_math_atoms(
-    generated: GeneratedChunkNotes,
-    atoms: dict[str, str],
-) -> None:
-    for block in generated.blocks:
-        for token, atom_latex in atoms.items():
-            if token not in block.latex:
-                continue
-            replacement = atom_latex if str(block.type) == "equation" else f"${atom_latex}$"
-            block.latex = block.latex.replace(token, replacement)
 
 def _write_state_section_batch(
     orchestrator: KnowledgeOrchestrator,
@@ -1586,7 +1563,7 @@ def _write_state_section_batch(
     raw_evidence_context: list[dict[str, Any]] | None = None,
     guided_json: bool = True,
 ) -> ChunkNotes:
-    writer_evidence, math_atoms = _writer_evidence_with_math_atoms(evidence)
+    writer_evidence = _writer_evidence_with_resolved_math(evidence)
     prompt = f"""Write one contiguous part of a FINAL lecture-note section from a chronological
 state whose observations have already been resolved one-by-one against their local ASR/OCR evidence.
 
@@ -1606,13 +1583,13 @@ Rules:
 - Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
   their wording.
 - The mathematical content of a sequentially resolved observation is the primary local hypothesis.
-- A non-empty latex field is represented by an opaque token such as
-  MATHATOM__obs_window_0010_000__. The token is a CANONICAL MATH ATOM already resolved upstream.
-  If you use that mathematical statement, copy the token EXACTLY and bare, without dollar signs,
-  LaTeX commands, renaming, expansion, paraphrase, or translation. The host substitutes the exact
-  resolved LaTeX after this call.
-- Do not silently change a sign, coefficient, denominator, quantifier, membership, subscript, or
-  relation merely to make the exposition look more familiar.
+- A non-empty `latex` field contains the actual canonical repaired LaTeX from upstream state
+  reconstruction. Read it directly when interpreting the observation; it is not an opaque token.
+- You may compose neighboring observations into coherent prose and ordinary LaTeX exposition, but
+  when restating a supplied formula preserve its mathematical content, variable names, signs,
+  coefficients, denominators, quantifiers, memberships, subscripts and relation signs.
+- Never replace supplied mathematics with placeholders, UUIDs, dummy symbols, or abbreviated marker
+  strings.
 - You may still correct a resolved reading if it directly contradicts another supplied resolved fact
   or an elementary consequence of established context. Log every such semantic change in
   corrections. Do not emit no-op corrections.
@@ -1634,7 +1611,6 @@ Rules:
         guided_json=guided_json,
         split_oversized_task=True,
     )
-    _restore_generated_math_atoms(generated, math_atoms)
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
     notes.start = section.start
@@ -2197,6 +2173,7 @@ def run_knowledge_pipeline(
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
+                        "state_section_writer_cache_version": STATE_SECTION_WRITER_CACHE_VERSION,
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
                         "repaired_evidence": evidence_payload,
