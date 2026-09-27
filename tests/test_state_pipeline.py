@@ -548,6 +548,46 @@ def test_state_patch_schema_is_transactional():
         )
 
 
+def test_state_patch_keep_separates_semantic_text_from_audit_source():
+    original = {
+        "id": "obs_1",
+        "text": "ASR is degenerate; the board frame shows the Hahn--Banach statement.",
+        "latex": None,
+    }
+    patch = GeneratedObservationStatePatch(
+        action="keep",
+        semantic_text="Формулируется теорема Хана—Банаха.",
+        reason="Content is supported by the board; provenance stays audit-only.",
+    )
+
+    resolved, accepted, issue = knowledge_pipeline_module._apply_observation_state_patch(
+        original,
+        patch,
+        allowed_evidence_refs=set(),
+        direct_evidence_refs=set(),
+    )
+
+    assert accepted is True
+    assert issue is None
+    assert resolved["text"].startswith("ASR is degenerate")
+    assert resolved["semantic_text"] == "Формулируется теорема Хана—Банаха."
+    assert resolved["resolved_text"] == "Формулируется теорема Хана—Банаха."
+
+
+def test_semantic_text_rejects_latex_syntax():
+    with pytest.raises(ValueError):
+        GeneratedObservationStatePatch(
+            action="keep",
+            semantic_text=r"Пусть \\(x_n\\) сходится.",
+        )
+
+    with pytest.raises(ValueError):
+        GeneratedObservationStatePatch(
+            action="keep",
+            semantic_text=r"Используем \\frac{a}{b}.",
+        )
+
+
 def test_state_patch_replace_applies_without_similarity_gate():
     original = {
         "id": "obs_1",
