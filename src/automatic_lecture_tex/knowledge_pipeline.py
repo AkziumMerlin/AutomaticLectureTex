@@ -2051,21 +2051,13 @@ def run_knowledge_pipeline(
             make_lecture_state(kb).model_dump(mode="json"),
         )
 
-    kb_fingerprint = stable_hash(
-        {
-            "kb": kb.model_dump(mode="json"),
-            "notes": pipeline.config.notes.model_dump(mode="json"),
-            "llm": pipeline.config.llm.model_dump(mode="json"),
-            "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
-            "state_pipeline_version": STATE_PIPELINE_VERSION if state_mode else None,
-        }
-    )
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
     hierarchy_path = work / "episode_hierarchy.json"
     hierarchy_fingerprint = stable_hash(
         {
-            "kb_fingerprint": kb_fingerprint,
+            "kb": kb.model_dump(mode="json"),
+            "llm": pipeline.config.llm.model_dump(mode="json"),
             "hierarchy_batch_episodes": pipeline.config.notes.hierarchy_batch_episodes,
             "hierarchy_cache_version": HIERARCHY_CACHE_VERSION,
         }
@@ -2116,7 +2108,6 @@ def run_knowledge_pipeline(
 
     if state_mode:
         note_sections: list[ChunkNotes] = []
-        outline_context = _state_outline_context(outline)
         for section in outline.sections:
             evidence_batches = _state_section_batches(
                 kb,
@@ -2128,6 +2119,8 @@ def run_knowledge_pipeline(
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
+                writer_observations = _writer_canonical_observations(evidence_payload)
+                writer_previous_tail = _writer_previous_tail(previous_context)
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
@@ -2145,10 +2138,9 @@ def run_knowledge_pipeline(
                                 pipeline.config.notes.state_section_writer_repetition_penalty
                             ),
                         },
-                        "section": section.model_dump(mode="json"),
-                        "outline_context": outline_context,
-                        "repaired_evidence": evidence_payload,
-                        "previous_context": previous_context,
+                        "section_title": section.title,
+                        "canonical_observations": writer_observations,
+                        "previous_tail": writer_previous_tail,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
                 )
@@ -2169,13 +2161,7 @@ def run_knowledge_pipeline(
                     orchestrator,
                     section,
                     evidence_payload,
-                    outline_context=outline_context,
                     previous_context=previous_context,
-                    kb=kb,
-                    transcript=transcript,
-                    config=pipeline.config.notes,
-                    raw_window_index=None,
-                    raw_evidence_context=None,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
                 atomic_json_dump(
