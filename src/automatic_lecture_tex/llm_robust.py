@@ -150,6 +150,8 @@ class LectureModelClient(BaseLectureModelClient):
         guided_json: bool = True,
         operation: str = "structured",
         split_oversized_task: bool = False,
+        temperature: float | None = None,
+        thinking: bool | None = None,
     ) -> T:
         schema_instruction = "\nJSON schema:\n" + json.dumps(
             schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -205,9 +207,9 @@ class LectureModelClient(BaseLectureModelClient):
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                **self._sampling_kwargs(),
+                **self._sampling_kwargs(temperature=temperature),
                 "max_tokens": current_max_tokens,
-                "extra_body": self._extra_body(),
+                "extra_body": self._extra_body(thinking=thinking),
             }
             if use_guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)
