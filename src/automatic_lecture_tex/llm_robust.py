@@ -212,13 +212,13 @@ class LectureModelClient(BaseLectureModelClient):
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                **self._sampling_kwargs(
+                **self._sampling_kwargs_for_call(
                     temperature=temperature,
                     top_p=top_p,
                     presence_penalty=presence_penalty,
                 ),
                 "max_tokens": current_max_tokens,
-                "extra_body": self._extra_body(
+                "extra_body": self._extra_body_for_call(
                     thinking=thinking,
                     top_k=top_k,
                     min_p=min_p,
