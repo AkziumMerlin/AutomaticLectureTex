@@ -8,7 +8,6 @@ from automatic_lecture_tex import pipeline_robust as pipeline_robust_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
 from automatic_lecture_tex.generated_notes import (
-    GeneratedChunkNotes,
     GeneratedObservationStatePatch,
 )
 from automatic_lecture_tex.knowledge import make_lecture_state
