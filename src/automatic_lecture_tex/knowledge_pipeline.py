@@ -2077,11 +2077,36 @@ def run_knowledge_pipeline(
         llm_config=pipeline.config.llm.model_dump(mode="json"),
         hierarchy_batch_episodes=pipeline.config.notes.hierarchy_batch_episodes,
     )
+    # Accept the immediately preceding cache identity once so existing runs migrate without
+    # paying for another hierarchy LLM call. Future writer-only config changes use only the new
+    # dependency-minimal fingerprint above.
+    legacy_kb_fingerprint = stable_hash(
+        {
+            "kb": kb.model_dump(mode="json"),
+            "notes": pipeline.config.notes.model_dump(mode="json"),
+            "llm": pipeline.config.llm.model_dump(mode="json"),
+            "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
+            "state_pipeline_version": STATE_PIPELINE_VERSION if state_mode else None,
+        }
+    )
+    legacy_hierarchy_fingerprint = stable_hash(
+        {
+            "kb_fingerprint": legacy_kb_fingerprint,
+            "hierarchy_batch_episodes": pipeline.config.notes.hierarchy_batch_episodes,
+            "hierarchy_cache_version": HIERARCHY_CACHE_VERSION,
+        }
+    )
+
     hierarchy: EpisodeHierarchyPlan | None = None
+    cached_hierarchy_fingerprint: str | None = None
     if hierarchy_path.exists() and not force:
         try:
             payload = json.loads(hierarchy_path.read_text(encoding="utf-8"))
-            if payload.get("fingerprint") == hierarchy_fingerprint:
+            cached_hierarchy_fingerprint = str(payload.get("fingerprint") or "")
+            if cached_hierarchy_fingerprint in {
+                hierarchy_fingerprint,
+                legacy_hierarchy_fingerprint,
+            }:
                 hierarchy = EpisodeHierarchyPlan.model_validate(payload["hierarchy"])
         except (json.JSONDecodeError, KeyError, ValidationError):
             hierarchy = None
@@ -2089,6 +2114,14 @@ def run_knowledge_pipeline(
     hierarchy_started = time.perf_counter()
     if hierarchy is None:
         hierarchy = plan_episode_hierarchy_bounded(orchestrator, kb)
+        atomic_json_dump(
+            hierarchy_path,
+            {
+                "fingerprint": hierarchy_fingerprint,
+                "hierarchy": hierarchy.model_dump(mode="json"),
+            },
+        )
+    elif cached_hierarchy_fingerprint != hierarchy_fingerprint:
         atomic_json_dump(
             hierarchy_path,
             {
