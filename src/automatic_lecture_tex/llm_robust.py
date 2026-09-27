@@ -152,6 +152,11 @@ class LectureModelClient(BaseLectureModelClient):
         split_oversized_task: bool = False,
         temperature: float | None = None,
         thinking: bool | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
     ) -> T:
         schema_instruction = "\nJSON schema:\n" + json.dumps(
             schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -207,9 +212,18 @@ class LectureModelClient(BaseLectureModelClient):
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                **self._sampling_kwargs(temperature=temperature),
+                **self._sampling_kwargs(
+                    temperature=temperature,
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
+                ),
                 "max_tokens": current_max_tokens,
-                "extra_body": self._extra_body(thinking=thinking),
+                "extra_body": self._extra_body(
+                    thinking=thinking,
+                    top_k=top_k,
+                    min_p=min_p,
+                    repetition_penalty=repetition_penalty,
+                ),
             }
             if use_guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)
