@@ -1718,13 +1718,7 @@ def _write_state_section_batch_resilient(
     section: OutlineSection,
     evidence: dict[str, Any],
     *,
-    outline_context: list[dict[str, Any]],
     previous_context: list[dict[str, Any]],
-    kb: LectureKnowledgeBase,
-    transcript: Transcript,
-    config,
-    raw_window_index: list[dict[str, Any]] | None = None,
-    raw_evidence_context: list[dict[str, Any]] | None = None,
 ) -> ChunkNotes:
     """Recursively split final-writer work that cannot fit in one structured request."""
 
@@ -1733,9 +1727,7 @@ def _write_state_section_batch_resilient(
             orchestrator,
             section,
             evidence,
-            outline_context=outline_context,
             previous_context=previous_context,
-            raw_evidence_context=None,
         )
     except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
@@ -1766,12 +1758,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 left_section,
                 left_evidence,
-                outline_context=outline_context,
                 previous_context=previous_context,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             right_previous = [
                 *previous_context,
@@ -1781,12 +1768,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 right_section,
                 right_evidence,
-                outline_context=outline_context,
                 previous_context=right_previous,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             return _merge_state_section_batches(section, [left_notes, right_notes])
 
@@ -1806,12 +1788,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 section,
                 left_evidence,
-                outline_context=outline_context,
                 previous_context=previous_context,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             right_previous = [
                 *previous_context,
@@ -1821,12 +1798,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 section,
                 right_evidence,
-                outline_context=outline_context,
                 previous_context=right_previous,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             return _merge_state_section_batches(section, [left_notes, right_notes])
 
@@ -1859,9 +1831,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 section,
                 evidence,
-                outline_context=outline_context,
                 previous_context=previous_context,
-                raw_evidence_context=None,
                 guided_json=False,
             )
         except (
