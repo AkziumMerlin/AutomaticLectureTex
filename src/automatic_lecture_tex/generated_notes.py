@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -147,25 +148,31 @@ class GeneratedStateSectionNotes(BaseModel):
 class GeneratedObservationStatePatch(BaseModel):
     """One transactional update to the CURRENT observation.
 
-    The model never rewrites accepted history. keep carries no replacement payload;
-    replace atomically provides the new canonical value; reject removes CURRENT from
-    canonical synthesis when the local evidence cannot support it.
+    The model never rewrites accepted history. keep preserves the mathematical event while
+    providing clean semantic prose; replace provides corrected semantic prose/LaTeX; reject
+    removes CURRENT from canonical synthesis when local evidence cannot support it.
     """
 
     action: ObservationStateAction
-    replacement_text: str | None = None
+    semantic_text: str | None = None
     replacement_latex: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     reason: str = ""
     unresolved: list[str] = Field(default_factory=list)
 
-    @field_validator("replacement_text")
+    @field_validator("semantic_text")
     @classmethod
-    def sanitize_replacement_text(cls, value: str | None) -> str | None:
+    def sanitize_semantic_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         value = strip_control_chars(value).strip()
-        return value or None
+        if not value:
+            return None
+        if "$" in value or re.search(r"\\(?:[A-Za-z]+|[()[\]{}|])", value):
+            raise ValueError(
+                "semantic_text must be plain prose without LaTeX commands or math delimiters"
+            )
+        return value
 
     @field_validator("replacement_latex")
     @classmethod
@@ -182,20 +189,20 @@ class GeneratedObservationStatePatch(BaseModel):
 
     @model_validator(mode="after")
     def validate_transaction(self) -> GeneratedObservationStatePatch:
+        if self.action in {"keep", "replace"} and self.semantic_text is None:
+            raise ValueError(f"{self.action} requires semantic_text")
         if self.action == "keep":
-            if self.replacement_text is not None or self.replacement_latex is not None:
-                raise ValueError("keep must not carry replacement fields")
+            if self.replacement_latex is not None:
+                raise ValueError("keep must not carry replacement_latex")
             return self
         if not self.reason.strip():
             raise ValueError("replace/reject must explain the local evidence conflict")
         if not self.evidence_refs:
             raise ValueError("replace/reject must cite local evidence refs")
-        if self.action == "replace" and self.replacement_text is None:
-            raise ValueError("replace requires replacement_text")
         if self.action == "reject" and (
-            self.replacement_text is not None or self.replacement_latex is not None
+            self.semantic_text is not None or self.replacement_latex is not None
         ):
-            raise ValueError("reject must not carry replacement fields")
+            raise ValueError("reject must not carry semantic/replacement fields")
         return self
 
 class GeneratedObservationResolution(BaseModel):
