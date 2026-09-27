@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
-STATE_PIPELINE_VERSION = 9
+STATE_PIPELINE_VERSION = 10
 STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
@@ -585,7 +585,12 @@ def _compact_resolver_observation(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(item.get("id", "")),
         "kind": str(item.get("kind", "")),
-        "text": str(item.get("resolved_text") or item.get("text") or "").strip(),
+        "text": str(
+            item.get("semantic_text")
+            or item.get("resolved_text")
+            or item.get("text")
+            or ""
+        ).strip(),
         "latex": (
             str(item.get("resolved_latex") or item.get("latex") or "").strip()
             or None
@@ -860,6 +865,7 @@ def _apply_observation_state_patch(
     resolved = dict(original)
     original_text = str(original.get("text") or "").strip()
     original_latex = str(original.get("latex") or "").strip() or None
+    semantic_text = str(patch.semantic_text or "").strip()
     resolved["sequentially_resolved"] = True
     resolved["state_patch_action"] = patch.action
 
@@ -868,6 +874,7 @@ def _apply_observation_state_patch(
     def mark_unresolved(issue: str) -> tuple[dict[str, Any], bool, str]:
         resolved["resolution_status"] = "unresolved"
         resolved["resolution_accepted"] = False
+        resolved["semantic_text"] = None
         resolved["resolved_text"] = None
         resolved["resolved_latex"] = None
         return resolved, False, issue
@@ -875,7 +882,9 @@ def _apply_observation_state_patch(
     if patch.action == "keep":
         resolved["resolution_status"] = "kept"
         resolved["resolution_accepted"] = True
-        resolved["resolved_text"] = original_text
+        resolved["semantic_text"] = semantic_text
+        # resolved_text is retained as a compatibility alias for cached/debug tooling.
+        resolved["resolved_text"] = semantic_text
         resolved["resolved_latex"] = original_latex
         return resolved, True, None
 
@@ -891,11 +900,11 @@ def _apply_observation_state_patch(
     if patch.action == "reject":
         resolved["resolution_status"] = "rejected"
         resolved["resolution_accepted"] = True
+        resolved["semantic_text"] = None
         resolved["resolved_text"] = None
         resolved["resolved_latex"] = None
         return resolved, True, None
 
-    replacement_text = str(patch.replacement_text or "").strip()
     replacement_latex = (
         str(patch.replacement_latex).strip()
         if patch.replacement_latex is not None
@@ -906,17 +915,19 @@ def _apply_observation_state_patch(
             "State patch removed an existing formula instead of replacing or rejecting CURRENT."
         )
 
-    if replacement_text == original_text and replacement_latex == original_latex:
+    if replacement_latex == original_latex:
         resolved["state_patch_action"] = "keep"
         resolved["resolution_status"] = "kept"
         resolved["resolution_accepted"] = True
-        resolved["resolved_text"] = original_text
+        resolved["semantic_text"] = semantic_text
+        resolved["resolved_text"] = semantic_text
         resolved["resolved_latex"] = original_latex
         return resolved, True, None
 
     resolved["resolution_status"] = "replaced"
     resolved["resolution_accepted"] = True
-    resolved["resolved_text"] = replacement_text
+    resolved["semantic_text"] = semantic_text
+    resolved["resolved_text"] = semantic_text
     resolved["resolved_latex"] = replacement_latex
     return resolved, True, None
 
@@ -1002,13 +1013,23 @@ Attached images:
 {image_index or "No local image available."}
 
 Choose exactly one action:
-- keep: CURRENT is a faithful canonical event. Do not return replacement fields.
+- keep: CURRENT is mathematically/semantically faithful. Return semantic_text as the clean lecture
+  statement that should appear in final notes. Do not return replacement_latex.
 - replace: CURRENT has a concrete semantic error and direct local evidence supports a corrected
-  canonical event. Return replacement_text; if CURRENT has latex, return the COMPLETE corrected
+  canonical event. Return clean semantic_text and, if CURRENT has latex, the COMPLETE corrected
   replacement_latex. Cite evidence_refs from the allowed catalog.
 - reject: CURRENT itself is unsupported/contradictory and no defensible replacement is locally
-  evidenced. Cite evidence_refs. The host will keep the source artifact for audit but suppress this
-  event from canonical synthesis.
+  evidenced. Cite evidence_refs. The host keeps source/audit artifacts but suppresses this event.
+
+semantic_text contract:
+- It contains ONLY lecture content suitable for final notes, not an explanation of reconstruction.
+- Never mention ASR, OCR, frames, board visibility, crops, confidence, evidence refs, or phrases such
+  as "recovered from the board", "audio is degenerate", "the frame shows", etc.
+- Put all such diagnostic reasoning in reason/unresolved, never semantic_text.
+- Keep it concise: normally one sentence or a short mathematical statement.
+- Do not duplicate the full displayed formula in semantic_text when latex already carries it.
+- Do not emit LaTeX delimiters or commands in semantic_text; mathematical formulas belong in latex.
+- Cleaning provenance language out of CURRENT does not count as a semantic correction.
 
 Constraints:
 - replace/reject MUST cite at least one direct CURRENT sensor ref: asr:, ocr:, visual_latex:, or
@@ -1166,6 +1187,7 @@ def _resolve_state_batch_sequential(
             except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
                 patch = GeneratedObservationStatePatch(
                     action="keep",
+                    semantic_text=str(original.get("text") or "").strip() or "Неразрешённое утверждение.",
                     unresolved=[
                         "State repair failed for "
                         f"{observation_id}: {type(exc).__name__}: {exc}"
@@ -1247,7 +1269,12 @@ def _canonical_observation_from_repaired(item: dict[str, Any]) -> LectureObserva
         for name in LectureObservation.model_fields
         if name in item
     }
-    payload["text"] = str(item.get("resolved_text") or item.get("text") or "").strip()
+    payload["text"] = str(
+        item.get("semantic_text")
+        or item.get("resolved_text")
+        or item.get("text")
+        or ""
+    ).strip()
     payload["latex"] = (
         item.get("resolved_latex")
         if "resolved_latex" in item
@@ -1632,7 +1659,12 @@ def _writer_canonical_observations(evidence: dict[str, Any]) -> list[dict[str, A
 
     observations: list[dict[str, Any]] = []
     for item in evidence.get("observations", []):
-        text = str(item.get("resolved_text") or item.get("text") or "").strip()
+        text = str(
+            item.get("semantic_text")
+            or item.get("resolved_text")
+            or item.get("text")
+            or ""
+        ).strip()
         latex = (
             item.get("resolved_latex")
             if "resolved_latex" in item
