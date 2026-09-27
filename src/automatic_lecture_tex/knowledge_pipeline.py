@@ -1619,6 +1619,11 @@ Rules:
         split_oversized_task=True,
         temperature=float(orchestrator.config.state_section_writer_temperature),
         thinking=bool(orchestrator.config.state_section_writer_thinking),
+        top_p=float(orchestrator.config.state_section_writer_top_p),
+        top_k=int(orchestrator.config.state_section_writer_top_k),
+        min_p=float(orchestrator.config.state_section_writer_min_p),
+        presence_penalty=float(orchestrator.config.state_section_writer_presence_penalty),
+        repetition_penalty=float(orchestrator.config.state_section_writer_repetition_penalty),
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
@@ -2186,6 +2191,15 @@ def run_knowledge_pipeline(
                         "state_section_writer_policy": {
                             "thinking": pipeline.config.notes.state_section_writer_thinking,
                             "temperature": pipeline.config.notes.state_section_writer_temperature,
+                            "top_p": pipeline.config.notes.state_section_writer_top_p,
+                            "top_k": pipeline.config.notes.state_section_writer_top_k,
+                            "min_p": pipeline.config.notes.state_section_writer_min_p,
+                            "presence_penalty": (
+                                pipeline.config.notes.state_section_writer_presence_penalty
+                            ),
+                            "repetition_penalty": (
+                                pipeline.config.notes.state_section_writer_repetition_penalty
+                            ),
                         },
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
