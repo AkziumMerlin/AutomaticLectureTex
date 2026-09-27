@@ -520,13 +520,13 @@ def test_writer_projects_only_canonical_observation_fields():
 
 
 def test_state_patch_schema_is_transactional():
-    keep = GeneratedObservationStatePatch(action="keep")
-    assert keep.replacement_text is None
+    keep = GeneratedObservationStatePatch(action="keep", semantic_text="clean statement")
+    assert keep.semantic_text == "clean statement"
     assert keep.evidence_refs == []
 
     replace = GeneratedObservationStatePatch(
         action="replace",
-        replacement_text="correct",
+        semantic_text="correct",
         replacement_latex=r"f(z_f)\neq0",
         evidence_refs=["ocr:crop_1"],
         reason="visible formula",
@@ -535,9 +535,12 @@ def test_state_patch_schema_is_transactional():
     assert replace.replacement_latex == r"f(z_f)\neq0"
 
     with pytest.raises(ValueError):
+        GeneratedObservationStatePatch(action="keep")
+
+    with pytest.raises(ValueError):
         GeneratedObservationStatePatch(
             action="replace",
-            replacement_text="correct",
+            semantic_text="correct",
             replacement_latex=r"f(z_f)\neq0",
             reason="missing provenance",
         )
@@ -551,7 +554,7 @@ def test_state_patch_replace_applies_without_similarity_gate():
     }
     patch = GeneratedObservationStatePatch(
         action="replace",
-        replacement_text="nonzero denominator",
+        semantic_text="nonzero denominator",
         replacement_latex=r"f(z_f)\neq0",
         evidence_refs=["visual:crop:crop_1", "history:obs_0"],
         reason="crop visibly contains neq",
@@ -568,6 +571,7 @@ def test_state_patch_replace_applies_without_similarity_gate():
     assert issue is None
     assert resolved["text"] == "old prose"
     assert resolved["latex"] == r"f(z_f)=0"
+    assert resolved["semantic_text"] == "nonzero denominator"
     assert resolved["resolved_text"] == "nonzero denominator"
     assert resolved["resolved_latex"] == r"f(z_f)\neq0"
     assert resolved["resolution_status"] == "replaced"
@@ -577,7 +581,7 @@ def test_state_patch_cannot_change_state_from_history_only():
     original = {"id": "obs_1", "text": "claim", "latex": r"x=y"}
     patch = GeneratedObservationStatePatch(
         action="replace",
-        replacement_text="different claim",
+        semantic_text="different claim",
         replacement_latex=r"x\neq y",
         evidence_refs=["history:obs_0"],
         reason="history disagrees",
@@ -593,6 +597,8 @@ def test_state_patch_cannot_change_state_from_history_only():
     assert accepted is False
     assert "direct local evidence" in issue
     assert resolved["resolution_status"] == "unresolved"
+    assert resolved["semantic_text"] is None
+    assert resolved["semantic_text"] is None
     assert resolved["resolved_text"] is None
     assert resolved["resolved_latex"] is None
 
@@ -746,7 +752,9 @@ def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path)
     assert "resolved_history_6" in orchestrator.prompt
     assert "resolved_history_9" in orchestrator.prompt
     assert "visual:crop:crop_exact" in orchestrator.prompt
-    assert len(orchestrator.prompt) < 9000
+    assert "semantic_text contract" in orchestrator.prompt
+    assert "Never mention ASR, OCR, frames, board visibility" in orchestrator.prompt
+    assert len(orchestrator.prompt) < 10000
 
 
 def test_resolver_raw_prompt_does_not_leak_visual_paths(tmp_path):
@@ -889,14 +897,14 @@ def test_sequential_state_patches_use_accepted_history_without_mutating_source(t
             if len(prompts) == 1:
                 return GeneratedObservationStatePatch(
                     action="replace",
-                    replacement_text="First resolved",
+                    semantic_text="First resolved",
                     replacement_latex=r"f(z_f)\neq0",
                     evidence_refs=["ocr:ocr_1"],
                     reason="direct OCR",
                 )
             return GeneratedObservationStatePatch(
                 action="replace",
-                replacement_text="Second resolved",
+                semantic_text="Second resolved",
                 replacement_latex=r"y=x-\frac{f(x)}{f(z_f)}z_f",
                 evidence_refs=["ocr:ocr_2"],
                 reason="direct OCR",
