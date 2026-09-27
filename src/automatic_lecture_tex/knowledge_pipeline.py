@@ -2238,73 +2238,79 @@ def run_knowledge_pipeline(
 
     if state_mode:
         note_sections: list[ChunkNotes] = []
-        for section in outline.sections:
-            evidence_batches = _state_section_batches(
-                kb,
-                section,
-                transcript,
-                pipeline.config.notes,
-            )
-            state_section_batches_total += len(evidence_batches)
-            generated_batches: list[ChunkNotes] = []
-            for batch_index, evidence_payload in enumerate(evidence_batches):
-                previous_context = previous_block_context(generated_batches)
-                writer_observations = _writer_canonical_observations(evidence_payload)
-                writer_previous_tail = _writer_previous_tail(previous_context)
-                fingerprint = stable_hash(
-                    {
-                        "state_pipeline_version": STATE_PIPELINE_VERSION,
-                        "state_section_writer_cache_version": STATE_SECTION_WRITER_CACHE_VERSION,
-                        "state_section_writer_policy": {
-                            "thinking": pipeline.config.notes.state_section_writer_thinking,
-                            "temperature": pipeline.config.notes.state_section_writer_temperature,
-                            "top_p": pipeline.config.notes.state_section_writer_top_p,
-                            "top_k": pipeline.config.notes.state_section_writer_top_k,
-                            "min_p": pipeline.config.notes.state_section_writer_min_p,
-                            "presence_penalty": (
-                                pipeline.config.notes.state_section_writer_presence_penalty
-                            ),
-                            "repetition_penalty": (
-                                pipeline.config.notes.state_section_writer_repetition_penalty
-                            ),
-                        },
-                        "section_title": section.title,
-                        "canonical_observations": writer_observations,
-                        "previous_tail": writer_previous_tail,
-                        "llm": pipeline.config.llm.model_dump(mode="json"),
-                    }
-                )
-                path = (
-                    work
-                    / "state_section_batches"
-                    / section.id
-                    / f"batch_{batch_index:03d}.json"
-                )
-                notes = None if force else _load_episode_batch(path, fingerprint)
-                if notes is not None:
-                    state_section_cache_hits += 1
-                    generated_batches.append(notes)
-                    continue
-
-                started = time.perf_counter()
-                notes = _write_state_section_batch_resilient(
-                    orchestrator,
+        if pipeline.config.notes.state_section_assembly == "deterministic":
+            note_sections = [
+                _assemble_state_section_deterministically(kb, section)
+                for section in outline.sections
+            ]
+        else:
+            for section in outline.sections:
+                evidence_batches = _state_section_batches(
+                    kb,
                     section,
-                    evidence_payload,
-                    previous_context=previous_context,
+                    transcript,
+                    pipeline.config.notes,
                 )
-                state_synthesis_seconds += time.perf_counter() - started
-                atomic_json_dump(
-                    path,
-                    {
-                        "fingerprint": fingerprint,
-                        "repaired_evidence": evidence_payload,
-                        "notes": notes.model_dump(mode="json"),
-                    },
-                )
-                generated_batches.append(notes)
+                state_section_batches_total += len(evidence_batches)
+                generated_batches: list[ChunkNotes] = []
+                for batch_index, evidence_payload in enumerate(evidence_batches):
+                    previous_context = previous_block_context(generated_batches)
+                    writer_observations = _writer_canonical_observations(evidence_payload)
+                    writer_previous_tail = _writer_previous_tail(previous_context)
+                    fingerprint = stable_hash(
+                        {
+                            "state_pipeline_version": STATE_PIPELINE_VERSION,
+                            "state_section_writer_cache_version": STATE_SECTION_WRITER_CACHE_VERSION,
+                            "state_section_writer_policy": {
+                                "thinking": pipeline.config.notes.state_section_writer_thinking,
+                                "temperature": pipeline.config.notes.state_section_writer_temperature,
+                                "top_p": pipeline.config.notes.state_section_writer_top_p,
+                                "top_k": pipeline.config.notes.state_section_writer_top_k,
+                                "min_p": pipeline.config.notes.state_section_writer_min_p,
+                                "presence_penalty": (
+                                    pipeline.config.notes.state_section_writer_presence_penalty
+                                ),
+                                "repetition_penalty": (
+                                    pipeline.config.notes.state_section_writer_repetition_penalty
+                                ),
+                            },
+                            "section_title": section.title,
+                            "canonical_observations": writer_observations,
+                            "previous_tail": writer_previous_tail,
+                            "llm": pipeline.config.llm.model_dump(mode="json"),
+                        }
+                    )
+                    path = (
+                        work
+                        / "state_section_batches"
+                        / section.id
+                        / f"batch_{batch_index:03d}.json"
+                    )
+                    notes = None if force else _load_episode_batch(path, fingerprint)
+                    if notes is not None:
+                        state_section_cache_hits += 1
+                        generated_batches.append(notes)
+                        continue
 
-            note_sections.append(_merge_state_section_batches(section, generated_batches))
+                    started = time.perf_counter()
+                    notes = _write_state_section_batch_resilient(
+                        orchestrator,
+                        section,
+                        evidence_payload,
+                        previous_context=previous_context,
+                    )
+                    state_synthesis_seconds += time.perf_counter() - started
+                    atomic_json_dump(
+                        path,
+                        {
+                            "fingerprint": fingerprint,
+                            "repaired_evidence": evidence_payload,
+                            "notes": notes.model_dump(mode="json"),
+                        },
+                    )
+                    generated_batches.append(notes)
+
+                note_sections.append(_merge_state_section_batches(section, generated_batches))
 
         if state_repair_unresolved and note_sections:
             note_sections[-1].unresolved = list(
@@ -2462,6 +2468,9 @@ def run_knowledge_pipeline(
             "episode_validation_seconds": round(episode_validation_seconds, 3),
             "state_resolution_seconds": round(state_resolution_seconds, 3),
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
+            "state_section_assembly": (
+                pipeline.config.notes.state_section_assembly if state_mode else None
+            ),
             "total_seconds": round(time.perf_counter() - run_started, 3),
             "windows_total": len(chunks),
             "windows_processed": processed_windows,
