@@ -176,36 +176,101 @@ class LectureModelClient:
                 self._usage[key] += value
                 per_operation[key] += value
 
-    def _extra_body(self) -> dict:
+    def _extra_body(
+        self,
+        *,
+        thinking: bool | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+    ) -> dict:
+        enable_thinking = self.config.thinking if thinking is None else thinking
         body: dict[str, Any] = {
             "chat_template_kwargs": {
-                "enable_thinking": self.config.thinking,
+                "enable_thinking": enable_thinking,
                 "preserve_thinking": False,
             }
         }
         reasoning_effort = getattr(self.config, "reasoning_effort", None)
-        top_k = getattr(self.config, "top_k", None)
-        min_p = getattr(self.config, "min_p", None)
-        repetition_penalty = getattr(self.config, "repetition_penalty", None)
-        if reasoning_effort is not None:
+        effective_top_k = getattr(self.config, "top_k", None) if top_k is None else top_k
+        effective_min_p = getattr(self.config, "min_p", None) if min_p is None else min_p
+        effective_repetition_penalty = (
+            getattr(self.config, "repetition_penalty", None)
+            if repetition_penalty is None
+            else repetition_penalty
+        )
+        if enable_thinking and reasoning_effort is not None:
             body["reasoning_effort"] = reasoning_effort
-        if top_k is not None:
-            body["top_k"] = top_k
-        if min_p is not None:
-            body["min_p"] = min_p
-        if repetition_penalty is not None:
-            body["repetition_penalty"] = repetition_penalty
+        if effective_top_k is not None:
+            body["top_k"] = effective_top_k
+        if effective_min_p is not None:
+            body["min_p"] = effective_min_p
+        if effective_repetition_penalty is not None:
+            body["repetition_penalty"] = effective_repetition_penalty
         return body
 
-    def _sampling_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"temperature": self.config.temperature}
-        top_p = getattr(self.config, "top_p", None)
-        presence_penalty = getattr(self.config, "presence_penalty", None)
-        if top_p is not None:
-            kwargs["top_p"] = top_p
-        if presence_penalty is not None:
-            kwargs["presence_penalty"] = presence_penalty
+    def _sampling_kwargs(
+        self,
+        *,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+    ) -> dict[str, Any]:
+        effective_temperature = (
+            self.config.temperature if temperature is None else temperature
+        )
+        effective_top_p = getattr(self.config, "top_p", None) if top_p is None else top_p
+        effective_presence_penalty = (
+            getattr(self.config, "presence_penalty", None)
+            if presence_penalty is None
+            else presence_penalty
+        )
+        kwargs: dict[str, Any] = {"temperature": effective_temperature}
+        if effective_top_p is not None:
+            kwargs["top_p"] = effective_top_p
+        if effective_presence_penalty is not None:
+            kwargs["presence_penalty"] = effective_presence_penalty
         return kwargs
+
+    def _extra_body_for_call(
+        self,
+        *,
+        thinking: bool | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+    ) -> dict:
+        try:
+            return self._extra_body(
+                thinking=thinking,
+                top_k=top_k,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+            )
+        except TypeError as exc:
+            # Lightweight tests and third-party adapters may monkeypatch the historical
+            # zero-argument helper. Production clients support the override-aware signature.
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self._extra_body()
+
+    def _sampling_kwargs_for_call(
+        self,
+        *,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._sampling_kwargs(
+                temperature=temperature,
+                top_p=top_p,
+                presence_penalty=presence_penalty,
+            )
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            return self._sampling_kwargs()
 
     def _response_format(self, schema: type[T]) -> dict:
         return {
@@ -253,6 +318,13 @@ class LectureModelClient:
         *,
         guided_json: bool = True,
         operation: str = "structured",
+        temperature: float | None = None,
+        thinking: bool | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
     ) -> T:
         schema_instruction = ""
         if not guided_json:
@@ -303,9 +375,18 @@ class LectureModelClient:
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                **self._sampling_kwargs(),
+                **self._sampling_kwargs_for_call(
+                    temperature=temperature,
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
+                ),
                 "max_tokens": current_max_tokens,
-                "extra_body": self._extra_body(),
+                "extra_body": self._extra_body_for_call(
+                    thinking=thinking,
+                    top_k=top_k,
+                    min_p=min_p,
+                    repetition_penalty=repetition_penalty,
+                ),
             }
             if guided_json:
                 request_kwargs["response_format"] = self._response_format(schema)

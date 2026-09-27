@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 9
-STATE_SECTION_WRITER_CACHE_VERSION = 2
+STATE_SECTION_WRITER_CACHE_VERSION = 3
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -82,6 +82,13 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_section_max_evidence_chars",
     "state_section_raw_context_seconds",
     "state_section_raw_evidence_chars",
+    "state_section_writer_thinking",
+    "state_section_writer_temperature",
+    "state_section_writer_top_p",
+    "state_section_writer_top_k",
+    "state_section_writer_min_p",
+    "state_section_writer_presence_penalty",
+    "state_section_writer_repetition_penalty",
     "state_observation_lookahead",
     "state_observation_history",
     "state_observation_max_raw_windows",
@@ -1610,6 +1617,13 @@ Rules:
         operation="state_section_write",
         guided_json=guided_json,
         split_oversized_task=True,
+        temperature=float(orchestrator.config.state_section_writer_temperature),
+        thinking=bool(orchestrator.config.state_section_writer_thinking),
+        top_p=float(orchestrator.config.state_section_writer_top_p),
+        top_k=int(orchestrator.config.state_section_writer_top_k),
+        min_p=float(orchestrator.config.state_section_writer_min_p),
+        presence_penalty=float(orchestrator.config.state_section_writer_presence_penalty),
+        repetition_penalty=float(orchestrator.config.state_section_writer_repetition_penalty),
     )
     notes = generated.to_chunk_notes()
     notes.chunk_id = section.id
@@ -2174,6 +2188,19 @@ def run_knowledge_pipeline(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
                         "state_section_writer_cache_version": STATE_SECTION_WRITER_CACHE_VERSION,
+                        "state_section_writer_policy": {
+                            "thinking": pipeline.config.notes.state_section_writer_thinking,
+                            "temperature": pipeline.config.notes.state_section_writer_temperature,
+                            "top_p": pipeline.config.notes.state_section_writer_top_p,
+                            "top_k": pipeline.config.notes.state_section_writer_top_k,
+                            "min_p": pipeline.config.notes.state_section_writer_min_p,
+                            "presence_penalty": (
+                                pipeline.config.notes.state_section_writer_presence_penalty
+                            ),
+                            "repetition_penalty": (
+                                pipeline.config.notes.state_section_writer_repetition_penalty
+                            ),
+                        },
                         "section": section.model_dump(mode="json"),
                         "outline_context": outline_context,
                         "repaired_evidence": evidence_payload,

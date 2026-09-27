@@ -309,10 +309,13 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
 
         def __init__(self):
             self.prompt = ""
+            self.kwargs = {}
+            self.config = NotesConfig()
 
         def _structured(self, prompt, schema, **kwargs):
-            del schema, kwargs
+            del schema
             self.prompt = prompt
+            self.kwargs = kwargs
             return GeneratedChunkNotes(section_title="Topic", blocks=[])
 
     orchestrator = FakeOrchestrator()
@@ -352,6 +355,13 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
     assert "MATHATOM" not in orchestrator.prompt
     assert "source_evidence_ids" in orchestrator.prompt
     assert r"f(z_f)\\neq0" not in orchestrator.prompt
+    assert orchestrator.kwargs["thinking"] is False
+    assert orchestrator.kwargs["temperature"] == 0.7
+    assert orchestrator.kwargs["top_p"] == 0.80
+    assert orchestrator.kwargs["top_k"] == 20
+    assert orchestrator.kwargs["min_p"] == 0.0
+    assert orchestrator.kwargs["presence_penalty"] == 1.5
+    assert orchestrator.kwargs["repetition_penalty"] == 1.0
 
 
 def test_writer_exposes_resolved_math_directly():
@@ -1078,6 +1088,13 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.llm.thinking is True
     assert config.llm.reasoning_effort == "medium"
     assert config.llm.temperature == 1.0
+    assert config.notes.state_section_writer_thinking is False
+    assert config.notes.state_section_writer_temperature == 0.7
+    assert config.notes.state_section_writer_top_p == 0.80
+    assert config.notes.state_section_writer_top_k == 20
+    assert config.notes.state_section_writer_min_p == 0.0
+    assert config.notes.state_section_writer_presence_penalty == 1.5
+    assert config.notes.state_section_writer_repetition_penalty == 1.0
     assert config.llm.top_p == 0.95
     assert config.llm.top_k == 20
     assert config.llm.min_p == 0.0
