@@ -88,6 +88,62 @@ class GeneratedNoteBlock(BaseModel):
 ObservationStateAction = Literal["keep", "replace", "reject"]
 
 
+class GeneratedStateSectionBlock(BaseModel):
+    """Minimal final-writer block: prose/LaTeX only, with provenance assigned host-side."""
+
+    type: GeneratedBlockType
+    title: str | None = None
+    latex: str = Field(min_length=1)
+
+    @field_validator("title")
+    @classmethod
+    def sanitize_title(cls, value: str | None) -> str | None:
+        return strip_control_chars(value) if value is not None else None
+
+    @field_validator("latex")
+    @classmethod
+    def sanitize_latex(cls, value: str) -> str:
+        value = strip_control_chars(value)
+        if not value.strip():
+            raise ValueError("generated state-section block must contain non-whitespace content")
+        return _reject_environments(
+            value,
+            _RENDERER_BLOCK_ENVIRONMENTS,
+            context="generated state-section blocks",
+        )
+
+    @model_validator(mode="after")
+    def normalize_equation_type(self) -> GeneratedStateSectionBlock:
+        if self.type != BlockType.EQUATION:
+            return self
+        _reject_environments(
+            self.latex,
+            _DISPLAY_MATH_ENVIRONMENTS,
+            context="generated state-section equation blocks",
+        )
+        normalized = normalize_math_unicode(self.latex)
+        if looks_like_math_fragment(normalized):
+            self.latex = normalized
+            return self
+        self.type = BlockType.PARAGRAPH
+        return self
+
+    def to_note_block(self, *, source_evidence_ids: list[str]) -> NoteBlock:
+        return NoteBlock(
+            type=self.type,
+            title=self.title,
+            latex=self.latex,
+            source_claim_ids=[],
+            source_evidence_ids=list(source_evidence_ids),
+        )
+
+
+class GeneratedStateSectionNotes(BaseModel):
+    """Minimal structured schema for synthesis from already-canonical state."""
+
+    blocks: list[GeneratedStateSectionBlock] = Field(default_factory=list)
+
+
 class GeneratedObservationStatePatch(BaseModel):
     """One transactional update to the CURRENT observation.
 

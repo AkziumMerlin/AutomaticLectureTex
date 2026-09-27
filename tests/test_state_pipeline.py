@@ -8,7 +8,6 @@ from automatic_lecture_tex import pipeline_robust as pipeline_robust_module
 from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
 from automatic_lecture_tex.generated_notes import (
-    GeneratedChunkNotes,
     GeneratedObservationStatePatch,
 )
 from automatic_lecture_tex.knowledge import make_lecture_state
@@ -95,6 +94,41 @@ def test_state_ir_fingerprint_depends_on_writer_cache_version(monkeypatch):
     after = pipeline._ir_fingerprint(transcript, {})
 
     assert before != after
+
+
+def test_hierarchy_fingerprint_ignores_writer_only_configuration():
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[],
+        episodes=[],
+    )
+    base_notes = NotesConfig(state_section_writer_temperature=0.7)
+    changed_writer = NotesConfig(state_section_writer_temperature=1.1)
+    changed_hierarchy = NotesConfig(
+        state_section_writer_temperature=1.1,
+        hierarchy_batch_episodes=base_notes.hierarchy_batch_episodes + 1,
+    )
+    llm_config = {"model": "test-model", "temperature": 1.0}
+
+    base = knowledge_pipeline_module._hierarchy_fingerprint(
+        kb,
+        llm_config=llm_config,
+        hierarchy_batch_episodes=base_notes.hierarchy_batch_episodes,
+    )
+    writer_only = knowledge_pipeline_module._hierarchy_fingerprint(
+        kb,
+        llm_config=llm_config,
+        hierarchy_batch_episodes=changed_writer.hierarchy_batch_episodes,
+    )
+    hierarchy_changed = knowledge_pipeline_module._hierarchy_fingerprint(
+        kb,
+        llm_config=llm_config,
+        hierarchy_batch_episodes=changed_hierarchy.hierarchy_batch_episodes,
+    )
+
+    assert base == writer_only
+    assert base != hierarchy_changed
 
 
 def test_functional_analysis_state_config_uses_qwen3_asr_and_change_sampling():
@@ -303,20 +337,28 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
-def test_state_writer_consumes_resolved_state_without_raw_ocr():
+def test_state_writer_uses_minimal_canonical_prompt_and_host_provenance():
     class FakeOrchestrator:
         output_language = "ru"
 
         def __init__(self):
             self.prompt = ""
             self.kwargs = {}
+            self.schema_name = ""
             self.config = NotesConfig()
 
         def _structured(self, prompt, schema, **kwargs):
-            del schema
             self.prompt = prompt
             self.kwargs = kwargs
-            return GeneratedChunkNotes(section_title="Topic", blocks=[])
+            self.schema_name = schema.__name__
+            return schema(
+                blocks=[
+                    {
+                        "type": "paragraph",
+                        "latex": "Связное изложение.",
+                    }
+                ]
+            )
 
     orchestrator = FakeOrchestrator()
     section = OutlineSection(
@@ -324,37 +366,57 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
         title="Topic",
         start=0.0,
         end=1.0,
-        episode_ids=[],
+        episode_ids=["episode_0"],
     )
-    raw_context = [
+    evidence = {
+        "claims": [{"id": "legacy_claim"}],
+        "symbols": [{"id": "legacy_symbol", "symbol": "x", "meaning": "legacy"}],
+        "episodes": [{"id": "episode_0", "observation_ids": ["obs_formula"]}],
+        "sequential_resolution": {"resolved_observation_ids": ["obs_formula"]},
+        "observations": [
+            {
+                "id": "obs_formula",
+                "kind": "equation",
+                "text": "source text mentioning OCR provenance",
+                "latex": r"x=bad",
+                "resolved_text": "canonical explanation",
+                "resolved_latex": r"x=\sum_{n=1}^{\infty} x_n",
+                "evidence_refs": ["ocr:frame_0"],
+                "source_status": "reconstructed",
+            }
+        ],
+    }
+    previous_context = [
         {
-            "window_id": "window_0",
-            "start": 0.0,
-            "end": 1.0,
-            "asr": "",
-            "visual_latex": [],
-            "math_ocr_candidates": [
-                {"timestamp": 0.5, "text": r"f(z_f)\neq0", "source_id": "ocr"}
-            ],
-            "direct": True,
+            "type": "paragraph",
+            "title": None,
+            "latex_tail": "previous prose",
+            "source_evidence_ids": ["old_obs"],
+            "source_claim_ids": ["old_claim"],
         }
     ]
 
-    knowledge_pipeline_module._write_state_section_batch(
+    notes = knowledge_pipeline_module._write_state_section_batch(
         orchestrator,
         section,
-        {"claims": [], "observations": [], "symbols": [], "episodes": []},
-        outline_context=[],
-        previous_context=[],
-        raw_evidence_context=raw_context,
+        evidence,
+        previous_context=previous_context,
     )
 
-    assert "Sequentially resolved state evidence" in orchestrator.prompt
-    assert "primary local hypothesis" in orchestrator.prompt
-    assert "actual canonical repaired LaTeX" in orchestrator.prompt
-    assert "MATHATOM" not in orchestrator.prompt
-    assert "source_evidence_ids" in orchestrator.prompt
-    assert r"f(z_f)\\neq0" not in orchestrator.prompt
+    assert orchestrator.schema_name == "GeneratedStateSectionNotes"
+    assert "Canonical observations, in lecture order" in orchestrator.prompt
+    assert r"x=\\sum_{n=1}^{\\infty} x_n" in orchestrator.prompt
+    assert "canonical explanation" in orchestrator.prompt
+    assert "Global lecture outline" not in orchestrator.prompt
+    assert "Sequentially resolved state evidence" not in orchestrator.prompt
+    assert "legacy_claim" not in orchestrator.prompt
+    assert "legacy_symbol" not in orchestrator.prompt
+    assert "sequential_resolution" not in orchestrator.prompt
+    assert "ocr:frame_0" not in orchestrator.prompt
+    assert "source_evidence_ids" not in orchestrator.prompt
+    assert "source_claim_ids" not in orchestrator.prompt
+    assert notes.blocks[0].source_evidence_ids == ["obs_formula"]
+    assert notes.blocks[0].source_claim_ids == []
     assert orchestrator.kwargs["thinking"] is False
     assert orchestrator.kwargs["temperature"] == 0.7
     assert orchestrator.kwargs["top_p"] == 0.80
@@ -364,27 +426,33 @@ def test_state_writer_consumes_resolved_state_without_raw_ocr():
     assert orchestrator.kwargs["repetition_penalty"] == 1.0
 
 
-def test_writer_exposes_resolved_math_directly():
+def test_writer_projects_only_canonical_observation_fields():
     evidence = {
         "observations": [
             {
                 "id": "obs_formula",
+                "kind": "equation",
                 "text": "source",
                 "latex": r"x=bad",
                 "resolved_text": "resolved formula",
                 "resolved_latex": r"x=\sum_{n=1}^{\infty} x_n",
+                "source_status": "reconstructed",
+                "evidence_refs": ["ocr:frame_0"],
+                "episode_id": "episode_0",
             }
         ]
     }
 
-    visible = knowledge_pipeline_module._writer_evidence_with_resolved_math(evidence)
-    observation = visible["observations"][0]
+    observations = knowledge_pipeline_module._writer_canonical_observations(evidence)
 
-    assert observation["text"] == "resolved formula"
-    assert observation["latex"] == r"x=\sum_{n=1}^{\infty} x_n"
-    assert "resolved_text" not in observation
-    assert "resolved_latex" not in observation
-    assert "MATHATOM" not in str(visible)
+    assert observations == [
+        {
+            "id": "obs_formula",
+            "kind": "equation",
+            "text": "resolved formula",
+            "latex": r"x=\sum_{n=1}^{\infty} x_n",
+        }
+    ]
 
 
 def test_state_patch_schema_is_transactional():
@@ -1248,11 +1316,7 @@ def test_state_section_writer_splits_episode_batch_after_context_limit(monkeypat
         object(),
         section,
         evidence,
-        outline_context=[],
         previous_context=[],
-        kb=kb,
-        transcript=transcript,
-        config=config,
     )
 
     assert calls == [
@@ -1350,11 +1414,7 @@ def test_state_section_writer_splits_episode_batch_after_structured_json_failure
         object(),
         section,
         evidence,
-        outline_context=[],
         previous_context=[],
-        kb=kb,
-        transcript=transcript,
-        config=config,
     )
 
     assert calls == [

@@ -12,8 +12,8 @@ from pydantic import ValidationError
 
 from .chunking import chunk_transcript
 from .generated_notes import (
-    GeneratedChunkNotes,
     GeneratedObservationStatePatch,
+    GeneratedStateSectionNotes,
 )
 from .episode_graph import (
     apply_episode_tracking,
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 9
-STATE_SECTION_WRITER_CACHE_VERSION = 3
+STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
 # intentional: changing downstream batching must not throw away expensive ASR/visual/evidence work.
@@ -232,19 +232,6 @@ def _load_observation_resolution(
         return GeneratedObservationStatePatch.model_validate(payload["patch"])
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
-
-
-def _state_outline_context(outline: LectureOutline) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": section.id,
-            "title": section.title,
-            "start": section.start,
-            "end": section.end,
-            "episode_ids": list(section.episode_ids),
-        }
-        for section in outline.sections
-    ]
 
 
 def _clip_state_raw_text(value: str | None, limit: int) -> str:
@@ -1539,25 +1526,60 @@ def _state_section_batches(
     return batches
 
 
-def _writer_evidence_with_resolved_math(evidence: dict[str, Any]) -> dict[str, Any]:
-    """Expose canonical repaired text and LaTeX directly to section synthesis."""
+def _hierarchy_fingerprint(
+    kb: LectureKnowledgeBase,
+    *,
+    llm_config: dict[str, Any],
+    hierarchy_batch_episodes: int,
+) -> str:
+    """Hierarchy depends on canonical KB + hierarchy LLM policy, not writer configuration."""
 
-    visible = dict(evidence)
+    return stable_hash(
+        {
+            "kb": kb.model_dump(mode="json"),
+            "llm": llm_config,
+            "hierarchy_batch_episodes": hierarchy_batch_episodes,
+            "hierarchy_cache_version": HIERARCHY_CACHE_VERSION,
+        }
+    )
+
+
+def _writer_canonical_observations(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project repaired state to the only fields final prose synthesis is allowed to use."""
+
     observations: list[dict[str, Any]] = []
     for item in evidence.get("observations", []):
-        observation = dict(item)
-        resolved_text = str(
-            observation.get("resolved_text") or observation.get("text") or ""
-        ).strip()
-        if resolved_text:
-            observation["text"] = resolved_text
-        if "resolved_latex" in observation:
-            observation["latex"] = observation.get("resolved_latex")
-        observation.pop("resolved_text", None)
-        observation.pop("resolved_latex", None)
-        observations.append(observation)
-    visible["observations"] = observations
-    return visible
+        text = str(item.get("resolved_text") or item.get("text") or "").strip()
+        latex = (
+            item.get("resolved_latex")
+            if "resolved_latex" in item
+            else item.get("latex")
+        )
+        projected = {
+            "id": str(item.get("id", "")),
+            "kind": str(item.get("kind", "claim")),
+            "text": text,
+        }
+        if latex:
+            projected["latex"] = str(latex).strip()
+        observations.append(projected)
+    return observations
+
+
+def _writer_previous_tail(previous_context: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only a short continuity hint from the preceding generated prose."""
+
+    tail: list[dict[str, Any]] = []
+    for item in previous_context[-2:]:
+        compact = {
+            "type": str(item.get("type", "paragraph")),
+            "latex_tail": str(item.get("latex_tail", ""))[-800:],
+        }
+        title = item.get("title")
+        if title:
+            compact["title"] = str(title)
+        tail.append(compact)
+    return tail
 
 
 def _write_state_section_batch(
@@ -1565,55 +1587,36 @@ def _write_state_section_batch(
     section: OutlineSection,
     evidence: dict[str, Any],
     *,
-    outline_context: list[dict[str, Any]],
     previous_context: list[dict[str, Any]],
-    raw_evidence_context: list[dict[str, Any]] | None = None,
     guided_json: bool = True,
 ) -> ChunkNotes:
-    writer_evidence = _writer_evidence_with_resolved_math(evidence)
-    prompt = f"""Write one contiguous part of a FINAL lecture-note section from a chronological
-state whose observations have already been resolved one-by-one against their local ASR/OCR evidence.
+    observations = _writer_canonical_observations(evidence)
+    previous_tail = _writer_previous_tail(previous_context)
+    prompt = f"""Convert already-canonical lecture state into coherent final lecture notes.
 
-Global lecture outline (read-only narrative context):
-{json.dumps(outline_context, ensure_ascii=False, separators=(",", ":"))}
+Section title:
+{section.title}
 
-Current fixed section:
-{json.dumps(section.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
+Canonical observations, in lecture order:
+{json.dumps(observations, ensure_ascii=False, separators=(",", ":"))}
 
-Sequentially resolved state evidence for this batch:
-{json.dumps(writer_evidence, ensure_ascii=False, separators=(",", ":"))}
+Short tail of the preceding generated prose, for continuity only:
+{json.dumps(previous_tail, ensure_ascii=False, separators=(",", ":"))}
 
-Previously written blocks from THIS section only:
-{json.dumps(previous_context, ensure_ascii=False, separators=(",", ":"))}
-
-Rules:
-- Interpret and explain the resolved observations as coherent lecture notes; do not merely concatenate
-  their wording.
-- The mathematical content of a sequentially resolved observation is the primary local hypothesis.
-- A non-empty `latex` field contains the actual canonical repaired LaTeX from upstream state
-  reconstruction. Read it directly when interpreting the observation; it is not an opaque token.
-- You may compose neighboring observations into coherent prose and ordinary LaTeX exposition, but
-  when restating a supplied formula preserve its mathematical content, variable names, signs,
-  coefficients, denominators, quantifiers, memberships, subscripts and relation signs.
-- Never replace supplied mathematics with placeholders, UUIDs, dummy symbols, or abbreviated marker
-  strings.
-- You may still correct a resolved reading if it directly contradicts another supplied resolved fact
-  or an elementary consequence of established context. Log every such semantic change in
-  corrections. Do not emit no-op corrections.
-- Preserve lecturer notation, theorem/proof continuity, order, and level of detail.
-- Do not add material from future outline entries or unrelated textbook exposition.
-- Avoid repeating a definition/proof step already present in previous_context unless this batch
-  genuinely develops it further.
-- Every substantive block must cite source_evidence_ids from the supplied resolved observations;
-  source_claim_ids may be empty because pre-resolution claims are intentionally removed.
-- If a remaining ambiguity cannot be resolved from this state, put it in unresolved instead of
-  inventing a specific formula.
-- Return block bodies only; renderer owns section/theorem/proof wrappers.
-- Write prose in language code {orchestrator.output_language} and mathematics in LaTeX.
+Requirements:
+- The observations are FINAL. Do not correct, reinterpret, or add mathematical content.
+- Preserve their order. Merge adjacent observations into readable exposition when useful.
+- If an observation has a non-empty `latex` field and you restate that formula, copy its LaTeX
+  exactly. Do not rename symbols, translate commands, simplify, expand, or repair it.
+- Use `text` only to write the surrounding explanation. Do not include provenance or reconstruction
+  commentary about ASR, OCR, frames, the board, confidence, or how the observation was recovered.
+- Do not repeat material already present in the preceding-prose tail.
+- Return block bodies only. The deterministic renderer owns section/theorem/proof wrappers.
+- Write prose in language code {orchestrator.output_language}.
 """
     generated = orchestrator._structured(
         prompt,
-        GeneratedChunkNotes,
+        GeneratedStateSectionNotes,
         operation="state_section_write",
         guided_json=guided_json,
         split_oversized_task=True,
@@ -1625,36 +1628,24 @@ Rules:
         presence_penalty=float(orchestrator.config.state_section_writer_presence_penalty),
         repetition_penalty=float(orchestrator.config.state_section_writer_repetition_penalty),
     )
-    notes = generated.to_chunk_notes()
-    notes.chunk_id = section.id
-    notes.start = section.start
-    notes.end = section.end
-    notes.section_title = section.title.replace("$", "")
 
-    allowed_claims = {str(item["id"]) for item in evidence.get("claims", [])}
-    allowed_observations = {str(item["id"]) for item in evidence.get("observations", [])}
-    kept = []
-    for block in notes.blocks:
-        original_claims = list(block.source_claim_ids)
-        original_evidence = list(block.source_evidence_ids)
-        block.source_claim_ids = [item for item in original_claims if item in allowed_claims]
-        block.source_evidence_ids = [
-            item for item in original_evidence if item in allowed_observations
-        ]
-        if not block.source_claim_ids and not block.source_evidence_ids:
-            notes.unresolved.append(
-                f"Dropped ungrounded state-section block: {block.latex[:160]}"
-            )
-            continue
-        kept.append(block)
-    notes.blocks = kept
-    notes.corrections = [
-        item
-        for item in notes.corrections
-        if item.original.strip() != item.corrected.strip()
+    source_evidence_ids = [
+        item["id"]
+        for item in observations
+        if item.get("id")
     ]
-    notes.unresolved = list(dict.fromkeys(notes.unresolved))
-    return notes
+    blocks = [
+        block.to_note_block(source_evidence_ids=source_evidence_ids)
+        for block in generated.blocks
+    ]
+    return ChunkNotes(
+        chunk_id=section.id,
+        start=section.start,
+        end=section.end,
+        section_title=section.title.replace("$", ""),
+        blocks=blocks,
+    )
+
 
 
 def _subset_state_evidence_by_episode_ids(
@@ -1744,13 +1735,7 @@ def _write_state_section_batch_resilient(
     section: OutlineSection,
     evidence: dict[str, Any],
     *,
-    outline_context: list[dict[str, Any]],
     previous_context: list[dict[str, Any]],
-    kb: LectureKnowledgeBase,
-    transcript: Transcript,
-    config,
-    raw_window_index: list[dict[str, Any]] | None = None,
-    raw_evidence_context: list[dict[str, Any]] | None = None,
 ) -> ChunkNotes:
     """Recursively split final-writer work that cannot fit in one structured request."""
 
@@ -1759,9 +1744,7 @@ def _write_state_section_batch_resilient(
             orchestrator,
             section,
             evidence,
-            outline_context=outline_context,
             previous_context=previous_context,
-            raw_evidence_context=None,
         )
     except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
         episode_ids = [
@@ -1792,12 +1775,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 left_section,
                 left_evidence,
-                outline_context=outline_context,
                 previous_context=previous_context,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             right_previous = [
                 *previous_context,
@@ -1807,12 +1785,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 right_section,
                 right_evidence,
-                outline_context=outline_context,
                 previous_context=right_previous,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             return _merge_state_section_batches(section, [left_notes, right_notes])
 
@@ -1832,12 +1805,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 section,
                 left_evidence,
-                outline_context=outline_context,
                 previous_context=previous_context,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             right_previous = [
                 *previous_context,
@@ -1847,12 +1815,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 section,
                 right_evidence,
-                outline_context=outline_context,
                 previous_context=right_previous,
-                kb=kb,
-                transcript=transcript,
-                config=config,
-                raw_window_index=raw_window_index,
             )
             return _merge_state_section_batches(section, [left_notes, right_notes])
 
@@ -1885,9 +1848,7 @@ def _write_state_section_batch_resilient(
                 orchestrator,
                 section,
                 evidence,
-                outline_context=outline_context,
                 previous_context=previous_context,
-                raw_evidence_context=None,
                 guided_json=False,
             )
         except (
@@ -2107,7 +2068,18 @@ def run_knowledge_pipeline(
             make_lecture_state(kb).model_dump(mode="json"),
         )
 
-    kb_fingerprint = stable_hash(
+    atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
+
+    hierarchy_path = work / "episode_hierarchy.json"
+    hierarchy_fingerprint = _hierarchy_fingerprint(
+        kb,
+        llm_config=pipeline.config.llm.model_dump(mode="json"),
+        hierarchy_batch_episodes=pipeline.config.notes.hierarchy_batch_episodes,
+    )
+    # Accept the immediately preceding cache identity once so existing runs migrate without
+    # paying for another hierarchy LLM call. Future writer-only config changes use only the new
+    # dependency-minimal fingerprint above.
+    legacy_kb_fingerprint = stable_hash(
         {
             "kb": kb.model_dump(mode="json"),
             "notes": pipeline.config.notes.model_dump(mode="json"),
@@ -2116,21 +2088,24 @@ def run_knowledge_pipeline(
             "state_pipeline_version": STATE_PIPELINE_VERSION if state_mode else None,
         }
     )
-    atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
-
-    hierarchy_path = work / "episode_hierarchy.json"
-    hierarchy_fingerprint = stable_hash(
+    legacy_hierarchy_fingerprint = stable_hash(
         {
-            "kb_fingerprint": kb_fingerprint,
+            "kb_fingerprint": legacy_kb_fingerprint,
             "hierarchy_batch_episodes": pipeline.config.notes.hierarchy_batch_episodes,
             "hierarchy_cache_version": HIERARCHY_CACHE_VERSION,
         }
     )
+
     hierarchy: EpisodeHierarchyPlan | None = None
+    cached_hierarchy_fingerprint: str | None = None
     if hierarchy_path.exists() and not force:
         try:
             payload = json.loads(hierarchy_path.read_text(encoding="utf-8"))
-            if payload.get("fingerprint") == hierarchy_fingerprint:
+            cached_hierarchy_fingerprint = str(payload.get("fingerprint") or "")
+            if cached_hierarchy_fingerprint in {
+                hierarchy_fingerprint,
+                legacy_hierarchy_fingerprint,
+            }:
                 hierarchy = EpisodeHierarchyPlan.model_validate(payload["hierarchy"])
         except (json.JSONDecodeError, KeyError, ValidationError):
             hierarchy = None
@@ -2138,6 +2113,14 @@ def run_knowledge_pipeline(
     hierarchy_started = time.perf_counter()
     if hierarchy is None:
         hierarchy = plan_episode_hierarchy_bounded(orchestrator, kb)
+        atomic_json_dump(
+            hierarchy_path,
+            {
+                "fingerprint": hierarchy_fingerprint,
+                "hierarchy": hierarchy.model_dump(mode="json"),
+            },
+        )
+    elif cached_hierarchy_fingerprint != hierarchy_fingerprint:
         atomic_json_dump(
             hierarchy_path,
             {
@@ -2172,7 +2155,6 @@ def run_knowledge_pipeline(
 
     if state_mode:
         note_sections: list[ChunkNotes] = []
-        outline_context = _state_outline_context(outline)
         for section in outline.sections:
             evidence_batches = _state_section_batches(
                 kb,
@@ -2184,6 +2166,8 @@ def run_knowledge_pipeline(
             generated_batches: list[ChunkNotes] = []
             for batch_index, evidence_payload in enumerate(evidence_batches):
                 previous_context = previous_block_context(generated_batches)
+                writer_observations = _writer_canonical_observations(evidence_payload)
+                writer_previous_tail = _writer_previous_tail(previous_context)
                 fingerprint = stable_hash(
                     {
                         "state_pipeline_version": STATE_PIPELINE_VERSION,
@@ -2201,10 +2185,9 @@ def run_knowledge_pipeline(
                                 pipeline.config.notes.state_section_writer_repetition_penalty
                             ),
                         },
-                        "section": section.model_dump(mode="json"),
-                        "outline_context": outline_context,
-                        "repaired_evidence": evidence_payload,
-                        "previous_context": previous_context,
+                        "section_title": section.title,
+                        "canonical_observations": writer_observations,
+                        "previous_tail": writer_previous_tail,
                         "llm": pipeline.config.llm.model_dump(mode="json"),
                     }
                 )
@@ -2225,13 +2208,7 @@ def run_knowledge_pipeline(
                     orchestrator,
                     section,
                     evidence_payload,
-                    outline_context=outline_context,
                     previous_context=previous_context,
-                    kb=kb,
-                    transcript=transcript,
-                    config=pipeline.config.notes,
-                    raw_window_index=None,
-                    raw_evidence_context=None,
                 )
                 state_synthesis_seconds += time.perf_counter() - started
                 atomic_json_dump(
