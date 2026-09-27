@@ -39,6 +39,7 @@ from .knowledge import (
     make_lecture_state,
     merge_window_observations,
 )
+from .latex import escape_tex
 from .llm import LectureModelClient, StructuredTaskTooLargeError
 from .media import copy_asset
 from .schemas import (
@@ -915,15 +916,6 @@ def _apply_observation_state_patch(
             "State patch removed an existing formula instead of replacing or rejecting CURRENT."
         )
 
-    if replacement_latex == original_latex:
-        resolved["state_patch_action"] = "keep"
-        resolved["resolution_status"] = "kept"
-        resolved["resolution_accepted"] = True
-        resolved["semantic_text"] = semantic_text
-        resolved["resolved_text"] = semantic_text
-        resolved["resolved_latex"] = original_latex
-        return resolved, True, None
-
     resolved["resolution_status"] = "replaced"
     resolved["resolution_accepted"] = True
     resolved["semantic_text"] = semantic_text
@@ -986,7 +978,8 @@ def _resolve_single_state_observation(
     )
 
     prompt = f"""Repair exactly one pending event in a chronological mathematical lecture state.
-Accepted history is immutable. Return a TRANSACTION for CURRENT, not a rewritten copy by default.
+Accepted history is immutable. Return a TRANSACTION for CURRENT and a clean semantic_text for every
+accepted event.
 
 Local episode:
 {json.dumps(episode, ensure_ascii=False, separators=(",", ":"))}
@@ -1613,7 +1606,7 @@ def _assemble_state_section_deterministically(
             blocks.append(
                 NoteBlock(
                     type=_deterministic_text_block_type(observation.kind),
-                    latex=text,
+                    latex=escape_tex(text),
                     source_evidence_ids=source_ids,
                 )
             )
