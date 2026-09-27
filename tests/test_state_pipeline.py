@@ -392,6 +392,8 @@ def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
         "paragraph",
         "equation",
     ]
+    assert notes.blocks[0].latex == "Определение нормы функционала."
+    assert notes.blocks[2].latex == "Разложим вектор."
     assert notes.blocks[1].latex == r"\|f\|=\sup_{\|x\|\le 1}|f(x)|"
     assert (
         notes.blocks[3].latex
@@ -598,7 +600,6 @@ def test_state_patch_cannot_change_state_from_history_only():
     assert "direct local evidence" in issue
     assert resolved["resolution_status"] == "unresolved"
     assert resolved["semantic_text"] is None
-    assert resolved["semantic_text"] is None
     assert resolved["resolved_text"] is None
     assert resolved["resolved_latex"] is None
 
@@ -621,6 +622,7 @@ def test_state_patch_reject_suppresses_current_from_canonical_state():
     assert accepted is True
     assert issue is None
     assert resolved["resolution_status"] == "rejected"
+    assert resolved["semantic_text"] is None
     assert resolved["resolved_text"] is None
     assert resolved["resolved_latex"] is None
 
@@ -645,7 +647,7 @@ def test_state_resolver_uses_compact_local_state_and_exact_visual_crop(tmp_path)
             self.images = kwargs.get("images")
             self.guided_json = kwargs.get("guided_json")
             self.max_tokens = kwargs.get("max_tokens")
-            return schema(action="keep")
+            return schema(action="keep", semantic_text="canonical statement")
 
     orchestrator = FakeOrchestrator()
     current = {
@@ -793,7 +795,7 @@ def test_observation_resolver_uses_transaction_schema():
         def _structured(self, prompt, schema, **kwargs):
             del prompt, kwargs
             self.schema = schema
-            return schema(action="keep")
+            return schema(action="keep", semantic_text="canonical statement")
 
     orchestrator = FakeOrchestrator()
     current = {
