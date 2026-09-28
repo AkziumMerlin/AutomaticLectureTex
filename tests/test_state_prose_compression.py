@@ -10,11 +10,13 @@ from automatic_lecture_tex.schemas import (
 )
 from automatic_lecture_tex.state_canonicalization import CanonicalRenderPolicy
 from automatic_lecture_tex.state_prose_compression import (
-    ProseCompressionGroupProposal,
     ProseCompressionPlan,
     ProseCompressionSentence,
-    _candidate_runs,
-    _validate_group,
+    ProseRedundancyGroupProposal,
+    ProseSummaryGroupProposal,
+    _summary_runs,
+    _validate_redundancy_group,
+    _validate_summary_group,
     run_state_prose_compression,
 )
 
@@ -66,65 +68,76 @@ def _section() -> OutlineSection:
     )
 
 
-def test_candidate_runs_never_include_formula_or_formula_like_prose():
+def test_summary_runs_bridge_transitions_but_stop_at_formal_content():
     observations = [
         _obs(
             "obs_a",
             start=1.0,
             kind=ObservationKind.REMARK,
-            text="Пространство X рассматривается как комплексное.",
+            text="Перечисляются темы второй части курса.",
+        ),
+        _obs(
+            "transition",
+            start=2.0,
+            kind=ObservationKind.TRANSITION,
+            text="Лектор переходит к следующей записи.",
         ),
         _obs(
             "obs_b",
-            start=2.0,
+            start=3.0,
             kind=ObservationKind.REMARK,
-            text="Это пространство снова называется комплексным.",
+            text="Исходное пространство X рассматривается как комплексное.",
         ),
         _obs(
-            "obs_math_text",
-            start=3.0,
+            "obs_c",
+            start=4.0,
+            kind=ObservationKind.NOTATION,
+            text="X обозначает комплексное пространство.",
+        ),
+        _obs(
+            "obs_math",
+            start=5.0,
             kind=ObservationKind.REMARK,
             text="Получаем v(ix) = u(x).",
         ),
         _obs(
-            "obs_formula",
-            start=4.0,
-            kind=ObservationKind.REMARK,
-            text="Формула на доске.",
-            latex="x=1",
-        ),
-        _obs(
-            "obs_c",
-            start=5.0,
-            kind=ObservationKind.REMARK,
-            text="Возвращаемся к комплексному случаю.",
-        ),
-        _obs(
             "obs_d",
             start=6.0,
+            kind=ObservationKind.REMARK,
+            text="Новая чисто текстовая тема.",
+        ),
+        _obs(
+            "obs_e",
+            start=7.0,
+            kind=ObservationKind.REMARK,
+            text="Её повторяют другими словами.",
+        ),
+        _obs(
+            "obs_f",
+            start=8.0,
             kind=ObservationKind.NOTATION,
-            text="Обозначение X используется для пространства.",
+            text="Для неё фиксируется обозначение.",
         ),
     ]
 
-    runs = _candidate_runs(observations)
+    runs = _summary_runs(observations, min_group_size=3)
 
     assert [[item.id for item in run] for run in runs] == [
-        ["obs_a", "obs_b"],
-        ["obs_c", "obs_d"],
+        ["obs_a", "obs_b", "obs_c"],
+        ["obs_d", "obs_e", "obs_f"],
     ]
 
 
-def test_opening_narration_can_be_compressed_to_two_plain_sentences(tmp_path):
+def test_opening_narration_compresses_across_structural_transitions(tmp_path):
     observations = [
         _obs(
-            "obs_a",
+            "transition_a",
             start=1.0,
             kind=ObservationKind.TRANSITION,
-            text="Начинается вторая часть курса и объявляется её содержание.",
+            text="Начинается вторая часть курса.",
         ),
         _obs(
-            "obs_b",
+            "obs_topics",
             start=2.0,
             kind=ObservationKind.REMARK,
             text=(
@@ -133,26 +146,32 @@ def test_opening_narration_can_be_compressed_to_two_plain_sentences(tmp_path):
             ),
         ),
         _obs(
-            "obs_c",
+            "transition_b",
             start=3.0,
             kind=ObservationKind.TRANSITION,
-            text="После перечисления тем начинается первый вопрос.",
+            text="Начинается первый вопрос.",
         ),
         _obs(
-            "obs_d",
+            "obs_space",
             start=4.0,
             kind=ObservationKind.REMARK,
             text="Исходное пространство X рассматривается как комплексное пространство.",
         ),
         _obs(
-            "obs_e",
+            "obs_repeat",
             start=5.0,
+            kind=ObservationKind.REMARK,
+            text="Рассматриваемое пространство снова называется комплексным.",
+        ),
+        _obs(
+            "obs_notation",
+            start=6.0,
             kind=ObservationKind.NOTATION,
             text="X обозначает комплексное пространство.",
         ),
         _obs(
             "obs_definition",
-            start=6.0,
+            start=7.0,
             kind=ObservationKind.DEFINITION,
             text="Вводится линейный функционал.",
             latex=r"f:X\to\mathbb{C}",
@@ -160,22 +179,30 @@ def test_opening_narration_can_be_compressed_to_two_plain_sentences(tmp_path):
     ]
     kb = _kb(*observations)
     outline = LectureOutline(sections=[_section()])
-
     plan = ProseCompressionPlan(
-        groups=[
-            ProseCompressionGroupProposal(
-                source_observation_ids=["obs_a", "obs_b", "obs_c", "obs_d", "obs_e"],
+        summary_groups=[
+            ProseSummaryGroupProposal(
+                source_observation_ids=[
+                    "obs_topics",
+                    "obs_space",
+                    "obs_repeat",
+                    "obs_notation",
+                ],
                 sentences=[
                     ProseCompressionSentence(
                         text=(
                             "Во второй части курса рассматриваются нормированные и сопряжённые "
                             "пространства, спектр и спектральная теория операторов."
                         ),
-                        source_observation_ids=["obs_a", "obs_b", "obs_c"],
+                        source_observation_ids=["obs_topics"],
                     ),
                     ProseCompressionSentence(
                         text="Исходное пространство X рассматривается как комплексное.",
-                        source_observation_ids=["obs_d", "obs_e"],
+                        source_observation_ids=[
+                            "obs_space",
+                            "obs_repeat",
+                            "obs_notation",
+                        ],
                     ),
                 ],
             )
@@ -200,6 +227,7 @@ def test_opening_narration_can_be_compressed_to_two_plain_sentences(tmp_path):
         work=tmp_path,
         llm_config={"model": "stub"},
         pipeline_version=10,
+        min_group_size=3,
         max_sentences=2,
         max_ratio=0.55,
         max_summary_chars=700,
@@ -208,14 +236,15 @@ def test_opening_narration_can_be_compressed_to_two_plain_sentences(tmp_path):
 
     assert unresolved == []
     assert orchestrator.calls == 1
-    assert stats["accepted_groups"] == 1
-    assert stats["compressed_observations"] == 5
-    assert [item.id for item in kb.observations] == [item.id for item in observations]
+    assert stats["accepted_summary_groups"] == 1
+    assert stats["summarized_observations"] == 4
 
     notes = _assemble_state_section_deterministically(
         kb,
         _section(),
-        render_policy=CanonicalRenderPolicy(),
+        render_policy=CanonicalRenderPolicy(
+            suppress_text_ids=["transition_a", "transition_b"]
+        ),
         prose_policy=policy,
     )
     assert notes.blocks[0].latex == (
@@ -223,63 +252,56 @@ def test_opening_narration_can_be_compressed_to_two_plain_sentences(tmp_path):
         "спектр и спектральная теория операторов. "
         "Исходное пространство X рассматривается как комплексное."
     )
-    assert notes.blocks[0].source_evidence_ids == [
-        "obs_a",
-        "obs_b",
-        "obs_c",
-        "obs_d",
-        "obs_e",
-    ]
     assert notes.blocks[1].latex == "Вводится линейный функционал."
     assert notes.blocks[2].latex == r"f:X\to\mathbb{C}"
 
 
-def test_noncontiguous_group_is_rejected():
+def test_small_two_observation_summary_is_rejected():
     run = [
         _obs(
             "obs_a",
             start=1.0,
             kind=ObservationKind.REMARK,
-            text="Первое описание комплексного пространства X.",
+            text="Пространство X комплексное.",
         ),
         _obs(
             "obs_b",
             start=2.0,
-            kind=ObservationKind.REMARK,
-            text="Отдельная содержательная деталь.",
+            kind=ObservationKind.NOTATION,
+            text="X обозначает комплексное пространство.",
         ),
         _obs(
             "obs_c",
             start=3.0,
-            kind=ObservationKind.NOTATION,
-            text="Повторяется обозначение комплексного пространства X.",
+            kind=ObservationKind.REMARK,
+            text="Ещё одно повторение.",
         ),
     ]
-    proposal = ProseCompressionGroupProposal(
-        source_observation_ids=["obs_a", "obs_c"],
+    proposal = ProseSummaryGroupProposal(
+        source_observation_ids=["obs_a", "obs_b"],
         sentences=[
             ProseCompressionSentence(
                 text="Пространство X рассматривается как комплексное.",
-                source_observation_ids=["obs_a", "obs_c"],
+                source_observation_ids=["obs_a", "obs_b"],
             )
         ],
     )
-
-    group, reason = _validate_group(
+    group, reason = _validate_summary_group(
         proposal,
         section_id="topic_000",
         runs=[run],
         used_ids=set(),
+        min_group_size=3,
         max_sentences=2,
-        max_ratio=0.55,
+        max_ratio=0.90,
         max_summary_chars=700,
     )
 
     assert group is None
-    assert "contiguous" in reason
+    assert "fewer than 3" in reason
 
 
-def test_generated_prose_cannot_introduce_math_or_reconstruction_narration():
+def test_generated_summary_cannot_introduce_math_or_reconstruction_narration():
     run = [
         _obs(
             "obs_a",
@@ -293,6 +315,12 @@ def test_generated_prose_cannot_introduce_math_or_reconstruction_narration():
             kind=ObservationKind.NOTATION,
             text="X обозначает комплексное пространство.",
         ),
+        _obs(
+            "obs_c",
+            start=3.0,
+            kind=ObservationKind.REMARK,
+            text="Рассматриваемое пространство снова называется комплексным.",
+        ),
     ]
 
     for text in [
@@ -300,25 +328,105 @@ def test_generated_prose_cannot_introduce_math_or_reconstruction_narration():
         "По OCR пространство X является комплексным.",
         "Пространство Y является комплексным.",
     ]:
-        proposal = ProseCompressionGroupProposal(
-            source_observation_ids=["obs_a", "obs_b"],
+        proposal = ProseSummaryGroupProposal(
+            source_observation_ids=["obs_a", "obs_b", "obs_c"],
             sentences=[
                 ProseCompressionSentence(
                     text=text,
-                    source_observation_ids=["obs_a", "obs_b"],
+                    source_observation_ids=["obs_a", "obs_b", "obs_c"],
                 )
             ],
         )
-        group, _ = _validate_group(
+        group, _ = _validate_summary_group(
             proposal,
             section_id="topic_000",
             runs=[run],
             used_ids=set(),
+            min_group_size=3,
             max_sentences=2,
             max_ratio=0.90,
             max_summary_chars=700,
         )
         assert group is None
+
+
+def test_selection_only_dedup_keeps_formula_only_in_prose():
+    candidates = [
+        _obs(
+            "obs_rep",
+            start=1.0,
+            kind=ObservationKind.REMARK,
+            text="Записи выражают одну и ту же связь между u и v.",
+        ),
+        _obs(
+            "obs_formula_in_prose",
+            start=2.0,
+            kind=ObservationKind.REMARK,
+            text="Имеем v(ix) = u(x), то есть части связаны.",
+        ),
+        _obs(
+            "obs_with_latex",
+            start=3.0,
+            kind=ObservationKind.REMARK,
+            text="Связь ещё раз поясняется.",
+            latex=r"v(ix)=u(x)",
+        ),
+        _obs(
+            "obs_repeat",
+            start=4.0,
+            kind=ObservationKind.REMARK,
+            text="Та же связь снова поясняется устно.",
+        ),
+    ]
+    proposal = ProseRedundancyGroupProposal(
+        source_observation_ids=[
+            "obs_rep",
+            "obs_formula_in_prose",
+            "obs_with_latex",
+            "obs_repeat",
+        ],
+        representative_observation_id="obs_rep",
+    )
+
+    suppressed, reason = _validate_redundancy_group(
+        proposal,
+        candidates=candidates,
+        used_ids=set(),
+    )
+
+    assert reason == ""
+    assert suppressed == {"obs_with_latex", "obs_repeat"}
+    assert "obs_formula_in_prose" not in suppressed
+
+
+def test_selection_only_dedup_changes_only_text_channel():
+    source = _obs(
+        "obs_source",
+        start=1.0,
+        kind=ObservationKind.REMARK,
+        text="Повторное пояснение одной связи.",
+        latex=r"v(ix)=u(x)",
+    )
+    representative = _obs(
+        "obs_rep",
+        start=2.0,
+        kind=ObservationKind.REMARK,
+        text="Поясняется та же связь.",
+    )
+    kb = _kb(source, representative)
+
+    from automatic_lecture_tex.state_prose_compression import ProseCompressionPolicy
+
+    notes = _assemble_state_section_deterministically(
+        kb,
+        _section(),
+        render_policy=CanonicalRenderPolicy(),
+        prose_policy=ProseCompressionPolicy(suppress_text_ids=["obs_source"]),
+    )
+
+    assert all(block.latex != "Повторное пояснение одной связи." for block in notes.blocks)
+    assert any(block.latex == r"v(ix)=u(x)" for block in notes.blocks)
+    assert any(block.latex == "Поясняется та же связь." for block in notes.blocks)
 
 
 def test_cached_plan_avoids_second_model_call(tmp_path):
@@ -335,17 +443,23 @@ def test_cached_plan_avoids_second_model_call(tmp_path):
             kind=ObservationKind.NOTATION,
             text="X обозначает комплексное пространство.",
         ),
+        _obs(
+            "obs_c",
+            start=3.0,
+            kind=ObservationKind.REMARK,
+            text="Рассматриваемое пространство снова называется комплексным.",
+        ),
     ]
     kb = _kb(*observations)
     outline = LectureOutline(sections=[_section()])
     plan = ProseCompressionPlan(
-        groups=[
-            ProseCompressionGroupProposal(
-                source_observation_ids=["obs_a", "obs_b"],
+        summary_groups=[
+            ProseSummaryGroupProposal(
+                source_observation_ids=["obs_a", "obs_b", "obs_c"],
                 sentences=[
                     ProseCompressionSentence(
                         text="Пространство X рассматривается как комплексное.",
-                        source_observation_ids=["obs_a", "obs_b"],
+                        source_observation_ids=["obs_a", "obs_b", "obs_c"],
                     )
                 ],
             )
@@ -369,6 +483,7 @@ def test_cached_plan_avoids_second_model_call(tmp_path):
         work=tmp_path,
         llm_config={"model": "stub"},
         pipeline_version=10,
+        min_group_size=3,
         max_sentences=2,
         max_ratio=0.90,
         max_summary_chars=700,
