@@ -295,6 +295,7 @@ def test_small_two_observation_summary_is_rejected():
         max_sentences=2,
         max_ratio=0.90,
         max_summary_chars=700,
+        output_language="ru",
     )
 
     assert group is None
@@ -346,6 +347,7 @@ def test_generated_summary_cannot_introduce_math_or_reconstruction_narration():
             max_sentences=2,
             max_ratio=0.90,
             max_summary_chars=700,
+            output_language="ru",
         )
         assert group is None
 
