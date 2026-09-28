@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from difflib import SequenceMatcher
 from concurrent.futures import Future, ThreadPoolExecutor
