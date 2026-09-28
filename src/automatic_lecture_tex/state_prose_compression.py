@@ -17,7 +17,7 @@ from .schemas import (
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_PROSE_COMPRESSION_VERSION = 2
+STATE_PROSE_COMPRESSION_VERSION = 3
 _SUMMARY_KINDS = {ObservationKind.REMARK, ObservationKind.NOTATION}
 _DEDUPE_KINDS = {ObservationKind.REMARK, ObservationKind.NOTATION}
 _FORMAL_TEXT_MARKERS = (
@@ -52,6 +52,11 @@ _META_WORDS = (
 )
 _SINGLE_LATIN_SYMBOL = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?![A-Za-z0-9])")
 _NUMBER_TOKEN = re.compile(r"\d+")
+_CYRILLIC_LETTER = re.compile(r"[А-Яа-яЁё]")
+_ALPHA_LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
+_INLINE_EQUALITY = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_()]*\s*=\s*[−-]?[A-Za-z][A-Za-z0-9_()]*)"
+)
 
 
 class ProseCompressionSentence(BaseModel):
@@ -211,6 +216,26 @@ def _number_tokens(value: str) -> set[str]:
     return set(_NUMBER_TOKEN.findall(value))
 
 
+def _language_ok(value: str, output_language: str) -> bool:
+    if not output_language.casefold().startswith("ru"):
+        return True
+    letters = _ALPHA_LETTER.findall(value)
+    if not letters:
+        return True
+    cyrillic = _CYRILLIC_LETTER.findall(value)
+    return len(cyrillic) / len(letters) >= 0.55
+
+
+def _formal_snippets(value: str) -> set[str]:
+    """Extract simple literal inline equalities for host-side redundancy checks."""
+
+    normalized = value.replace("−", "-")
+    return {
+        re.sub(r"\s+", "", match)
+        for match in _INLINE_EQUALITY.findall(normalized)
+    }
+
+
 def _validate_summary_group(
     proposal: ProseSummaryGroupProposal,
     *,
@@ -221,6 +246,7 @@ def _validate_summary_group(
     max_sentences: int,
     max_ratio: float,
     max_summary_chars: int,
+    output_language: str,
 ) -> tuple[ProseCompressionRenderGroup | None, str]:
     source_ids = list(dict.fromkeys(proposal.source_observation_ids))
     if len(source_ids) < min_group_size:
@@ -269,6 +295,9 @@ def _validate_summary_group(
     summary = " ".join(sentence_texts).strip()
     if _sentence_count(summary) > max_sentences:
         return None, "rendered summary contains too many sentences"
+
+    if not _language_ok(summary, output_language):
+        return None, f"generated summary is not predominantly in {output_language}"
 
     by_id = {item.id: item for item in matched_run}
     source_text = " ".join(by_id[item].text for item in source_ids)
@@ -327,16 +356,21 @@ def _validate_redundancy_group(
     if positions[-1] - positions[0] > max_candidate_span:
         return set(), "redundancy group spans too many semantic text events"
 
+    representative = by_id[proposal.representative_observation_id]
+    representative_snippets = _formal_snippets(representative.text)
+
     suppress: set[str] = set()
     for observation_id in source_ids:
         if observation_id == proposal.representative_observation_id:
             continue
         item = by_id[observation_id]
-        # If formal content exists only inside prose, keep that text even when the model calls the
-        # surrounding remark redundant. If a separate LaTeX channel exists, suppressing prose
-        # cannot remove the formula itself.
+        # If formal content exists only inside prose, suppress it only when every simple literal
+        # equality is already present verbatim (modulo whitespace/minus glyph) in the selected
+        # representative. A separate LaTeX channel remains protected independently.
         if _contains_formal_text(item.text) and not item.latex:
-            continue
+            snippets = _formal_snippets(item.text)
+            if not snippets or not snippets.issubset(representative_snippets):
+                continue
         suppress.add(observation_id)
 
     if not suppress:
@@ -357,6 +391,7 @@ def _compress_section(
     max_sentences: int,
     max_ratio: float,
     max_summary_chars: int,
+    output_language: str,
     force: bool,
 ) -> tuple[
     list[ProseCompressionRenderGroup],
@@ -385,6 +420,7 @@ def _compress_section(
             "max_sentences": max_sentences,
             "max_ratio": max_ratio,
             "max_summary_chars": max_summary_chars,
+            "output_language": output_language,
             "llm": llm_config,
         }
     )
@@ -412,13 +448,19 @@ You have TWO strictly different operations.
 - use at least {min_group_size} observations, preferably an entire repetitive run;
 - write at most {max_sentences} short final-note sentences;
 - every sentence cites exact source observation IDs and their union equals the group IDs;
-- retain distinct facts, but remove narration about what the lecturer says/writes/repeats/points at;
+- preserve coherent explicit content such as a clear list of announced course topics;
+- for a mixed/noisy observation, prioritize facts repeated or stabilized by neighbouring observations;
+  you MAY omit isolated unclear enumeration fragments that are not corroborated by adjacent events;
+- remove narration about what the lecturer says/writes/repeats/points at;
+- write in language code {output_language};
 - output plain prose only: no formulas, LaTeX, relation symbols, provenance or reconstruction talk.
 
 2. redundant_text_groups:
 - this is SELECTION ONLY; generate NO replacement text;
 - group nearby remark/notation observations only when they repeat the same semantic point;
 - choose ONE existing representative_observation_id from the group;
+- prefer the most concise self-contained representative and, when semantics are equally complete,
+  prefer text that reads like final notes rather than narration about lecturer/board actions;
 - be conservative: do not group merely related statements or successive proof developments;
 - mathematical formulas are protected by the host. You are only deciding whether surrounding TEXT
   channels are repetitive.
@@ -475,6 +517,7 @@ Do not invent corrected mathematics or textbook material. If uncertain, omit a g
             max_sentences=max_sentences,
             max_ratio=max_ratio,
             max_summary_chars=max_summary_chars,
+            output_language=output_language,
         )
         audit.append(
             {
@@ -533,6 +576,7 @@ def run_state_prose_compression(
     suppress_text: set[str] = set()
     audit: list[dict[str, Any]] = []
     unresolved: list[str] = []
+    output_language = str(getattr(orchestrator, "output_language", "") or "")
     stats = {
         "sections_with_candidates": 0,
         "model_calls": 0,
@@ -572,6 +616,7 @@ def run_state_prose_compression(
             max_sentences=max_sentences,
             max_ratio=max_ratio,
             max_summary_chars=max_summary_chars,
+            output_language=output_language,
             force=force,
         )
         groups.extend(section_groups)

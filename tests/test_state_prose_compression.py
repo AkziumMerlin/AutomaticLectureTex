@@ -295,6 +295,7 @@ def test_small_two_observation_summary_is_rejected():
         max_sentences=2,
         max_ratio=0.90,
         max_summary_chars=700,
+        output_language="ru",
     )
 
     assert group is None
@@ -346,6 +347,7 @@ def test_generated_summary_cannot_introduce_math_or_reconstruction_narration():
             max_sentences=2,
             max_ratio=0.90,
             max_summary_chars=700,
+            output_language="ru",
         )
         assert group is None
 
@@ -494,3 +496,61 @@ def test_cached_plan_avoids_second_model_call(tmp_path):
 
     assert orchestrator.calls == 1
     assert stats["cache_hits"] == 1
+
+
+def test_wrong_language_summary_is_rejected():
+    run = [
+        _obs("obs_a", start=1.0, kind=ObservationKind.REMARK, text="Пространство X комплексное."),
+        _obs("obs_b", start=2.0, kind=ObservationKind.REMARK, text="X рассматривается как комплексное."),
+        _obs("obs_c", start=3.0, kind=ObservationKind.NOTATION, text="X обозначает пространство."),
+    ]
+    proposal = ProseSummaryGroupProposal(
+        source_observation_ids=["obs_a", "obs_b", "obs_c"],
+        sentences=[
+            ProseCompressionSentence(
+                text="The space X is complex and is the ambient space.",
+                source_observation_ids=["obs_a", "obs_b", "obs_c"],
+            )
+        ],
+    )
+    group, reason = _validate_summary_group(
+        proposal,
+        section_id="topic_000",
+        runs=[run],
+        used_ids=set(),
+        min_group_size=3,
+        max_sentences=2,
+        max_ratio=0.90,
+        max_summary_chars=700,
+        output_language="ru",
+    )
+    assert group is None
+    assert "not predominantly" in reason
+
+
+def test_formal_prose_duplicate_can_be_suppressed_when_representative_has_same_equalities():
+    candidates = [
+        _obs(
+            "obs_rep",
+            start=1.0,
+            kind=ObservationKind.REMARK,
+            text="Связь задаётся равенствами v(ix) = u(x) и v(x) = -u(ix).",
+        ),
+        _obs(
+            "obs_repeat",
+            start=2.0,
+            kind=ObservationKind.REMARK,
+            text="Повторно: v(ix)=u(x), а также v(x)=-u(ix).",
+        ),
+    ]
+    proposal = ProseRedundancyGroupProposal(
+        source_observation_ids=["obs_rep", "obs_repeat"],
+        representative_observation_id="obs_rep",
+    )
+    suppressed, reason = _validate_redundancy_group(
+        proposal,
+        candidates=candidates,
+        used_ids=set(),
+    )
+    assert reason == ""
+    assert suppressed == {"obs_repeat"}
