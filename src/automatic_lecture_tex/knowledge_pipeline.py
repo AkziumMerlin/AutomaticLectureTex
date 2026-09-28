@@ -58,6 +58,10 @@ from .schemas import (
     WindowObservations,
 )
 from .state_canonicalization import CanonicalRenderPolicy, run_state_canonicalization
+from .state_prose_compression import (
+    ProseCompressionPolicy,
+    run_state_prose_compression,
+)
 from .util import atomic_json_dump, stable_hash
 from .vision import (
     dedupe_visual_requests,
@@ -101,6 +105,10 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_max_images",
     "state_canonicalization_enabled",
     "state_canonicalization_semantic_audit",
+    "state_prose_compression_enabled",
+    "state_prose_compression_max_sentences",
+    "state_prose_compression_max_ratio",
+    "state_prose_compression_max_summary_chars",
 }
 
 
@@ -1589,6 +1597,7 @@ def _assemble_state_section_deterministically(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
     render_policy: CanonicalRenderPolicy | None = None,
+    prose_policy: ProseCompressionPolicy | None = None,
 ) -> ChunkNotes:
     """Render canonical repaired observations without another generative model pass."""
 
@@ -1596,6 +1605,18 @@ def _assemble_state_section_deterministically(
     unresolved: list[str] = []
     suppress_text = set(render_policy.suppress_text_ids) if render_policy is not None else set()
     suppress_latex = set(render_policy.suppress_latex_ids) if render_policy is not None else set()
+    prose_groups = [
+        group
+        for group in (prose_policy.groups if prose_policy is not None else [])
+        if group.section_id == section.id
+    ]
+    prose_by_anchor = {group.anchor_observation_id: group for group in prose_groups}
+    compressed_text_ids = {
+        observation_id
+        for group in prose_groups
+        for observation_id in group.source_observation_ids
+    }
+
     for observation in _state_section_observations(kb, section):
         source_ids = [observation.id] if observation.id else []
         text = observation.text.strip()
@@ -1606,9 +1627,23 @@ def _assemble_state_section_deterministically(
                 unresolved.append(text)
             continue
 
-        # Keep the canonical prose literally. If the text is itself exactly the canonical
-        # formula, avoid rendering the same payload twice.
-        if text and text != latex and observation.id not in suppress_text:
+        prose_group = prose_by_anchor.get(observation.id)
+        if prose_group is not None:
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.PARAGRAPH,
+                    latex=escape_tex(prose_group.summary_text),
+                    source_evidence_ids=prose_group.source_observation_ids,
+                )
+            )
+        # Everything outside an accepted prose-compression group stays byte-for-byte equivalent
+        # to the deterministic baseline. Mathematical LaTeX is handled separately below.
+        elif (
+            text
+            and text != latex
+            and observation.id not in compressed_text_ids
+            and observation.id not in suppress_text
+        ):
             blocks.append(
                 NoteBlock(
                     type=_deterministic_text_block_type(observation.kind),
@@ -2154,6 +2189,10 @@ def run_knowledge_pipeline(
     state_canonicalization_stats: dict[str, int] = {}
     state_canonicalization_policy = CanonicalRenderPolicy()
     state_canonicalization_unresolved: list[str] = []
+    state_prose_compression_seconds = 0.0
+    state_prose_compression_stats: dict[str, int] = {}
+    state_prose_compression_policy = ProseCompressionPolicy()
+    state_prose_compression_unresolved: list[str] = []
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
 
@@ -2294,6 +2333,30 @@ def run_knowledge_pipeline(
         )
         state_canonicalization_seconds = time.perf_counter() - canonicalization_started
 
+    if (
+        state_mode
+        and pipeline.config.notes.state_prose_compression_enabled
+        and pipeline.config.notes.state_section_assembly == "deterministic"
+    ):
+        prose_compression_started = time.perf_counter()
+        (
+            state_prose_compression_policy,
+            state_prose_compression_stats,
+            state_prose_compression_unresolved,
+        ) = run_state_prose_compression(
+            orchestrator,
+            kb=kb,
+            outline=outline,
+            work=work,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            pipeline_version=STATE_PIPELINE_VERSION,
+            max_sentences=pipeline.config.notes.state_prose_compression_max_sentences,
+            max_ratio=pipeline.config.notes.state_prose_compression_max_ratio,
+            max_summary_chars=pipeline.config.notes.state_prose_compression_max_summary_chars,
+            force=force,
+        )
+        state_prose_compression_seconds = time.perf_counter() - prose_compression_started
+
     if state_mode:
         note_sections: list[ChunkNotes] = []
         if pipeline.config.notes.state_section_assembly == "deterministic":
@@ -2302,6 +2365,7 @@ def run_knowledge_pipeline(
                     kb,
                     section,
                     render_policy=state_canonicalization_policy,
+                    prose_policy=state_prose_compression_policy,
                 )
                 for section in outline.sections
             ]
@@ -2377,6 +2441,7 @@ def run_knowledge_pipeline(
         state_pipeline_unresolved = [
             *state_repair_unresolved,
             *state_canonicalization_unresolved,
+            *state_prose_compression_unresolved,
         ]
         if state_pipeline_unresolved and note_sections:
             note_sections[-1].unresolved = list(
@@ -2542,6 +2607,11 @@ def run_knowledge_pipeline(
                 pipeline.config.notes.state_canonicalization_enabled if state_mode else False
             ),
             "state_canonicalization": state_canonicalization_stats,
+            "state_prose_compression_seconds": round(state_prose_compression_seconds, 3),
+            "state_prose_compression_enabled": (
+                pipeline.config.notes.state_prose_compression_enabled if state_mode else False
+            ),
+            "state_prose_compression": state_prose_compression_stats,
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "state_section_assembly": (
                 pipeline.config.notes.state_section_assembly if state_mode else None
