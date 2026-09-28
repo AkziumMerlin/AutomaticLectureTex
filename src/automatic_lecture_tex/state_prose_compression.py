@@ -356,16 +356,21 @@ def _validate_redundancy_group(
     if positions[-1] - positions[0] > max_candidate_span:
         return set(), "redundancy group spans too many semantic text events"
 
+    representative = by_id[proposal.representative_observation_id]
+    representative_snippets = _formal_snippets(representative.text)
+
     suppress: set[str] = set()
     for observation_id in source_ids:
         if observation_id == proposal.representative_observation_id:
             continue
         item = by_id[observation_id]
-        # If formal content exists only inside prose, keep that text even when the model calls the
-        # surrounding remark redundant. If a separate LaTeX channel exists, suppressing prose
-        # cannot remove the formula itself.
+        # If formal content exists only inside prose, suppress it only when every simple literal
+        # equality is already present verbatim (modulo whitespace/minus glyph) in the selected
+        # representative. A separate LaTeX channel remains protected independently.
         if _contains_formal_text(item.text) and not item.latex:
-            continue
+            snippets = _formal_snippets(item.text)
+            if not snippets or not snippets.issubset(representative_snippets):
+                continue
         suppress.add(observation_id)
 
     if not suppress:
