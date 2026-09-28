@@ -17,7 +17,7 @@ from .schemas import (
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_PROSE_COMPRESSION_VERSION = 2
+STATE_PROSE_COMPRESSION_VERSION = 3
 _SUMMARY_KINDS = {ObservationKind.REMARK, ObservationKind.NOTATION}
 _DEDUPE_KINDS = {ObservationKind.REMARK, ObservationKind.NOTATION}
 _FORMAL_TEXT_MARKERS = (
@@ -52,6 +52,11 @@ _META_WORDS = (
 )
 _SINGLE_LATIN_SYMBOL = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?![A-Za-z0-9])")
 _NUMBER_TOKEN = re.compile(r"\d+")
+_CYRILLIC_LETTER = re.compile(r"[А-Яа-яЁё]")
+_ALPHA_LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
+_INLINE_EQUALITY = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_()]*\s*=\s*[−-]?[A-Za-z][A-Za-z0-9_()]*)"
+)
 
 
 class ProseCompressionSentence(BaseModel):
