@@ -106,6 +106,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_canonicalization_enabled",
     "state_canonicalization_semantic_audit",
     "state_prose_compression_enabled",
+    "state_prose_compression_min_group_size",
     "state_prose_compression_max_sentences",
     "state_prose_compression_max_ratio",
     "state_prose_compression_max_summary_chars",
@@ -1616,6 +1617,9 @@ def _assemble_state_section_deterministically(
         for group in prose_groups
         for observation_id in group.source_observation_ids
     }
+    compressed_text_ids.update(
+        prose_policy.suppress_text_ids if prose_policy is not None else []
+    )
 
     for observation in _state_section_observations(kb, section):
         source_ids = [observation.id] if observation.id else []
@@ -2350,6 +2354,7 @@ def run_knowledge_pipeline(
             work=work,
             llm_config=pipeline.config.llm.model_dump(mode="json"),
             pipeline_version=STATE_PIPELINE_VERSION,
+            min_group_size=pipeline.config.notes.state_prose_compression_min_group_size,
             max_sentences=pipeline.config.notes.state_prose_compression_max_sentences,
             max_ratio=pipeline.config.notes.state_prose_compression_max_ratio,
             max_summary_chars=pipeline.config.notes.state_prose_compression_max_summary_chars,
