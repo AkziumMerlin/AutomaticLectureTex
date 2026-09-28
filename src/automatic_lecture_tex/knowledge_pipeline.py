@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from .chunking import chunk_transcript
 from .generated_notes import (
     GeneratedObservationStatePatch,
+    GeneratedSemanticTextCleanupBatch,
     GeneratedStateSectionNotes,
 )
 from .episode_graph import (
@@ -80,6 +81,7 @@ logger = logging.getLogger(__name__)
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 10
+STATE_SEMANTIC_TEXT_VERSION = 1
 STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
@@ -249,6 +251,243 @@ def _load_observation_resolution(
         return GeneratedObservationStatePatch.model_validate(payload["patch"])
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
+
+
+_SEMANTIC_NARRATION_RE = re.compile(
+    r"\b(?:"
+    r"лектор|преподавател\w*|на\s+(?:левой|правой|средней\s+)?доске|доск\w*|"
+    r"устно|записыва\w*|дописыва\w*|указывает|подч[её]ркива\w*|"
+    r"комментиру\w*|поясня\w*|отмечает|говорит|произносит|обводит|"
+    r"переходя\s+к|продолжая\s+(?:запись|объяснение)|в\s+рамке"
+    r")\b",
+    re.IGNORECASE,
+)
+_SEMANTIC_LATIN_SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?![A-Za-z0-9])")
+_SEMANTIC_NUMBER_RE = re.compile(r"\d+")
+_SEMANTIC_EQUALITY_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_()]*\s*=\s*[−-]?[A-Za-z][A-Za-z0-9_()]*)"
+)
+
+
+def _semantic_text_needs_cleanup(value: str) -> bool:
+    return bool(_SEMANTIC_NARRATION_RE.search(value))
+
+
+def _semantic_text_signature(value: str) -> dict[str, set[str]]:
+    normalized = value.replace("−", "-")
+    return {
+        "symbols": set(_SEMANTIC_LATIN_SYMBOL_RE.findall(normalized)),
+        "numbers": set(_SEMANTIC_NUMBER_RE.findall(normalized)),
+        "equalities": {
+            re.sub(r"\s+", "", item)
+            for item in _SEMANTIC_EQUALITY_RE.findall(normalized)
+        },
+    }
+
+
+def _semantic_cleanup_safe(
+    source: str,
+    target: str,
+    *,
+    has_latex: bool,
+) -> tuple[bool, str]:
+    target = target.strip()
+    if not target:
+        return False, "cleanup returned empty text"
+    if _semantic_text_needs_cleanup(target):
+        return False, "cleanup still contains lecturer/board narration"
+    if len(target) > max(len(source) + 40, int(len(source) * 1.15)):
+        return False, "cleanup expanded the source instead of removing narration"
+
+    source_sig = _semantic_text_signature(source)
+    target_sig = _semantic_text_signature(target)
+    new_symbols = target_sig["symbols"] - source_sig["symbols"]
+    if new_symbols:
+        return False, "cleanup introduced new Latin symbols: " + ", ".join(sorted(new_symbols))
+    new_numbers = target_sig["numbers"] - source_sig["numbers"]
+    if new_numbers:
+        return False, "cleanup introduced new numbers: " + ", ".join(sorted(new_numbers))
+    new_equalities = target_sig["equalities"] - source_sig["equalities"]
+    if new_equalities:
+        return False, "cleanup introduced new formal equalities"
+
+    if not has_latex:
+        missing_equalities = source_sig["equalities"] - target_sig["equalities"]
+        if missing_equalities:
+            return False, "cleanup dropped a formula that exists only in prose"
+        missing_symbols = source_sig["symbols"] - target_sig["symbols"]
+        if missing_symbols:
+            return False, "cleanup dropped standalone mathematical symbols from prose"
+        missing_numbers = source_sig["numbers"] - target_sig["numbers"]
+        if missing_numbers:
+            return False, "cleanup dropped numeric content from prose"
+        if len(target) < max(20, int(len(source) * 0.22)):
+            return False, "cleanup is too short to preserve a prose-only observation"
+
+    return True, ""
+
+
+def _load_semantic_cleanup(
+    path: Path,
+    fingerprint: str,
+) -> GeneratedSemanticTextCleanupBatch | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("fingerprint") != fingerprint:
+            return None
+        return GeneratedSemanticTextCleanupBatch.model_validate(payload["cleanup"])
+    except (json.JSONDecodeError, KeyError, ValidationError):
+        return None
+
+
+def _clean_repaired_semantic_prose(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    repaired: LectureKnowledgeBase,
+    work: Path,
+    llm_config: dict[str, Any],
+    force: bool,
+) -> tuple[dict[str, int], list[str]]:
+    """Remove lecture/board narration from repaired prose without touching mathematical LaTeX."""
+
+    by_id = {item.id: item for item in repaired.observations}
+    stats = {
+        "candidates": 0,
+        "model_calls": 0,
+        "cache_hits": 0,
+        "accepted": 0,
+        "rejected": 0,
+    }
+    unresolved: list[str] = []
+
+    for episode in sorted(repaired.episodes, key=lambda item: (item.start, item.end, item.id)):
+        candidates = [
+            by_id[observation_id]
+            for observation_id in episode.observation_ids
+            if observation_id in by_id
+            and by_id[observation_id].kind != ObservationKind.TRANSITION
+            and _semantic_text_needs_cleanup(by_id[observation_id].text)
+        ]
+        if not candidates:
+            continue
+
+        stats["candidates"] += len(candidates)
+        compact = [
+            {
+                "id": item.id,
+                "kind": str(item.kind),
+                "semantic_text": item.text,
+                "has_separate_latex": bool(item.latex),
+            }
+            for item in candidates
+        ]
+        fingerprint = stable_hash(
+            {
+                "semantic_text_version": STATE_SEMANTIC_TEXT_VERSION,
+                "episode_id": episode.id,
+                "items": compact,
+                "output_language": orchestrator.output_language,
+                "llm": llm_config,
+            }
+        )
+        path = work / "state_semantic_text_cleanup" / f"{episode.id}.json"
+        cleanup = None if force else _load_semantic_cleanup(path, fingerprint)
+        if cleanup is not None:
+            stats["cache_hits"] += 1
+        else:
+            prompt = f"""Rewrite only narration-heavy semantic prose from an already repaired
+mathematical lecture state into direct final-note prose.
+
+Episode title:
+{episode.title}
+
+Items:
+{json.dumps(compact, ensure_ascii=False, separators=(",", ":"))}
+
+Return one item for every input id, with the same observation_id.
+
+Rules:
+- remove references to the lecturer, teacher, board, speech/writing/pointing actions, frames, OCR,
+  reconstruction, or where something was written;
+- state the mathematical/course content directly, in language code {orchestrator.output_language};
+- this is NOT mathematical repair: preserve the meaning and terminology already present;
+- never invent a theorem name, assumption, symbol, number, example, or mathematical relation;
+- preserve literal equalities/symbol names/numbers when they occur only in semantic_text;
+- when has_separate_latex=true, do not repeat the displayed formula merely because the source prose
+  narrates that it was written; keep only the role, conclusion, or explanation carried by the prose;
+- prefer a short declarative sentence or phrase suitable for lecture notes;
+- plain prose only: no LaTeX commands or math delimiters.
+"""
+            try:
+                cleanup = orchestrator._structured(
+                    prompt,
+                    GeneratedSemanticTextCleanupBatch,
+                    operation="state_semantic_text_cleanup",
+                    max_tokens=4096,
+                    split_oversized_task=True,
+                    thinking=False,
+                    temperature=0.2,
+                    top_p=0.8,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=0.0,
+                    repetition_penalty=1.0,
+                )
+                stats["model_calls"] += 1
+            except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
+                unresolved.append(
+                    f"Semantic prose cleanup failed for {episode.id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
+
+            atomic_json_dump(
+                path,
+                {
+                    "fingerprint": fingerprint,
+                    "source_items": compact,
+                    "cleanup": cleanup.model_dump(mode="json"),
+                },
+            )
+
+        output_by_id: dict[str, str] = {}
+        duplicate_ids: set[str] = set()
+        for item in cleanup.items:
+            if item.observation_id in output_by_id:
+                duplicate_ids.add(item.observation_id)
+            output_by_id[item.observation_id] = item.semantic_text
+
+        for source in candidates:
+            target = output_by_id.get(source.id)
+            if target is None or source.id in duplicate_ids:
+                stats["rejected"] += 1
+                unresolved.append(
+                    f"{source.id}: semantic cleanup did not return exactly one item for the source."
+                )
+                continue
+            safe, reason = _semantic_cleanup_safe(
+                source.text,
+                target,
+                has_latex=bool(source.latex),
+            )
+            if not safe:
+                stats["rejected"] += 1
+                unresolved.append(f"{source.id}: semantic cleanup rejected: {reason}")
+                continue
+            source.text = target.strip()
+            stats["accepted"] += 1
+
+    atomic_json_dump(
+        work / "state_semantic_text_cleanup.json",
+        {
+            "version": STATE_SEMANTIC_TEXT_VERSION,
+            "stats": stats,
+            "unresolved": list(dict.fromkeys(unresolved)),
+        },
+    )
+    return stats, list(dict.fromkeys(unresolved))
 
 
 def _clip_state_raw_text(value: str | None, limit: int) -> str:
