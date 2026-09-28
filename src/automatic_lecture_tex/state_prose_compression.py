@@ -338,6 +338,7 @@ Return zero or more groups. For each group:
 - group only adjacent events that express the same point or a single compact setup;
 - write at most {max_sentences} short final-note sentences;
 - every sentence must cite the exact source observation IDs that support it;
+- the union of sentence source IDs must equal the group's source_observation_ids exactly;
 - preserve every distinct fact present in the grouped observations; if that cannot fit cleanly,
   split the group or leave observations ungrouped;
 - aggressively merge repeated narration such as several variants of "X is a complex space";
@@ -356,9 +357,10 @@ retraction: those observations are not present in the candidate runs.
                 prompt,
                 ProseCompressionPlan,
                 operation="state_prose_compress",
+                max_tokens=2048,
                 split_oversized_task=True,
                 thinking=False,
-                temperature=0.2,
+                temperature=0.6,
                 top_p=0.8,
                 top_k=20,
                 min_p=0.0,
