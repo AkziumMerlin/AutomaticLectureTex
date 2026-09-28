@@ -83,6 +83,7 @@ logger = logging.getLogger(__name__)
 KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 10
 STATE_SEMANTIC_TEXT_VERSION = 1
+STATE_SEMANTIC_TEXT_RETRY_VERSION = 1
 STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
@@ -360,8 +361,15 @@ def _clean_repaired_semantic_prose(
         "cache_hits": 0,
         "accepted": 0,
         "rejected": 0,
+        "first_pass_rejected": 0,
+        "retry_candidates": 0,
+        "retry_model_calls": 0,
+        "retry_cache_hits": 0,
+        "retry_accepted": 0,
+        "retry_rejected": 0,
     }
     unresolved: list[str] = []
+    retry_candidates: list[dict[str, Any]] = []
 
     for episode in sorted(repaired.episodes, key=lambda item: (item.start, item.end, item.id)):
         candidates = [
@@ -463,9 +471,14 @@ Rules:
         for source in candidates:
             target = output_by_id.get(source.id)
             if target is None or source.id in duplicate_ids:
-                stats["rejected"] += 1
-                unresolved.append(
-                    f"{source.id}: semantic cleanup did not return exactly one item for the source."
+                reason = "semantic cleanup did not return exactly one item for the source"
+                stats["first_pass_rejected"] += 1
+                retry_candidates.append(
+                    {
+                        "source": source,
+                        "first_attempt": target or "",
+                        "reason": reason,
+                    }
                 )
                 continue
             safe, reason = _semantic_cleanup_safe(
@@ -474,16 +487,137 @@ Rules:
                 has_latex=bool(source.latex),
             )
             if not safe:
-                stats["rejected"] += 1
-                unresolved.append(f"{source.id}: semantic cleanup rejected: {reason}")
+                stats["first_pass_rejected"] += 1
+                retry_candidates.append(
+                    {
+                        "source": source,
+                        "first_attempt": target,
+                        "reason": reason,
+                    }
+                )
                 continue
             source.text = target.strip()
             stats["accepted"] += 1
+
+    stats["retry_candidates"] = len(retry_candidates)
+    if retry_candidates:
+        retry_payload = [
+            {
+                "id": item["source"].id,
+                "kind": str(item["source"].kind),
+                "source_semantic_text": item["source"].text,
+                "has_separate_latex": bool(item["source"].latex),
+                "previous_attempt": item["first_attempt"],
+                "host_rejection_reason": item["reason"],
+            }
+            for item in retry_candidates
+        ]
+        retry_fingerprint = stable_hash(
+            {
+                "semantic_text_retry_version": STATE_SEMANTIC_TEXT_RETRY_VERSION,
+                "items": retry_payload,
+                "output_language": orchestrator.output_language,
+                "llm": llm_config,
+            }
+        )
+        retry_path = work / "state_semantic_text_cleanup_retry.json"
+        retry = None if force else _load_semantic_cleanup(retry_path, retry_fingerprint)
+        if retry is not None:
+            stats["retry_cache_hits"] = 1
+        else:
+            retry_prompt = f"""Repair ONLY the rejected semantic-prose cleanup attempts below.
+
+Items:
+{json.dumps(retry_payload, ensure_ascii=False, separators=(",", ":"))}
+
+Return exactly one item for every input id, using the same observation_id.
+
+The host rejected the previous attempt for the explicit reason shown in host_rejection_reason.
+Fix that reason without weakening any content constraint.
+
+Rules:
+- remove lecturer/teacher/board/speech/writing/pointing narration completely;
+- write direct final-note prose in language code {orchestrator.output_language};
+- preserve the source meaning and terminology;
+- do not invent any theorem name, assumption, symbol, number, example, or mathematical relation;
+- if the rejection says a symbol/number/equality was dropped, retain it explicitly in plain prose;
+- when has_separate_latex=true, the formula itself is already protected separately and need not be
+  repeated in prose unless it is necessary to preserve the prose meaning;
+- plain prose only: no LaTeX commands or math delimiters.
+"""
+            try:
+                retry = orchestrator._structured(
+                    retry_prompt,
+                    GeneratedSemanticTextCleanupBatch,
+                    operation="state_semantic_text_cleanup_retry",
+                    max_tokens=3072,
+                    split_oversized_task=True,
+                    thinking=False,
+                    temperature=0.2,
+                    top_p=0.8,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=0.0,
+                    repetition_penalty=1.0,
+                )
+                stats["retry_model_calls"] = 1
+            except (json.JSONDecodeError, ValidationError, StructuredTaskTooLargeError) as exc:
+                retry = None
+                unresolved.append(
+                    "Semantic prose cleanup retry failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            if retry is not None:
+                atomic_json_dump(
+                    retry_path,
+                    {
+                        "fingerprint": retry_fingerprint,
+                        "source_items": retry_payload,
+                        "cleanup": retry.model_dump(mode="json"),
+                    },
+                )
+
+        retry_by_id: dict[str, str] = {}
+        retry_duplicates: set[str] = set()
+        if retry is not None:
+            for item in retry.items:
+                if item.observation_id in retry_by_id:
+                    retry_duplicates.add(item.observation_id)
+                retry_by_id[item.observation_id] = item.semantic_text
+
+        for item in retry_candidates:
+            source = item["source"]
+            target = retry_by_id.get(source.id)
+            if retry is None or target is None or source.id in retry_duplicates:
+                reason = (
+                    "retry did not return exactly one item for the source"
+                    if retry is not None
+                    else item["reason"]
+                )
+                stats["rejected"] += 1
+                stats["retry_rejected"] += 1
+                unresolved.append(f"{source.id}: semantic cleanup rejected: {reason}")
+                continue
+            safe, reason = _semantic_cleanup_safe(
+                source.text,
+                target,
+                has_latex=bool(source.latex),
+            )
+            if not safe:
+                stats["rejected"] += 1
+                stats["retry_rejected"] += 1
+                unresolved.append(f"{source.id}: semantic cleanup retry rejected: {reason}")
+                continue
+            source.text = target.strip()
+            stats["accepted"] += 1
+            stats["retry_accepted"] += 1
 
     atomic_json_dump(
         work / "state_semantic_text_cleanup.json",
         {
             "version": STATE_SEMANTIC_TEXT_VERSION,
+            "retry_version": STATE_SEMANTIC_TEXT_RETRY_VERSION,
             "stats": stats,
             "unresolved": list(dict.fromkeys(unresolved)),
         },
