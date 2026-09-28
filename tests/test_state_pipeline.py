@@ -90,6 +90,30 @@ def test_state_ir_fingerprint_depends_on_semantic_text_version(monkeypatch):
     assert before != after
 
 
+def test_state_ir_fingerprint_depends_on_semantic_text_retry_version(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state.yaml"
+    )
+    config = load_config(config_path)
+    pipeline = pipeline_robust_module.Pipeline(config)
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[TranscriptSegment(id="seg_0", start=0.0, end=1.0, text="test")],
+    )
+
+    before = pipeline._ir_fingerprint(transcript, {})
+    monkeypatch.setattr(
+        pipeline_robust_module,
+        "STATE_SEMANTIC_TEXT_RETRY_VERSION",
+        pipeline_robust_module.STATE_SEMANTIC_TEXT_RETRY_VERSION + 1,
+    )
+    after = pipeline._ir_fingerprint(transcript, {})
+
+    assert before != after
+
+
 def test_state_ir_fingerprint_depends_on_writer_cache_version(monkeypatch):
     config_path = (
         Path(__file__).resolve().parents[1]
@@ -731,6 +755,106 @@ def test_semantic_cleanup_reuses_math_repair_and_caches_text_projection(tmp_path
     assert orchestrator.calls == 1
     assert stats["cache_hits"] == 1
     assert kb.observations[0].text == "Пространство X является комплексным."
+
+
+def test_semantic_cleanup_retries_only_host_rejected_items_and_caches_retry(tmp_path):
+    narrative = LectureObservation(
+        id="obs_retry",
+        window_id="window_1",
+        start=0.0,
+        end=1.0,
+        kind=ObservationKind.REMARK,
+        text="Лектор отмечает, что пространство X комплексное и ранее введён функционал f.",
+        latex=None,
+        episode_id="episode_1",
+    )
+    episode = SemanticEpisode(
+        id="episode_1",
+        title="Комплексный случай",
+        start=0.0,
+        end=1.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=["obs_retry"],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[narrative],
+        episodes=[episode],
+    )
+
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def __init__(self):
+            self.calls = []
+
+        def _structured(self, prompt, schema, **kwargs):
+            operation = kwargs["operation"]
+            self.calls.append(operation)
+            assert schema is GeneratedSemanticTextCleanupBatch
+            if operation == "state_semantic_text_cleanup":
+                return GeneratedSemanticTextCleanupBatch(
+                    items=[
+                        {
+                            "observation_id": "obs_retry",
+                            "semantic_text": "Пространство X является комплексным.",
+                        }
+                    ]
+                )
+            assert operation == "state_semantic_text_cleanup_retry"
+            assert "dropped standalone mathematical symbols" in prompt
+            return GeneratedSemanticTextCleanupBatch(
+                items=[
+                    {
+                        "observation_id": "obs_retry",
+                        "semantic_text": (
+                            "Пространство X является комплексным; функционал f уже введён."
+                        ),
+                    }
+                ]
+            )
+
+    orchestrator = FakeOrchestrator()
+    original = narrative.text
+    stats, unresolved = knowledge_pipeline_module._clean_repaired_semantic_prose(
+        orchestrator,
+        repaired=kb,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=False,
+    )
+
+    assert unresolved == []
+    assert orchestrator.calls == [
+        "state_semantic_text_cleanup",
+        "state_semantic_text_cleanup_retry",
+    ]
+    assert stats["first_pass_rejected"] == 1
+    assert stats["retry_accepted"] == 1
+    assert stats["rejected"] == 0
+    assert kb.observations[0].text == (
+        "Пространство X является комплексным; функционал f уже введён."
+    )
+
+    kb.observations[0].text = original
+    stats, unresolved = knowledge_pipeline_module._clean_repaired_semantic_prose(
+        orchestrator,
+        repaired=kb,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=False,
+    )
+    assert unresolved == []
+    assert orchestrator.calls == [
+        "state_semantic_text_cleanup",
+        "state_semantic_text_cleanup_retry",
+    ]
+    assert stats["cache_hits"] == 1
+    assert stats["retry_cache_hits"] == 1
+    assert kb.observations[0].text == (
+        "Пространство X является комплексным; функционал f уже введён."
+    )
 
 
 def test_state_patch_replace_applies_without_similarity_gate():
