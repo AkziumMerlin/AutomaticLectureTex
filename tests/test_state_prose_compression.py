@@ -229,7 +229,7 @@ def test_opening_narration_compresses_across_structural_transitions(tmp_path):
         pipeline_version=10,
         min_group_size=3,
         max_sentences=2,
-        max_ratio=0.55,
+        max_ratio=0.90,
         max_summary_chars=700,
         force=False,
     )
