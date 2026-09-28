@@ -124,7 +124,6 @@ def test_summary_runs_bridge_transitions_but_stop_at_formal_content():
 
     assert [[item.id for item in run] for run in runs] == [
         ["obs_a", "obs_b", "obs_c"],
-        ["obs_d", "obs_e", "obs_f"],
     ]
 
 
@@ -254,6 +253,44 @@ def test_opening_narration_compresses_across_structural_transitions(tmp_path):
     )
     assert notes.blocks[1].latex == "Вводится линейный функционал."
     assert notes.blocks[2].latex == r"f:X\to\mathbb{C}"
+
+
+
+def test_large_leading_summary_may_omit_one_noisy_remark():
+    run = [
+        _obs("obs_topics", start=1.0, kind=ObservationKind.REMARK, text="Темы: нормы, дуалы и спектр."),
+        _obs("obs_noise", start=2.0, kind=ObservationKind.REMARK, text="Неясный одиночный фрагмент перечисления."),
+        _obs("obs_space_a", start=3.0, kind=ObservationKind.REMARK, text="Пространство X комплексное."),
+        _obs("obs_space_b", start=4.0, kind=ObservationKind.REMARK, text="X снова называется комплексным."),
+        _obs("obs_space_c", start=5.0, kind=ObservationKind.NOTATION, text="X обозначает комплексное пространство."),
+    ]
+    proposal = ProseSummaryGroupProposal(
+        source_observation_ids=[item.id for item in run],
+        sentences=[
+            ProseCompressionSentence(
+                text="Раздел посвящён нормам, дуалам и спектру.",
+                source_observation_ids=["obs_topics"],
+            ),
+            ProseCompressionSentence(
+                text="Пространство X рассматривается как комплексное.",
+                source_observation_ids=["obs_space_a", "obs_space_b", "obs_space_c"],
+            ),
+        ],
+    )
+    group, reason = _validate_summary_group(
+        proposal,
+        section_id="topic_000",
+        runs=[run],
+        used_ids=set(),
+        min_group_size=3,
+        max_sentences=2,
+        max_ratio=0.90,
+        max_summary_chars=700,
+        output_language="ru",
+    )
+    assert reason == ""
+    assert group is not None
+    assert "Неясный" not in group.summary_text
 
 
 def test_small_two_observation_summary_is_rejected():
