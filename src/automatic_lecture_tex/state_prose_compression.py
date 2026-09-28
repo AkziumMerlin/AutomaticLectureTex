@@ -391,6 +391,7 @@ def _compress_section(
     max_sentences: int,
     max_ratio: float,
     max_summary_chars: int,
+    output_language: str,
     force: bool,
 ) -> tuple[
     list[ProseCompressionRenderGroup],
@@ -419,6 +420,7 @@ def _compress_section(
             "max_sentences": max_sentences,
             "max_ratio": max_ratio,
             "max_summary_chars": max_summary_chars,
+            "output_language": output_language,
             "llm": llm_config,
         }
     )
@@ -446,13 +448,19 @@ You have TWO strictly different operations.
 - use at least {min_group_size} observations, preferably an entire repetitive run;
 - write at most {max_sentences} short final-note sentences;
 - every sentence cites exact source observation IDs and their union equals the group IDs;
-- retain distinct facts, but remove narration about what the lecturer says/writes/repeats/points at;
+- preserve coherent explicit content such as a clear list of announced course topics;
+- for a mixed/noisy observation, prioritize facts repeated or stabilized by neighbouring observations;
+  you MAY omit isolated unclear enumeration fragments that are not corroborated by adjacent events;
+- remove narration about what the lecturer says/writes/repeats/points at;
+- write in language code {output_language};
 - output plain prose only: no formulas, LaTeX, relation symbols, provenance or reconstruction talk.
 
 2. redundant_text_groups:
 - this is SELECTION ONLY; generate NO replacement text;
 - group nearby remark/notation observations only when they repeat the same semantic point;
 - choose ONE existing representative_observation_id from the group;
+- prefer the most concise self-contained representative and, when semantics are equally complete,
+  prefer text that reads like final notes rather than narration about lecturer/board actions;
 - be conservative: do not group merely related statements or successive proof developments;
 - mathematical formulas are protected by the host. You are only deciding whether surrounding TEXT
   channels are repetitive.
@@ -509,6 +517,7 @@ Do not invent corrected mathematics or textbook material. If uncertain, omit a g
             max_sentences=max_sentences,
             max_ratio=max_ratio,
             max_summary_chars=max_summary_chars,
+            output_language=output_language,
         )
         audit.append(
             {
@@ -567,6 +576,7 @@ def run_state_prose_compression(
     suppress_text: set[str] = set()
     audit: list[dict[str, Any]] = []
     unresolved: list[str] = []
+    output_language = str(getattr(orchestrator, "output_language", "") or "")
     stats = {
         "sections_with_candidates": 0,
         "model_calls": 0,
@@ -606,6 +616,7 @@ def run_state_prose_compression(
             max_sentences=max_sentences,
             max_ratio=max_ratio,
             max_summary_chars=max_summary_chars,
+            output_language=output_language,
             force=force,
         )
         groups.extend(section_groups)
