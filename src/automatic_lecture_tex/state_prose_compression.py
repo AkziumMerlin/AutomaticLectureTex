@@ -216,6 +216,26 @@ def _number_tokens(value: str) -> set[str]:
     return set(_NUMBER_TOKEN.findall(value))
 
 
+def _language_ok(value: str, output_language: str) -> bool:
+    if not output_language.casefold().startswith("ru"):
+        return True
+    letters = _ALPHA_LETTER.findall(value)
+    if not letters:
+        return True
+    cyrillic = _CYRILLIC_LETTER.findall(value)
+    return len(cyrillic) / len(letters) >= 0.55
+
+
+def _formal_snippets(value: str) -> set[str]:
+    """Extract simple literal inline equalities for host-side redundancy checks."""
+
+    normalized = value.replace("−", "-")
+    return {
+        re.sub(r"\s+", "", match)
+        for match in _INLINE_EQUALITY.findall(normalized)
+    }
+
+
 def _validate_summary_group(
     proposal: ProseSummaryGroupProposal,
     *,
