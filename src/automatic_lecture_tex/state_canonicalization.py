@@ -2,24 +2,18 @@ from __future__ import annotations
 
 import json
 import re
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from .schemas import (
-    LectureKnowledgeBase,
-    LectureObservation,
-    ObservationKind,
-)
+from .schemas import LectureKnowledgeBase, LectureObservation, ObservationKind
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_CANONICALIZATION_VERSION = 1
-_LOCAL_BATCH_SIZE = 64
-_LOCAL_BATCH_OVERLAP = 8
+STATE_CANONICALIZATION_VERSION = 2
 _GLOBAL_AUDIT_MAX_CHARS = 60000
+_FORWARD_SCAN = 10
 
 CanonicalRelationKind = Literal[
     "duplicate",
@@ -31,10 +25,10 @@ CanonicalRelationKind = Literal[
 
 
 class CanonicalObservationRelation(BaseModel):
-    """ID-only relation proposed over already repaired observations.
+    """ID-only relation over already repaired observations.
 
-    The schema deliberately contains no replacement text or LaTeX fields. Canonicalization is not
-    allowed to write mathematics; it may only relate existing observations.
+    There is deliberately no text/LaTeX replacement channel. The canonicalizer can only point at
+    existing observations; host code decides whether one render channel is provably redundant.
     """
 
     source_observation_id: str
@@ -58,6 +52,13 @@ class CanonicalObservationPlan(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
+class CanonicalRenderPolicy(BaseModel):
+    """Render-time suppression mask; repaired state itself remains immutable."""
+
+    suppress_text_ids: list[str] = Field(default_factory=list)
+    suppress_latex_ids: list[str] = Field(default_factory=list)
+
+
 def _norm_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
@@ -68,82 +69,100 @@ def _norm_latex(value: str | None) -> str:
     return re.sub(r"\s+", "", text)
 
 
-def _similarity(left: str, right: str) -> float:
-    if not left or not right:
-        return 0.0
-    return SequenceMatcher(None, left, right).ratio()
+def _ordered_after(source: LectureObservation, target: LectureObservation) -> bool:
+    return (target.start, target.end, target.id) > (source.start, source.end, source.id)
 
 
-def _compact_observation(item: LectureObservation, *, limit: int = 280) -> dict[str, Any]:
+def _incomplete_formula(value: str | None) -> bool:
+    latex = str(value or "")
+    markers = (
+        r"\cdots",
+        r"\ldots",
+        r"\dots",
+        "[...]",
+        r"[\cdots]",
+        r"\bigl[\cdots\bigr]",
+        r"\text{или}",
+    )
+    return any(marker in latex for marker in markers)
+
+
+def _math_tokens(value: str | None) -> set[str]:
+    latex = str(value or "")
+    # Strip the placeholders themselves before measuring overlap.
+    for marker in (
+        r"\cdots",
+        r"\ldots",
+        r"\dots",
+        r"\text{или}",
+        "cdots",
+        "ldots",
+        "dots",
+    ):
+        latex = latex.replace(marker, "")
     return {
-        "id": item.id,
-        "episode_id": item.episode_id,
-        "start": item.start,
-        "end": item.end,
-        "kind": item.kind,
-        "text": item.text[:limit],
-        "latex": (item.latex or "")[:limit] or None,
-        "target_observation_id": item.target_observation_id,
+        token.casefold()
+        for token in re.findall(r"[A-Za-z]+|[А-Яа-яЁё]+|\d+", latex)
+        if token
     }
 
 
-def _safe_duplicate(source: LectureObservation, target: LectureObservation) -> bool:
-    if source.episode_id != target.episode_id or source.kind != target.kind:
-        return False
-    if (target.start, target.end, target.id) <= (source.start, source.end, source.id):
-        return False
+def _token_coverage(source: str | None, target: str | None) -> float:
+    source_tokens = _math_tokens(source)
+    target_tokens = _math_tokens(target)
+    if not source_tokens:
+        return 0.0
+    return len(source_tokens.intersection(target_tokens)) / len(source_tokens)
 
+
+def _formula_subsumed(source: LectureObservation, target: LectureObservation) -> bool:
+    """Host-verifiable formula redundancy.
+
+    This intentionally says nothing about prose. Suppressing a formula never suppresses the
+    observation text, so a useful proof explanation cannot disappear because a later formula
+    happens to contain the same symbols.
+    """
+
+    if source.episode_id != target.episode_id or not _ordered_after(source, target):
+        return False
     source_latex = _norm_latex(source.latex)
     target_latex = _norm_latex(target.latex)
-    source_text = _norm_text(source.text)
-    target_text = _norm_text(target.text)
-
-    if source_latex or target_latex:
-        if not source_latex or source_latex != target_latex:
-            return False
-        if source_text and not target_text:
-            return False
-        if not source_text:
-            return True
-        return _similarity(source_text, target_text) >= 0.90
-
-    return _similarity(source_text, target_text) >= 0.97
-
-
-def _safe_intermediate(source: LectureObservation, target: LectureObservation) -> bool:
-    if source.episode_id != target.episode_id:
-        return False
-    if source.kind != target.kind or source.kind == ObservationKind.PROOF_STEP:
-        return False
-    if (target.start, target.end, target.id) <= (source.start, source.end, source.id):
+    if not source_latex or not target_latex:
         return False
 
-    source_latex = _norm_latex(source.latex)
-    target_latex = _norm_latex(target.latex)
-    if source_latex and target_latex:
-        if source_latex == target_latex:
-            return False
-        if len(source_latex) < 8 or len(source_latex) / max(1, len(target_latex)) < 0.30:
-            return False
-        if source_latex not in target_latex:
-            return False
-        source_text = _norm_text(source.text)
-        target_text = _norm_text(target.text)
-        if source_text and not target_text:
-            return False
-        if source_text and source_text not in target_text:
-            if _similarity(source_text, target_text) < 0.85:
-                return False
+    if source_latex == target_latex:
         return True
 
-    if source_latex or target_latex:
-        return False
+    # Literal completion/prefixing is safe at the formula channel: the complete target retains
+    # every source symbol and adds context such as a name or the rest of a set-builder.
+    if len(source_latex) >= 8 and source_latex in target_latex:
+        return True
 
+    # Board-state partials often contain \cdots or an explicit ambiguity placeholder, so literal
+    # containment fails when the completed line also fixes a variable name. Only suppress the
+    # partial formula when most of its mathematical vocabulary survives in the later line.
+    if _incomplete_formula(source.latex):
+        return _token_coverage(source.latex, target.latex) >= 0.70
+
+    return False
+
+
+def _text_duplicate(source: LectureObservation, target: LectureObservation) -> bool:
+    """Extremely strict text-only deduplication; semantic paraphrases remain visible."""
+
+    if source.episode_id != target.episode_id or source.kind != target.kind:
+        return False
+    if not _ordered_after(source, target):
+        return False
     source_text = _norm_text(source.text)
     target_text = _norm_text(target.text)
-    if len(source_text) < 20 or len(source_text) / max(1, len(target_text)) < 0.50:
+    if not source_text or not target_text:
         return False
-    return source_text != target_text and source_text in target_text
+    return source_text == target_text or (
+        len(source_text) >= 24
+        and len(source_text) / max(1, len(target_text)) >= 0.75
+        and source_text in target_text
+    )
 
 
 def _explicit_supersession(source: LectureObservation, target: LectureObservation) -> bool:
@@ -153,8 +172,6 @@ def _explicit_supersession(source: LectureObservation, target: LectureObservatio
 
 
 def _deterministic_relations(kb: LectureKnowledgeBase) -> list[CanonicalObservationRelation]:
-    """Find only relations whose suppression can be checked without model judgement."""
-
     relations: list[CanonicalObservationRelation] = []
     by_episode: dict[str, list[LectureObservation]] = {}
     for item in sorted(kb.observations, key=lambda obs: (obs.start, obs.end, obs.id)):
@@ -167,36 +184,40 @@ def _deterministic_relations(kb: LectureKnowledgeBase) -> list[CanonicalObservat
                     CanonicalObservationRelation(
                         source_observation_id=source.id,
                         relation="meta",
-                        reason="host: transition event has no mathematical payload",
+                        reason="host: transition text is structural evidence, not rendered mathematics",
                     )
                 )
 
-            for target in observations[index + 1 : index + 7]:
-                if _safe_duplicate(source, target):
+            for target in observations[index + 1 : index + 1 + _FORWARD_SCAN]:
+                if _formula_subsumed(source, target):
+                    relation = (
+                        "intermediate"
+                        if _norm_latex(source.latex) != _norm_latex(target.latex)
+                        else "duplicate"
+                    )
+                    relations.append(
+                        CanonicalObservationRelation(
+                            source_observation_id=source.id,
+                            target_observation_id=target.id,
+                            relation=relation,
+                            reason="host: later formula provably contains the same rendered math",
+                        )
+                    )
+                    break
+                if not source.latex and not target.latex and _text_duplicate(source, target):
                     relations.append(
                         CanonicalObservationRelation(
                             source_observation_id=source.id,
                             target_observation_id=target.id,
                             relation="duplicate",
-                            reason="host: exact/near-exact redundant payload",
-                        )
-                    )
-                    break
-                if _safe_intermediate(source, target):
-                    relations.append(
-                        CanonicalObservationRelation(
-                            source_observation_id=source.id,
-                            target_observation_id=target.id,
-                            relation="intermediate",
-                            reason="host: later observation contains the same partial payload",
+                            reason="host: exact/literal text redundancy",
                         )
                     )
                     break
 
     by_id = {item.id: item for item in kb.observations}
     for target in kb.observations:
-        source_id = target.target_observation_id
-        source = by_id.get(source_id or "")
+        source = by_id.get(target.target_observation_id or "")
         if source is not None and _explicit_supersession(source, target):
             relations.append(
                 CanonicalObservationRelation(
@@ -209,23 +230,17 @@ def _deterministic_relations(kb: LectureKnowledgeBase) -> list[CanonicalObservat
     return relations
 
 
-def _observation_batches(
-    observations: list[LectureObservation],
-    *,
-    size: int = _LOCAL_BATCH_SIZE,
-    overlap: int = _LOCAL_BATCH_OVERLAP,
-) -> list[list[LectureObservation]]:
-    if not observations:
-        return []
-    batches: list[list[LectureObservation]] = []
-    start = 0
-    while start < len(observations):
-        batch = observations[start : start + size]
-        batches.append(batch)
-        if start + size >= len(observations):
-            break
-        start += max(1, size - overlap)
-    return batches
+def _compact_observation(item: LectureObservation, *, limit: int = 180) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "episode_id": item.episode_id,
+        "start": item.start,
+        "end": item.end,
+        "kind": item.kind,
+        "text": item.text[:limit],
+        "latex": (item.latex or "")[:limit] or None,
+        "target_observation_id": item.target_observation_id,
+    }
 
 
 def _load_plan(path: Path, fingerprint: str) -> CanonicalObservationPlan | None:
@@ -240,7 +255,7 @@ def _load_plan(path: Path, fingerprint: str) -> CanonicalObservationPlan | None:
         return None
 
 
-def _propose_local_relations(
+def _propose_semantic_audit(
     orchestrator,
     *,
     observations: list[LectureObservation],
@@ -249,110 +264,24 @@ def _propose_local_relations(
     pipeline_version: int,
     force: bool,
 ) -> tuple[list[CanonicalObservationRelation], list[str], int]:
-    relations: list[CanonicalObservationRelation] = []
-    unresolved: list[str] = []
-    cache_hits = 0
+    """Optional one-call audit for long-range relations.
 
-    for batch_index, batch in enumerate(_observation_batches(observations)):
-        compact = [_compact_observation(item) for item in batch]
-        allowed_ids = {item.id for item in batch}
-        fingerprint = stable_hash(
-            {
-                "state_pipeline_version": pipeline_version,
-                "canonicalization_version": STATE_CANONICALIZATION_VERSION,
-                "mode": "local",
-                "observations": compact,
-                "llm": llm_config,
-            }
-        )
-        path = work / "state_canonicalization_batches" / f"batch_{batch_index:03d}.json"
-        plan = None if force else _load_plan(path, fingerprint)
-        if plan is not None:
-            cache_hits += 1
-        else:
-            prompt = f"""Conservatively relate already repaired mathematical lecture events.
-You are NOT a writer and MUST NOT rewrite, repair, normalize, or invent any mathematics.
-Return ONLY relations between the supplied observation IDs. The host may ignore your relation.
+    Model-only semantic relations are diagnostic. They can never rewrite text/LaTeX, and unless a
+    host-verifiable formula/text condition also holds they remain audit-only.
+    """
 
-Observations:
-{json.dumps(compact, ensure_ascii=False, separators=(",", ":"))}
-
-Allowed relation meanings:
-- duplicate: same mathematical event repeated; choose a LATER existing target ID carrying the same content.
-- intermediate: source is a visibly partial/incomplete state later completed by target.
-- meta: pure organizational transition with no mathematical content; target must be omitted.
-- supersedes: a later existing event explicitly replaces/corrects the source.
-- conflict: two existing events make materially incompatible mathematical statements.
-
-Be conservative. Omit a relation when unsure. Do not use textbook knowledge to rewrite a formula.
-Do not put mathematical content in reason. Never output text or LaTeX, only IDs, relation labels, and
-short diagnostic reasons.
-"""
-            try:
-                plan = orchestrator._structured(
-                    prompt,
-                    CanonicalObservationPlan,
-                    operation="state_canonicalize_local",
-                    split_oversized_task=True,
-                )
-            except Exception as exc:
-                unresolved.append(
-                    "Local canonicalization batch "
-                    f"{batch_index} failed safely: {type(exc).__name__}: {exc}"
-                )
-                continue
-            atomic_json_dump(
-                path,
-                {
-                    "fingerprint": fingerprint,
-                    "plan": plan.model_dump(mode="json"),
-                },
-            )
-
-        for relation in plan.relations:
-            if relation.source_observation_id not in allowed_ids:
-                unresolved.append(
-                    f"Canonicalization ignored unknown local source {relation.source_observation_id}."
-                )
-                continue
-            if (
-                relation.target_observation_id
-                and relation.target_observation_id not in allowed_ids
-            ):
-                unresolved.append(
-                    "Canonicalization ignored out-of-batch target "
-                    f"{relation.target_observation_id}."
-                )
-                continue
-            relations.append(relation)
-        unresolved.extend(plan.unresolved)
-
-    return relations, unresolved, cache_hits
-
-
-def _propose_global_audit(
-    orchestrator,
-    *,
-    observations: list[LectureObservation],
-    work: Path,
-    llm_config: dict[str, Any],
-    pipeline_version: int,
-    force: bool,
-) -> tuple[list[CanonicalObservationRelation], list[str], int]:
-    """Find long-range semantic relations. These are audit-only unless host-proven safe."""
-
-    key_kinds = {
-        ObservationKind.DEFINITION,
-        ObservationKind.CLAIM,
-        ObservationKind.EQUATION,
-        ObservationKind.NOTATION,
-        ObservationKind.CORRECTION,
-        ObservationKind.RETRACTION,
-    }
     compact = [
-        _compact_observation(item, limit=180)
+        _compact_observation(item)
         for item in observations
-        if item.kind in key_kinds
+        if item.kind
+        in {
+            ObservationKind.DEFINITION,
+            ObservationKind.CLAIM,
+            ObservationKind.EQUATION,
+            ObservationKind.NOTATION,
+            ObservationKind.CORRECTION,
+            ObservationKind.RETRACTION,
+        }
     ]
     serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
     if not compact:
@@ -361,8 +290,8 @@ def _propose_global_audit(
         return (
             [],
             [
-                "Global canonicalization audit skipped because the compact mathematical catalog "
-                f"exceeded {_GLOBAL_AUDIT_MAX_CHARS} characters."
+                "Semantic canonicalization audit skipped because the compact catalog exceeded "
+                f"{_GLOBAL_AUDIT_MAX_CHARS} characters."
             ],
             0,
         )
@@ -371,7 +300,6 @@ def _propose_global_audit(
         {
             "state_pipeline_version": pipeline_version,
             "canonicalization_version": STATE_CANONICALIZATION_VERSION,
-            "mode": "global",
             "observations": compact,
             "llm": llm_config,
         }
@@ -381,19 +309,18 @@ def _propose_global_audit(
     cache_hits = int(plan is not None)
     if plan is None:
         prompt = f"""Audit long-range relations in an already repaired mathematical lecture state.
-You cannot write or modify mathematics. Return IDs only.
+You are not a writer. You cannot change, normalize, or invent any mathematical text or formula.
+Return observation IDs and relation labels only.
 
-Compact mathematical catalog:
+Catalog:
 {serialized}
 
-Return only:
-- supersedes when a later EXISTING observation clearly replaces/refines an earlier EXISTING one;
-- conflict when two EXISTING observations are mathematically incompatible and neither can be safely
-  deleted from the evidence alone.
+Use:
+- supersedes when a later EXISTING observation clearly finalizes/replaces an earlier one;
+- conflict when two EXISTING observations are mathematically incompatible.
 
-This pass is deliberately conservative and audit-oriented. Do not return duplicate/intermediate/meta.
-Do not correct formulas, do not invent a canonical statement, and do not use textbook knowledge as
-a substitute for lecture evidence. If uncertain, return nothing.
+This is audit-only semantic judgement. Do not propose prose rewrites or corrected formulas. If
+uncertain, return nothing.
 """
         try:
             plan = orchestrator._structured(
@@ -406,17 +333,14 @@ a substitute for lecture evidence. If uncertain, return nothing.
             return (
                 [],
                 [
-                    "Global canonicalization audit failed safely: "
+                    "Semantic canonicalization audit failed safely: "
                     f"{type(exc).__name__}: {exc}"
                 ],
                 0,
             )
         atomic_json_dump(
             path,
-            {
-                "fingerprint": fingerprint,
-                "plan": plan.model_dump(mode="json"),
-            },
+            {"fingerprint": fingerprint, "plan": plan.model_dump(mode="json")},
         )
 
     allowed_ids = {item["id"] for item in compact}
@@ -454,21 +378,19 @@ def _dedupe_relations(
     return result
 
 
-def _apply_relations(
+def _build_render_policy(
     kb: LectureKnowledgeBase,
     relations: list[CanonicalObservationRelation],
-) -> tuple[LectureKnowledgeBase, dict[str, int], list[dict[str, Any]]]:
-    """Apply only host-verifiable suppressions; semantic judgement remains audit-only."""
+) -> tuple[CanonicalRenderPolicy, dict[str, int], list[dict[str, Any]]]:
+    """Apply relations only to render channels; never mutate repaired observations."""
 
-    result = kb.model_copy(deep=True)
-    by_id = {item.id: item for item in result.observations}
-    suppressed: set[str] = set()
+    by_id = {item.id: item for item in kb.observations}
+    suppress_text: set[str] = set()
+    suppress_latex: set[str] = set()
     applied: list[dict[str, Any]] = []
     stats = {
-        "suppressed_duplicate": 0,
-        "suppressed_intermediate": 0,
-        "suppressed_meta": 0,
-        "suppressed_explicit_superseded": 0,
+        "suppressed_text_blocks": 0,
+        "suppressed_latex_blocks": 0,
         "flagged_supersedes": 0,
         "flagged_conflict": 0,
         "rejected_unsafe_relation": 0,
@@ -477,84 +399,63 @@ def _apply_relations(
     for relation in _dedupe_relations(relations):
         source = by_id.get(relation.source_observation_id)
         target = by_id.get(relation.target_observation_id or "")
-        accepted = False
-        applied_as = "audit_only"
+        channels: list[str] = []
+        host_verified = False
 
         if source is None:
             stats["rejected_unsafe_relation"] += 1
             continue
 
-        if relation.relation == "duplicate" and target is not None:
-            accepted = _safe_duplicate(source, target)
-            applied_as = "suppressed" if accepted else "audit_only"
-            key = "suppressed_duplicate"
-        elif relation.relation == "intermediate" and target is not None:
-            accepted = _safe_intermediate(source, target)
-            applied_as = "suppressed" if accepted else "audit_only"
-            key = "suppressed_intermediate"
-        elif relation.relation == "meta":
-            accepted = source.kind == ObservationKind.TRANSITION and not source.latex
-            applied_as = "suppressed" if accepted else "audit_only"
-            key = "suppressed_meta"
+        if relation.relation == "meta":
+            if source.kind == ObservationKind.TRANSITION and not source.latex:
+                suppress_text.add(source.id)
+                channels.append("text")
+                host_verified = True
+        elif relation.relation in {"duplicate", "intermediate"} and target is not None:
+            if source.latex and target.latex and _formula_subsumed(source, target):
+                suppress_latex.add(source.id)
+                channels.append("latex")
+                host_verified = True
+            if not source.latex and not target.latex and _text_duplicate(source, target):
+                suppress_text.add(source.id)
+                channels.append("text")
+                host_verified = True
         elif relation.relation == "supersedes" and target is not None:
-            accepted = _explicit_supersession(source, target)
-            applied_as = "suppressed" if accepted else "audit_only"
-            key = "suppressed_explicit_superseded" if accepted else "flagged_supersedes"
+            if _explicit_supersession(source, target):
+                if source.text:
+                    suppress_text.add(source.id)
+                    channels.append("text")
+                if source.latex:
+                    suppress_latex.add(source.id)
+                    channels.append("latex")
+                host_verified = True
+            else:
+                stats["flagged_supersedes"] += 1
         elif relation.relation == "conflict" and target is not None:
-            key = "flagged_conflict"
-        else:
-            key = "rejected_unsafe_relation"
+            stats["flagged_conflict"] += 1
 
-        if relation.relation in {"duplicate", "intermediate", "meta"} and not accepted:
+        if not host_verified and relation.relation in {"duplicate", "intermediate", "meta"}:
             stats["rejected_unsafe_relation"] += 1
-        else:
-            stats[key] += 1
-
-        if accepted:
-            suppressed.add(source.id)
-            if target is not None:
-                result.observation_aliases[source.id] = target.id
-                target.evidence_refs = list(
-                    dict.fromkeys([*target.evidence_refs, *source.evidence_refs])
-                )
-                target.window_ids = list(
-                    dict.fromkeys([*target.window_ids, *source.window_ids])
-                )
 
         applied.append(
             {
                 **relation.model_dump(mode="json"),
-                "applied_as": applied_as,
-                "host_verified": accepted,
+                "applied_as": "render_suppression" if host_verified else "audit_only",
+                "host_verified": host_verified,
+                "suppressed_channels": channels,
             }
         )
 
-    result.observations = [
-        item for item in result.observations if item.id not in suppressed
-    ]
-    surviving_ids = {item.id for item in result.observations}
-    for episode in result.episodes:
-        episode.observation_ids = [
-            item for item in episode.observation_ids if item in surviving_ids
-        ]
-
-    for symbol in result.symbols:
-        if not symbol.evidence_ids:
-            continue
-        remapped: list[str] = []
-        for evidence_id in symbol.evidence_ids:
-            current = evidence_id
-            seen: set[str] = set()
-            while current in result.observation_aliases and current not in seen:
-                seen.add(current)
-                current = result.observation_aliases[current]
-            if current in surviving_ids and current not in remapped:
-                remapped.append(current)
-        symbol.evidence_ids = remapped
-        if not remapped:
-            symbol.active = False
-
-    return result, stats, applied
+    stats["suppressed_text_blocks"] = len(suppress_text)
+    stats["suppressed_latex_blocks"] = len(suppress_latex)
+    return (
+        CanonicalRenderPolicy(
+            suppress_text_ids=sorted(suppress_text),
+            suppress_latex_ids=sorted(suppress_latex),
+        ),
+        stats,
+        applied,
+    )
 
 
 def run_state_canonicalization(
@@ -564,49 +465,42 @@ def run_state_canonicalization(
     work: Path,
     llm_config: dict[str, Any],
     pipeline_version: int,
+    semantic_audit: bool,
     force: bool,
-) -> tuple[LectureKnowledgeBase, dict[str, int], list[str]]:
-    """Conservatively compact repaired state without allowing an LLM to write mathematics."""
+) -> tuple[CanonicalRenderPolicy, dict[str, int], list[str]]:
+    """Build a render-only compaction policy without changing repaired mathematical state."""
 
     observations = sorted(kb.observations, key=lambda item: (item.start, item.end, item.id))
     deterministic = _deterministic_relations(kb)
-    local, local_unresolved, local_cache_hits = _propose_local_relations(
-        orchestrator,
-        observations=observations,
-        work=work,
-        llm_config=llm_config,
-        pipeline_version=pipeline_version,
-        force=force,
-    )
-    global_relations, global_unresolved, global_cache_hits = _propose_global_audit(
-        orchestrator,
-        observations=observations,
-        work=work,
-        llm_config=llm_config,
-        pipeline_version=pipeline_version,
-        force=force,
-    )
 
-    compacted, stats, applied = _apply_relations(
-        kb,
-        [*deterministic, *local, *global_relations],
-    )
-    unresolved = list(dict.fromkeys([*local_unresolved, *global_unresolved]))
-    compacted.unresolved = list(dict.fromkeys([*compacted.unresolved, *unresolved]))
+    semantic_relations: list[CanonicalObservationRelation] = []
+    unresolved: list[str] = []
+    audit_cache_hits = 0
+    if semantic_audit:
+        semantic_relations, unresolved, audit_cache_hits = _propose_semantic_audit(
+            orchestrator,
+            observations=observations,
+            work=work,
+            llm_config=llm_config,
+            pipeline_version=pipeline_version,
+            force=force,
+        )
 
-    stats["input_observations"] = len(kb.observations)
-    stats["output_observations"] = len(compacted.observations)
-    stats["local_cache_hits"] = local_cache_hits
-    stats["global_cache_hits"] = global_cache_hits
-    stats["relations_total"] = len(_dedupe_relations([*deterministic, *local, *global_relations]))
+    relations = _dedupe_relations([*deterministic, *semantic_relations])
+    policy, stats, applied = _build_render_policy(kb, relations)
+    stats["observations_total"] = len(kb.observations)
+    stats["relations_total"] = len(relations)
+    stats["semantic_audit_enabled"] = int(semantic_audit)
+    stats["semantic_audit_cache_hits"] = audit_cache_hits
 
     atomic_json_dump(
         work / "state_canonicalization.json",
         {
             "version": STATE_CANONICALIZATION_VERSION,
+            "policy": policy.model_dump(mode="json"),
             "stats": stats,
             "relations": applied,
             "unresolved": unresolved,
         },
     )
-    return compacted, stats, unresolved
+    return policy, stats, unresolved
