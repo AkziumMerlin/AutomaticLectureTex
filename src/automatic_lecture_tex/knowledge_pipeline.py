@@ -57,7 +57,7 @@ from .schemas import (
     VisualEvidence,
     WindowObservations,
 )
-from .state_canonicalization import run_state_canonicalization
+from .state_canonicalization import CanonicalRenderPolicy, run_state_canonicalization
 from .util import atomic_json_dump, stable_hash
 from .vision import (
     dedupe_visual_requests,
@@ -100,6 +100,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_max_raw_windows",
     "state_observation_max_images",
     "state_canonicalization_enabled",
+    "state_canonicalization_semantic_audit",
 }
 
 
@@ -1587,11 +1588,14 @@ def _deterministic_text_block_type(kind: ObservationKind) -> BlockType:
 def _assemble_state_section_deterministically(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
+    render_policy: CanonicalRenderPolicy | None = None,
 ) -> ChunkNotes:
     """Render canonical repaired observations without another generative model pass."""
 
     blocks: list[NoteBlock] = []
     unresolved: list[str] = []
+    suppress_text = set(render_policy.suppress_text_ids) if render_policy is not None else set()
+    suppress_latex = set(render_policy.suppress_latex_ids) if render_policy is not None else set()
     for observation in _state_section_observations(kb, section):
         source_ids = [observation.id] if observation.id else []
         text = observation.text.strip()
@@ -1604,7 +1608,7 @@ def _assemble_state_section_deterministically(
 
         # Keep the canonical prose literally. If the text is itself exactly the canonical
         # formula, avoid rendering the same payload twice.
-        if text and text != latex:
+        if text and text != latex and observation.id not in suppress_text:
             blocks.append(
                 NoteBlock(
                     type=_deterministic_text_block_type(observation.kind),
@@ -1612,7 +1616,7 @@ def _assemble_state_section_deterministically(
                     source_evidence_ids=source_ids,
                 )
             )
-        if latex:
+        if latex and observation.id not in suppress_latex:
             blocks.append(
                 NoteBlock(
                     type=BlockType.EQUATION,
@@ -2148,6 +2152,8 @@ def run_knowledge_pipeline(
     state_resolution_seconds = 0.0
     state_canonicalization_seconds = 0.0
     state_canonicalization_stats: dict[str, int] = {}
+    state_canonicalization_policy = CanonicalRenderPolicy()
+    state_canonicalization_unresolved: list[str] = []
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
 
@@ -2179,30 +2185,6 @@ def run_knowledge_pipeline(
             work / "lecture_state.json",
             make_lecture_state(kb).model_dump(mode="json"),
         )
-
-        if pipeline.config.notes.state_canonicalization_enabled:
-            # Preserve repaired state before compaction. Canonicalization can only suppress
-            # host-verified redundant events; it never rewrites observation text or LaTeX.
-            atomic_json_dump(
-                work / "lecture_state_pre_canonicalization.json",
-                make_lecture_state(kb).model_dump(mode="json"),
-            )
-            canonicalization_started = time.perf_counter()
-            kb, state_canonicalization_stats, _ = run_state_canonicalization(
-                orchestrator,
-                kb=kb,
-                work=work,
-                llm_config=pipeline.config.llm.model_dump(mode="json"),
-                pipeline_version=STATE_PIPELINE_VERSION,
-                force=force,
-            )
-            state_canonicalization_seconds = (
-                time.perf_counter() - canonicalization_started
-            )
-            atomic_json_dump(
-                work / "lecture_state.json",
-                make_lecture_state(kb).model_dump(mode="json"),
-            )
 
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
@@ -2289,11 +2271,38 @@ def run_knowledge_pipeline(
             make_lecture_state(kb, outline=outline).model_dump(mode="json"),
         )
 
+    # Hierarchy must see transition/boundary evidence. Canonicalization is therefore render-only
+    # and runs only after the outline has been fixed from the full repaired state.
+    if (
+        state_mode
+        and pipeline.config.notes.state_canonicalization_enabled
+        and pipeline.config.notes.state_section_assembly == "deterministic"
+    ):
+        canonicalization_started = time.perf_counter()
+        (
+            state_canonicalization_policy,
+            state_canonicalization_stats,
+            state_canonicalization_unresolved,
+        ) = run_state_canonicalization(
+            orchestrator,
+            kb=kb,
+            work=work,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            pipeline_version=STATE_PIPELINE_VERSION,
+            semantic_audit=pipeline.config.notes.state_canonicalization_semantic_audit,
+            force=force,
+        )
+        state_canonicalization_seconds = time.perf_counter() - canonicalization_started
+
     if state_mode:
         note_sections: list[ChunkNotes] = []
         if pipeline.config.notes.state_section_assembly == "deterministic":
             note_sections = [
-                _assemble_state_section_deterministically(kb, section)
+                _assemble_state_section_deterministically(
+                    kb,
+                    section,
+                    render_policy=state_canonicalization_policy,
+                )
                 for section in outline.sections
             ]
         else:
@@ -2365,9 +2374,13 @@ def run_knowledge_pipeline(
 
                 note_sections.append(_merge_state_section_batches(section, generated_batches))
 
-        if state_repair_unresolved and note_sections:
+        state_pipeline_unresolved = [
+            *state_repair_unresolved,
+            *state_canonicalization_unresolved,
+        ]
+        if state_pipeline_unresolved and note_sections:
             note_sections[-1].unresolved = list(
-                dict.fromkeys([*note_sections[-1].unresolved, *state_repair_unresolved])
+                dict.fromkeys([*note_sections[-1].unresolved, *state_pipeline_unresolved])
             )
 
         episode_batch_cache_hits = 0

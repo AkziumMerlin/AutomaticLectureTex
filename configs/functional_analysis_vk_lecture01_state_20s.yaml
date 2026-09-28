@@ -111,6 +111,9 @@ notes:
   # ID-to-ID relations, but it cannot rewrite text/LaTeX; semantic supersession stays audit-only
   # unless backed by an explicit correction/retraction event.
   state_canonicalization_enabled: true
+  # Keep semantic LLM relations off in normal runs: the deterministic render policy already
+  # removes structurally redundant/incomplete math, while long-range semantic audit is diagnostic.
+  state_canonicalization_semantic_audit: false
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
