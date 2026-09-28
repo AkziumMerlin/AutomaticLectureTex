@@ -57,6 +57,7 @@ from .schemas import (
     VisualEvidence,
     WindowObservations,
 )
+from .state_canonicalization import run_state_canonicalization
 from .util import atomic_json_dump, stable_hash
 from .vision import (
     dedupe_visual_requests,
@@ -98,6 +99,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_history",
     "state_observation_max_raw_windows",
     "state_observation_max_images",
+    "state_canonicalization_enabled",
 }
 
 
@@ -2144,6 +2146,8 @@ def run_knowledge_pipeline(
     state_patches_rejected = 0
     state_patches_unresolved = 0
     state_resolution_seconds = 0.0
+    state_canonicalization_seconds = 0.0
+    state_canonicalization_stats: dict[str, int] = {}
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
 
@@ -2175,6 +2179,30 @@ def run_knowledge_pipeline(
             work / "lecture_state.json",
             make_lecture_state(kb).model_dump(mode="json"),
         )
+
+        if pipeline.config.notes.state_canonicalization_enabled:
+            # Preserve repaired state before compaction. Canonicalization can only suppress
+            # host-verified redundant events; it never rewrites observation text or LaTeX.
+            atomic_json_dump(
+                work / "lecture_state_pre_canonicalization.json",
+                make_lecture_state(kb).model_dump(mode="json"),
+            )
+            canonicalization_started = time.perf_counter()
+            kb, state_canonicalization_stats, _ = run_state_canonicalization(
+                orchestrator,
+                kb=kb,
+                work=work,
+                llm_config=pipeline.config.llm.model_dump(mode="json"),
+                pipeline_version=STATE_PIPELINE_VERSION,
+                force=force,
+            )
+            state_canonicalization_seconds = (
+                time.perf_counter() - canonicalization_started
+            )
+            atomic_json_dump(
+                work / "lecture_state.json",
+                make_lecture_state(kb).model_dump(mode="json"),
+            )
 
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
@@ -2472,6 +2500,10 @@ def run_knowledge_pipeline(
     manifest["ir_fingerprint"] = pipeline._ir_fingerprint(transcript, notation)
     atomic_json_dump(manifest_path, manifest)
 
+    unique_unresolved = set(kb.unresolved)
+    for notes in note_sections:
+        unique_unresolved.update(notes.unresolved)
+
     usage = pipeline.llm.usage_snapshot()
     atomic_json_dump(
         work / "run_metrics.json",
@@ -2492,6 +2524,11 @@ def run_knowledge_pipeline(
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
             "state_resolution_seconds": round(state_resolution_seconds, 3),
+            "state_canonicalization_seconds": round(state_canonicalization_seconds, 3),
+            "state_canonicalization_enabled": (
+                pipeline.config.notes.state_canonicalization_enabled if state_mode else False
+            ),
+            "state_canonicalization": state_canonicalization_stats,
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "state_section_assembly": (
                 pipeline.config.notes.state_section_assembly if state_mode else None
@@ -2527,8 +2564,7 @@ def run_knowledge_pipeline(
             "visual_requests_processed": visual_requests_processed,
             "visual_evidence_successful": visual_evidence_successful,
             "corrections_total": sum(len(notes.corrections) for notes in note_sections),
-            "unresolved_total": len(kb.unresolved)
-            + sum(len(notes.unresolved) for notes in note_sections),
+            "unresolved_total": len(unique_unresolved),
             "llm_usage": LectureModelClient.combine_usage([usage]),
         },
     )

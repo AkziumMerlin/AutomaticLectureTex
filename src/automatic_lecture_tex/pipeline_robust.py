@@ -21,6 +21,7 @@ from .linear_llm_policy import (
 from .linear_pipeline import LINEAR_PIPELINE_VERSION, run_linear_pipeline
 from .llm_robust import LectureModelClient as RobustLectureModelClient
 from .media import media_source_from_config
+from .state_canonicalization import STATE_CANONICALIZATION_VERSION
 from .schemas import Transcript
 from .util import atomic_json_dump, stable_hash
 
@@ -80,6 +81,8 @@ class Pipeline(_base_pipeline.Pipeline):
             if self.config.notes.architecture == "state":
                 payload["state_pipeline_version"] = STATE_PIPELINE_VERSION
                 payload["state_section_writer_cache_version"] = STATE_SECTION_WRITER_CACHE_VERSION
+                if self.config.notes.state_canonicalization_enabled:
+                    payload["state_canonicalization_version"] = STATE_CANONICALIZATION_VERSION
             return stable_hash(payload)
         return base
 
