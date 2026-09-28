@@ -136,7 +136,7 @@ def test_math_normalization_does_not_nest_wrappers_for_unicode_or_commands():
 
     assert r"\(\(" not in text
     assert r"\)\)" not in text
-    assert "$" not in heading
+    assert ("$" * 2) not in heading
     assert r"\(\varphi\)" in text
     assert r"$\Phi$" in heading
     assert r"$\varphi_x$" in heading
