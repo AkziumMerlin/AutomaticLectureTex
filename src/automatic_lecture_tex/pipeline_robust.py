@@ -87,6 +87,7 @@ class Pipeline(_base_pipeline.Pipeline):
                 if self.config.notes.state_prose_compression_enabled:
                     payload["state_prose_compression"] = {
                         "version": STATE_PROSE_COMPRESSION_VERSION,
+                        "min_group_size": self.config.notes.state_prose_compression_min_group_size,
                         "max_sentences": self.config.notes.state_prose_compression_max_sentences,
                         "max_ratio": self.config.notes.state_prose_compression_max_ratio,
                         "max_summary_chars": (
