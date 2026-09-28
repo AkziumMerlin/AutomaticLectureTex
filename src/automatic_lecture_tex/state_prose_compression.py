@@ -337,7 +337,7 @@ def _validate_redundancy_group(
     *,
     candidates: list[LectureObservation],
     used_ids: set[str],
-    max_candidate_span: int = 8,
+    max_candidate_span: int = 12,
 ) -> tuple[set[str], str]:
     source_ids = list(dict.fromkeys(proposal.source_observation_ids))
     if len(source_ids) < 2:
