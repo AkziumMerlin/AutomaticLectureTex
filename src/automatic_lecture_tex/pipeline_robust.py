@@ -9,6 +9,7 @@ from .gigaam_vad import VadGigaAMBackend
 from .knowledge_pipeline import (
     STATE_PIPELINE_VERSION,
     STATE_SECTION_WRITER_CACHE_VERSION,
+    STATE_SEMANTIC_TEXT_RETRY_VERSION,
     STATE_SEMANTIC_TEXT_VERSION,
 )
 from .knowledge_pipeline_resilient import (
@@ -83,6 +84,9 @@ class Pipeline(_base_pipeline.Pipeline):
             if self.config.notes.architecture == "state":
                 payload["state_pipeline_version"] = STATE_PIPELINE_VERSION
                 payload["state_semantic_text_version"] = STATE_SEMANTIC_TEXT_VERSION
+                payload["state_semantic_text_retry_version"] = (
+                    STATE_SEMANTIC_TEXT_RETRY_VERSION
+                )
                 payload["state_section_writer_cache_version"] = STATE_SECTION_WRITER_CACHE_VERSION
                 if self.config.notes.state_canonicalization_enabled:
                     payload["state_canonicalization_version"] = STATE_CANONICALIZATION_VERSION
