@@ -1,3 +1,5 @@
+import json
+
 from automatic_lecture_tex.knowledge_pipeline import _assemble_state_section_deterministically
 from automatic_lecture_tex.schemas import (
     EpisodeKind,
@@ -293,4 +295,7 @@ def test_normal_run_does_not_call_llm_semantic_audit(tmp_path):
     assert unresolved == []
     assert policy.suppress_latex_ids == ["obs_a"]
     assert stats["semantic_audit_enabled"] == 0
-    assert (tmp_path / "state_canonicalization.json").exists()
+    artifact = tmp_path / "state_canonicalization.json"
+    assert artifact.exists()
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["version"] == 3

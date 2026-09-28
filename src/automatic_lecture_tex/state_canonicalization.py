@@ -11,7 +11,7 @@ from .schemas import LectureKnowledgeBase, LectureObservation, ObservationKind
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_CANONICALIZATION_VERSION = 2
+STATE_CANONICALIZATION_VERSION = 3
 _GLOBAL_AUDIT_MAX_CHARS = 60000
 _FORWARD_SCAN = 10
 
