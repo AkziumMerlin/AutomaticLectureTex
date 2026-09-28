@@ -1266,7 +1266,12 @@ Choose exactly one action:
   evidenced. Cite evidence_refs. The host keeps source/audit artifacts but suppresses this event.
 
 semantic_text contract:
-- It contains ONLY lecture content suitable for final notes, not an explanation of reconstruction.
+- It contains ONLY lecture content suitable for final notes, not an explanation of reconstruction
+  and not a chronological description of the lecturer's actions.
+- Never write "лектор/преподаватель говорит, пишет, записывает, указывает, подчёркивает, поясняет",
+  "на доске записано", "устно", or analogous narration. State the content directly instead.
+- Examples: "Лектор записывает определение X" -> "Определяется X"; "На доске получено A=B" ->
+  state the conclusion directly (or omit it from semantic_text when latex already contains it).
 - Never mention ASR, OCR, frames, board visibility, crops, confidence, evidence refs, or phrases such
   as "recovered from the board", "audio is degenerate", "the frame shows", etc.
 - Put all such diagnostic reasoning in reason/unresolved, never semantic_text.
@@ -1641,6 +1646,24 @@ def _repair_lecture_state(
         ]
         if not symbol.evidence_ids:
             symbol.active = False
+
+    semantic_stats, semantic_unresolved = _clean_repaired_semantic_prose(
+        orchestrator,
+        repaired=repaired,
+        work=work,
+        llm_config=llm_config,
+        force=force,
+    )
+    stats.update(
+        {
+            "semantic_cleanup_candidates": semantic_stats["candidates"],
+            "semantic_cleanup_calls": semantic_stats["model_calls"],
+            "semantic_cleanup_cache_hits": semantic_stats["cache_hits"],
+            "semantic_cleanup_accepted": semantic_stats["accepted"],
+            "semantic_cleanup_rejected": semantic_stats["rejected"],
+        }
+    )
+    unresolved.extend(semantic_unresolved)
 
     repaired.unresolved = list(dict.fromkeys([*repaired.unresolved, *unresolved]))
     return repaired, stats, list(dict.fromkeys(unresolved))
