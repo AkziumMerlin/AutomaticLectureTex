@@ -101,7 +101,9 @@ def _safe_duplicate(source: LectureObservation, target: LectureObservation) -> b
     if source_latex or target_latex:
         if not source_latex or source_latex != target_latex:
             return False
-        if not source_text or not target_text:
+        if source_text and not target_text:
+            return False
+        if not source_text:
             return True
         return _similarity(source_text, target_text) >= 0.90
 
@@ -123,7 +125,16 @@ def _safe_intermediate(source: LectureObservation, target: LectureObservation) -
             return False
         if len(source_latex) < 8 or len(source_latex) / max(1, len(target_latex)) < 0.30:
             return False
-        return source_latex in target_latex
+        if source_latex not in target_latex:
+            return False
+        source_text = _norm_text(source.text)
+        target_text = _norm_text(target.text)
+        if source_text and not target_text:
+            return False
+        if source_text and source_text not in target_text:
+            if _similarity(source_text, target_text) < 0.85:
+                return False
+        return True
 
     if source_latex or target_latex:
         return False
