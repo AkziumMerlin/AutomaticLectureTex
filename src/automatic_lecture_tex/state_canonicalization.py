@@ -73,37 +73,51 @@ def _ordered_after(source: LectureObservation, target: LectureObservation) -> bo
     return (target.start, target.end, target.id) > (source.start, source.end, source.id)
 
 
+_PLACEHOLDER_PATTERNS = (
+    re.compile(r"\\\\(?:bigl|Bigl)?\\?\[\\s*\\\\(?:cdots|ldots|dots)\\s*\\\\(?:bigr|Bigr)?\\?\]"),
+    re.compile(r"\\\\text\\{(?:или|or)\\}", re.IGNORECASE),
+    re.compile(r"^\\s*\\\\(?:cdots|ldots|dots)\\b"),
+    re.compile(r"\\\\(?:cdots|ldots|dots)(?:\\\\[,;!]|\\s|\\\\[}\\]])*$"),
+)
+
+
 def _incomplete_formula(value: str | None) -> bool:
-    latex = str(value or "")
-    markers = (
-        r"\cdots",
-        r"\ldots",
-        r"\dots",
-        "[...]",
-        r"[\cdots]",
-        r"\bigl[\cdots\bigr]",
-        r"\text{или}",
-    )
-    return any(marker in latex for marker in markers)
+    """Detect explicit board-state placeholders, not ordinary mathematical ellipses.
+
+    In particular y_1,\\ldots,y_m is a complete formula and must never be classified as an
+    unfinished board state merely because it contains an ellipsis.
+    """
+
+    latex = str(value or "").strip()
+    return any(pattern.search(latex) for pattern in _PLACEHOLDER_PATTERNS)
 
 
 def _math_tokens(value: str | None) -> set[str]:
     latex = str(value or "")
-    # Strip the placeholders themselves before measuring overlap.
     for marker in (
-        r"\cdots",
-        r"\ldots",
-        r"\dots",
-        r"\text{или}",
+        r"\\cdots",
+        r"\\ldots",
+        r"\\dots",
+        r"\\text{или}",
         "cdots",
         "ldots",
         "dots",
     ):
         latex = latex.replace(marker, "")
+    ignored = {
+        "left",
+        "right",
+        "bigl",
+        "bigr",
+        "big",
+        "middle",
+        "mid",
+        "text",
+    }
     return {
         token.casefold()
-        for token in re.findall(r"[A-Za-z]+|[А-Яа-яЁё]+|\d+", latex)
-        if token
+        for token in re.findall(r"[A-Za-z]+|[А-Яа-яЁё]+|\\d+", latex)
+        if token and token.casefold() not in ignored
     }
 
 
@@ -141,8 +155,10 @@ def _formula_subsumed(source: LectureObservation, target: LectureObservation) ->
     # Board-state partials often contain \cdots or an explicit ambiguity placeholder, so literal
     # containment fails when the completed line also fixes a variable name. Only suppress the
     # partial formula when most of its mathematical vocabulary survives in the later line.
-    if _incomplete_formula(source.latex):
-        return _token_coverage(source.latex, target.latex) >= 0.70
+    if _incomplete_formula(source.latex) and not _incomplete_formula(target.latex):
+        source_tokens = _math_tokens(source.latex)
+        target_tokens = _math_tokens(target.latex)
+        return bool(source_tokens) and source_tokens.issubset(target_tokens)
 
     return False
 
