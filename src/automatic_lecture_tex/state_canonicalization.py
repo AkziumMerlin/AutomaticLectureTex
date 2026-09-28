@@ -88,7 +88,9 @@ def _compact_observation(item: LectureObservation, *, limit: int = 280) -> dict[
 
 
 def _safe_duplicate(source: LectureObservation, target: LectureObservation) -> bool:
-    if source.kind != target.kind:
+    if source.episode_id != target.episode_id or source.kind != target.kind:
+        return False
+    if (target.start, target.end, target.id) <= (source.start, source.end, source.id):
         return False
 
     source_latex = _norm_latex(source.latex)
@@ -111,7 +113,7 @@ def _safe_intermediate(source: LectureObservation, target: LectureObservation) -
         return False
     if source.kind != target.kind or source.kind == ObservationKind.PROOF_STEP:
         return False
-    if target.start < source.start:
+    if (target.start, target.end, target.id) <= (source.start, source.end, source.id):
         return False
 
     source_latex = _norm_latex(source.latex)
@@ -265,7 +267,7 @@ Observations:
 {json.dumps(compact, ensure_ascii=False, separators=(",", ":"))}
 
 Allowed relation meanings:
-- duplicate: same mathematical event repeated; choose one existing target ID carrying the same content.
+- duplicate: same mathematical event repeated; choose a LATER existing target ID carrying the same content.
 - intermediate: source is a visibly partial/incomplete state later completed by target.
 - meta: pure organizational transition with no mathematical content; target must be omitted.
 - supersedes: a later existing event explicitly replaces/corrects the source.
@@ -275,12 +277,19 @@ Be conservative. Omit a relation when unsure. Do not use textbook knowledge to r
 Do not put mathematical content in reason. Never output text or LaTeX, only IDs, relation labels, and
 short diagnostic reasons.
 """
-            plan = orchestrator._structured(
-                prompt,
-                CanonicalObservationPlan,
-                operation="state_canonicalize_local",
-                split_oversized_task=True,
-            )
+            try:
+                plan = orchestrator._structured(
+                    prompt,
+                    CanonicalObservationPlan,
+                    operation="state_canonicalize_local",
+                    split_oversized_task=True,
+                )
+            except Exception as exc:
+                unresolved.append(
+                    "Local canonicalization batch "
+                    f"{batch_index} failed safely: {type(exc).__name__}: {exc}"
+                )
+                continue
             atomic_json_dump(
                 path,
                 {
@@ -375,12 +384,22 @@ This pass is deliberately conservative and audit-oriented. Do not return duplica
 Do not correct formulas, do not invent a canonical statement, and do not use textbook knowledge as
 a substitute for lecture evidence. If uncertain, return nothing.
 """
-        plan = orchestrator._structured(
-            prompt,
-            CanonicalObservationPlan,
-            operation="state_canonicalize_global",
-            split_oversized_task=True,
-        )
+        try:
+            plan = orchestrator._structured(
+                prompt,
+                CanonicalObservationPlan,
+                operation="state_canonicalize_global",
+                split_oversized_task=True,
+            )
+        except Exception as exc:
+            return (
+                [],
+                [
+                    "Global canonicalization audit failed safely: "
+                    f"{type(exc).__name__}: {exc}"
+                ],
+                0,
+            )
         atomic_json_dump(
             path,
             {
