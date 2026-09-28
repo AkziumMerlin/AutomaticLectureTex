@@ -1629,7 +1629,7 @@ def _assemble_state_section_deterministically(
         chunk_id=section.id,
         start=section.start,
         end=section.end,
-        section_title=section.title.replace("$", ""),
+        section_title=section.title,
         blocks=blocks,
         unresolved=list(dict.fromkeys(unresolved)),
     )
