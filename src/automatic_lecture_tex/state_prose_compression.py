@@ -246,6 +246,7 @@ def _validate_summary_group(
     max_sentences: int,
     max_ratio: float,
     max_summary_chars: int,
+    output_language: str,
 ) -> tuple[ProseCompressionRenderGroup | None, str]:
     source_ids = list(dict.fromkeys(proposal.source_observation_ids))
     if len(source_ids) < min_group_size:
@@ -294,6 +295,9 @@ def _validate_summary_group(
     summary = " ".join(sentence_texts).strip()
     if _sentence_count(summary) > max_sentences:
         return None, "rendered summary contains too many sentences"
+
+    if not _language_ok(summary, output_language):
+        return None, f"generated summary is not predominantly in {output_language}"
 
     by_id = {item.id: item for item in matched_run}
     source_text = " ".join(by_id[item].text for item in source_ids)
