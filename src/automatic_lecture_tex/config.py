@@ -112,6 +112,7 @@ class NotesConfig(BaseModel):
     state_observation_max_raw_windows: int = Field(default=2, ge=1, le=8)
     state_observation_max_images: int = Field(default=2, ge=0, le=4)
     state_canonicalization_enabled: bool = False
+    state_canonicalization_semantic_audit: bool = False
     episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)
     episode_transcript_context_seconds: float = Field(
         default=0.0,
