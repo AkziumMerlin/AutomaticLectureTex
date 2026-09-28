@@ -85,7 +85,14 @@ class Pipeline(_base_pipeline.Pipeline):
                 if self.config.notes.state_canonicalization_enabled:
                     payload["state_canonicalization_version"] = STATE_CANONICALIZATION_VERSION
                 if self.config.notes.state_prose_compression_enabled:
-                    payload["state_prose_compression_version"] = STATE_PROSE_COMPRESSION_VERSION
+                    payload["state_prose_compression"] = {
+                        "version": STATE_PROSE_COMPRESSION_VERSION,
+                        "max_sentences": self.config.notes.state_prose_compression_max_sentences,
+                        "max_ratio": self.config.notes.state_prose_compression_max_ratio,
+                        "max_summary_chars": (
+                            self.config.notes.state_prose_compression_max_summary_chars
+                        ),
+                    }
             return stable_hash(payload)
         return base
 
