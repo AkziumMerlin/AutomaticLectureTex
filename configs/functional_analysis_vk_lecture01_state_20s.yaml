@@ -107,6 +107,10 @@ notes:
   state_observation_history: 4
   state_observation_max_raw_windows: 2
   state_observation_max_images: 2
+  # Compact only host-verifiable redundant repaired events. The canonicalizer may propose
+  # ID-to-ID relations, but it cannot rewrite text/LaTeX; semantic supersession stays audit-only
+  # unless backed by an explicit correction/retraction event.
+  state_canonicalization_enabled: true
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
