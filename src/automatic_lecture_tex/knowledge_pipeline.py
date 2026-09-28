@@ -1796,6 +1796,12 @@ def _repair_lecture_state(
             "semantic_cleanup_cache_hits": semantic_stats["cache_hits"],
             "semantic_cleanup_accepted": semantic_stats["accepted"],
             "semantic_cleanup_rejected": semantic_stats["rejected"],
+            "semantic_cleanup_first_pass_rejected": semantic_stats["first_pass_rejected"],
+            "semantic_cleanup_retry_candidates": semantic_stats["retry_candidates"],
+            "semantic_cleanup_retry_calls": semantic_stats["retry_model_calls"],
+            "semantic_cleanup_retry_cache_hits": semantic_stats["retry_cache_hits"],
+            "semantic_cleanup_retry_accepted": semantic_stats["retry_accepted"],
+            "semantic_cleanup_retry_rejected": semantic_stats["retry_rejected"],
         }
     )
     unresolved.extend(semantic_unresolved)
