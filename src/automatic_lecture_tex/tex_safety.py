@@ -149,6 +149,23 @@ def _wrap_bare_commands(value: str, *, dollars: bool) -> str:
     return _BARE_MATH_COMMAND.sub(replace, value)
 
 
+
+def _wrap_prose_math_atoms(value: str, *, dollars: bool) -> str:
+    """Wrap raw math atoms without re-wrapping commands introduced by the same pass."""
+
+    with_unicode = _wrap_unicode_math_in_prose(value, dollars=dollars)
+    parts = _INLINE_MATH.split(with_unicode)
+    result: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _INLINE_MATH.fullmatch(part):
+            result.append(_normalize_delimited_math(part))
+        else:
+            result.append(_wrap_bare_commands(part, dollars=dollars))
+    return "".join(result)
+
+
 _SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\(?:leq|geq))\\\)slant")
 
 
@@ -211,9 +228,7 @@ def normalize_math_spans(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            prose = _wrap_unicode_math_in_prose(part, dollars=False)
-            prose = _wrap_bare_commands(prose, dollars=False)
-            result.append(prose)
+            result.append(_wrap_prose_math_atoms(part, dollars=False))
     return "".join(result)
 
 
@@ -235,9 +250,7 @@ def normalize_heading_math(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            prose = _wrap_unicode_math_in_prose(part, dollars=True)
-            prose = _wrap_bare_commands(prose, dollars=True)
-            result.append(prose)
+            result.append(_wrap_prose_math_atoms(part, dollars=True))
     return "".join(result)
 
 
