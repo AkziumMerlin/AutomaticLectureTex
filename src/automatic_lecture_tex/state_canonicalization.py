@@ -74,7 +74,7 @@ def _ordered_after(source: LectureObservation, target: LectureObservation) -> bo
 
 
 def _incomplete_formula(value: str | None) -> bool:
-    """Detect explicit board-state placeholders, not ordinary mathematical ellipses.
+    r"""Detect explicit board-state placeholders, not ordinary mathematical ellipses.
 
     In particular y_1,\ldots,y_m is a complete formula and must never be classified as an
     unfinished board state merely because it contains an ellipsis.
