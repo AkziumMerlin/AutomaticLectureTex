@@ -125,6 +125,55 @@ def test_incomplete_formula_suppression_preserves_source_prose():
     assert policy.suppress_text_ids == []
 
 
+def test_ldots_inside_complete_formula_is_not_an_incomplete_board_marker():
+    source = _obs(
+        "obs_a",
+        start=1.0,
+        latex=r"\beta_\Phi=\{V(y_1),\ldots,V(y_m)\}",
+    )
+    target = _obs(
+        "obs_b",
+        start=2.0,
+        latex=r"\widetilde{\beta}_\Phi=\{V(x,\varphi_1),\ldots,V(x,\varphi_m)\}",
+    )
+    kb = _kb(source, target)
+
+    policy, stats, relations = _build_render_policy(
+        kb,
+        [
+            CanonicalObservationRelation(
+                source_observation_id="obs_a",
+                target_observation_id="obs_b",
+                relation="intermediate",
+            )
+        ],
+    )
+
+    assert policy == CanonicalRenderPolicy()
+    assert stats["rejected_unsafe_relation"] == 1
+    assert relations[0]["host_verified"] is False
+
+
+def test_incomplete_formula_is_not_hidden_by_another_incomplete_formula():
+    source = _obs("obs_a", start=1.0, latex=r"V(x)=\{y:\varphi(y)\cdots\}")
+    target = _obs("obs_b", start=2.0, latex=r"V(x)=\{z:\varphi(z)\cdots\}")
+    kb = _kb(source, target)
+
+    policy, stats, _ = _build_render_policy(
+        kb,
+        [
+            CanonicalObservationRelation(
+                source_observation_id="obs_a",
+                target_observation_id="obs_b",
+                relation="intermediate",
+            )
+        ],
+    )
+
+    assert policy == CanonicalRenderPolicy()
+    assert stats["rejected_unsafe_relation"] == 1
+
+
 def test_semantic_supersession_is_audit_only_without_explicit_correction():
     source = _obs("obs_a", start=1.0, text="old", latex="x=1")
     target = _obs("obs_b", start=50.0, text="new", latex="x=2")
