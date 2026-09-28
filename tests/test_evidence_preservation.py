@@ -130,6 +130,18 @@ def test_heading_math_commands_are_wrapped_in_math_mode():
     assert r"$\varepsilon$" in result
 
 
+def test_math_normalization_does_not_nest_wrappers_for_unicode_or_commands():
+    text = normalize_math_spans("Пусть φ(x) = 0 и \\varphi(y) = 1.")
+    heading = normalize_heading_math("Слабая топология T_Φ и функционал \\varphi_x")
+
+    assert r"\(\(" not in text
+    assert r"\)\)" not in text
+    assert "$" not in heading
+    assert r"\(\varphi\)" in text
+    assert r"$\Phi$" in heading
+    assert r"$\varphi_x$" in heading
+
+
 def test_renderer_keeps_audit_out_of_tex_and_writes_sidecar(tmp_path):
     ir = LectureIR(
         lecture_id="lecture_01",
