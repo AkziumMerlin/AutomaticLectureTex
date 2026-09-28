@@ -73,32 +73,38 @@ def _ordered_after(source: LectureObservation, target: LectureObservation) -> bo
     return (target.start, target.end, target.id) > (source.start, source.end, source.id)
 
 
-_PLACEHOLDER_PATTERNS = (
-    re.compile(r"\\\\(?:bigl|Bigl)?\\?\[\\s*\\\\(?:cdots|ldots|dots)\\s*\\\\(?:bigr|Bigr)?\\?\]"),
-    re.compile(r"\\\\text\\{(?:или|or)\\}", re.IGNORECASE),
-    re.compile(r"^\\s*\\\\(?:cdots|ldots|dots)\\b"),
-    re.compile(r"\\\\(?:cdots|ldots|dots)(?:\\\\[,;!]|\\s|\\\\[}\\]])*$"),
-)
-
-
 def _incomplete_formula(value: str | None) -> bool:
     """Detect explicit board-state placeholders, not ordinary mathematical ellipses.
 
-    In particular y_1,\\ldots,y_m is a complete formula and must never be classified as an
+    In particular y_1,\ldots,y_m is a complete formula and must never be classified as an
     unfinished board state merely because it contains an ellipsis.
     """
 
     latex = str(value or "").strip()
-    return any(pattern.search(latex) for pattern in _PLACEHOLDER_PATTERNS)
+    if r"\text{или}" in latex or r"\text{or}" in latex:
+        return True
+    if re.search(
+        r"\\(?:bigl|Bigl)?\[\s*\\(?:cdots|ldots|dots)\s*\\(?:bigr|Bigr)?\]",
+        latex,
+    ):
+        return True
+    if re.search(r"^\s*\\(?:cdots|ldots|dots)\b", latex):
+        return True
+    return bool(
+        re.search(
+            r"\\(?:cdots|ldots|dots)(?:\\[,;!]|\s|\\[}\]])*$",
+            latex,
+        )
+    )
 
 
 def _math_tokens(value: str | None) -> set[str]:
     latex = str(value or "")
     for marker in (
-        r"\\cdots",
-        r"\\ldots",
-        r"\\dots",
-        r"\\text{или}",
+        r"\cdots",
+        r"\ldots",
+        r"\dots",
+        r"\text{или}",
         "cdots",
         "ldots",
         "dots",
@@ -116,17 +122,9 @@ def _math_tokens(value: str | None) -> set[str]:
     }
     return {
         token.casefold()
-        for token in re.findall(r"[A-Za-z]+|[А-Яа-яЁё]+|\\d+", latex)
+        for token in re.findall(r"[A-Za-z]+|[А-Яа-яЁё]+|\d+", latex)
         if token and token.casefold() not in ignored
     }
-
-
-def _token_coverage(source: str | None, target: str | None) -> float:
-    source_tokens = _math_tokens(source)
-    target_tokens = _math_tokens(target)
-    if not source_tokens:
-        return 0.0
-    return len(source_tokens.intersection(target_tokens)) / len(source_tokens)
 
 
 def _formula_subsumed(source: LectureObservation, target: LectureObservation) -> bool:
