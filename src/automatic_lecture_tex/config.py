@@ -114,6 +114,7 @@ class NotesConfig(BaseModel):
     state_canonicalization_enabled: bool = False
     state_canonicalization_semantic_audit: bool = False
     state_prose_compression_enabled: bool = False
+    state_prose_compression_min_group_size: int = Field(default=3, ge=3, le=12)
     state_prose_compression_max_sentences: int = Field(default=2, ge=1, le=3)
     state_prose_compression_max_ratio: float = Field(default=0.55, gt=0.1, le=0.9)
     state_prose_compression_max_summary_chars: int = Field(default=700, ge=100, le=2400)
