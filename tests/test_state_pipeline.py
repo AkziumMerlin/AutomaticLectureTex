@@ -9,6 +9,7 @@ from automatic_lecture_tex.config import NotesConfig, load_config
 from automatic_lecture_tex.episode_graph import apply_episode_tracking
 from automatic_lecture_tex.generated_notes import (
     GeneratedObservationStatePatch,
+    GeneratedSemanticTextCleanupBatch,
 )
 from automatic_lecture_tex.knowledge import make_lecture_state
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
@@ -59,6 +60,30 @@ def test_state_ir_fingerprint_depends_on_state_pipeline_version(monkeypatch):
         pipeline_robust_module,
         "STATE_PIPELINE_VERSION",
         pipeline_robust_module.STATE_PIPELINE_VERSION + 1,
+    )
+    after = pipeline._ir_fingerprint(transcript, {})
+
+    assert before != after
+
+
+def test_state_ir_fingerprint_depends_on_semantic_text_version(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state.yaml"
+    )
+    config = load_config(config_path)
+    pipeline = pipeline_robust_module.Pipeline(config)
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[TranscriptSegment(id="seg_0", start=0.0, end=1.0, text="test")],
+    )
+
+    before = pipeline._ir_fingerprint(transcript, {})
+    monkeypatch.setattr(
+        pipeline_robust_module,
+        "STATE_SEMANTIC_TEXT_VERSION",
+        pipeline_robust_module.STATE_SEMANTIC_TEXT_VERSION + 1,
     )
     after = pipeline._ir_fingerprint(transcript, {})
 
@@ -586,6 +611,126 @@ def test_semantic_text_rejects_latex_syntax():
             action="keep",
             semantic_text=r"Используем \\frac{a}{b}.",
         )
+
+
+def test_semantic_cleanup_safe_preserves_math_that_exists_only_in_prose():
+    source = "Лектор подчёркивает, что v(ix) = u(x) и v(x) = -u(ix)."
+    cleaned = "Имеем v(ix)=u(x) и v(x)=-u(ix)."
+
+    safe, reason = knowledge_pipeline_module._semantic_cleanup_safe(
+        source,
+        cleaned,
+        has_latex=False,
+    )
+
+    assert safe is True
+    assert reason == ""
+
+    unsafe, reason = knowledge_pipeline_module._semantic_cleanup_safe(
+        source,
+        "Действительная и мнимая части связаны.",
+        has_latex=False,
+    )
+    assert unsafe is False
+    assert "formula" in reason or "symbols" in reason
+
+
+def test_semantic_cleanup_may_drop_formula_repetition_when_latex_is_separate():
+    source = "На доске записано равенство v(ix) = u(x), выражающее связь частей."
+    cleaned = "Действительная и мнимая части функционала связаны."
+
+    safe, reason = knowledge_pipeline_module._semantic_cleanup_safe(
+        source,
+        cleaned,
+        has_latex=True,
+    )
+
+    assert safe is True
+    assert reason == ""
+
+
+def test_semantic_cleanup_reuses_math_repair_and_caches_text_projection(tmp_path):
+    narrative = LectureObservation(
+        id="obs_1",
+        window_id="window_1",
+        start=0.0,
+        end=1.0,
+        kind=ObservationKind.REMARK,
+        text="Лектор подчёркивает, что пространство X является комплексным.",
+        latex=None,
+        episode_id="episode_1",
+    )
+    direct = LectureObservation(
+        id="obs_2",
+        window_id="window_2",
+        start=1.0,
+        end=2.0,
+        kind=ObservationKind.EQUATION,
+        text="Получено основное равенство.",
+        latex=r"f(x)=u(x)-iu(ix)",
+        episode_id="episode_1",
+    )
+    episode = SemanticEpisode(
+        id="episode_1",
+        title="Комплексный случай",
+        start=0.0,
+        end=2.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=["obs_1", "obs_2"],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[narrative, direct],
+        episodes=[episode],
+    )
+
+    class FakeOrchestrator:
+        output_language = "ru"
+
+        def __init__(self):
+            self.calls = 0
+
+        def _structured(self, prompt, schema, **kwargs):
+            self.calls += 1
+            assert schema is GeneratedSemanticTextCleanupBatch
+            assert kwargs["operation"] == "state_semantic_text_cleanup"
+            return GeneratedSemanticTextCleanupBatch(
+                items=[
+                    {
+                        "observation_id": "obs_1",
+                        "semantic_text": "Пространство X является комплексным.",
+                    }
+                ]
+            )
+
+    orchestrator = FakeOrchestrator()
+    stats, unresolved = knowledge_pipeline_module._clean_repaired_semantic_prose(
+        orchestrator,
+        repaired=kb,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=False,
+    )
+
+    assert unresolved == []
+    assert stats["accepted"] == 1
+    assert kb.observations[0].text == "Пространство X является комплексным."
+    assert kb.observations[1].latex == r"f(x)=u(x)-iu(ix)"
+
+    # Restore the narration and prove the cached cleanup is reused without another model call.
+    kb.observations[0].text = "Лектор подчёркивает, что пространство X является комплексным."
+    stats, unresolved = knowledge_pipeline_module._clean_repaired_semantic_prose(
+        orchestrator,
+        repaired=kb,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=False,
+    )
+    assert unresolved == []
+    assert orchestrator.calls == 1
+    assert stats["cache_hits"] == 1
+    assert kb.observations[0].text == "Пространство X является комплексным."
 
 
 def test_state_patch_replace_applies_without_similarity_gate():

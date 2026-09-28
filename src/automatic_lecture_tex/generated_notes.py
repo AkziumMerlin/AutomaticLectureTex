@@ -145,6 +145,31 @@ class GeneratedStateSectionNotes(BaseModel):
     blocks: list[GeneratedStateSectionBlock] = Field(default_factory=list)
 
 
+class GeneratedSemanticTextCleanupItem(BaseModel):
+    """Text-only projection of one resolved observation into final-note prose."""
+
+    observation_id: str = Field(min_length=1)
+    semantic_text: str = Field(min_length=1)
+
+    @field_validator("semantic_text")
+    @classmethod
+    def sanitize_semantic_text(cls, value: str) -> str:
+        value = strip_control_chars(value).strip()
+        if not value:
+            raise ValueError("semantic cleanup text must be non-empty")
+        if "$" in value or re.search(r"\\(?:[A-Za-z]+|[()[\]{}|])", value):
+            raise ValueError(
+                "semantic cleanup text must be plain prose without LaTeX commands or delimiters"
+            )
+        return value
+
+
+class GeneratedSemanticTextCleanupBatch(BaseModel):
+    """Batch of narration-only prose cleanups keyed by existing observation IDs."""
+
+    items: list[GeneratedSemanticTextCleanupItem] = Field(default_factory=list)
+
+
 class GeneratedObservationStatePatch(BaseModel):
     """One transactional update to the CURRENT observation.
 
