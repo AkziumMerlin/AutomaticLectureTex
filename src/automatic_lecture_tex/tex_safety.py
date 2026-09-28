@@ -232,10 +232,33 @@ def normalize_math_spans(value: str) -> str:
     return "".join(result)
 
 
+_HEADING_GREEK_CHARS = "αβγδεϵλμνπφϕτΓΔΦΨΩ"
+_HEADING_LATIN_SUB_GREEK = re.compile(
+    rf"(?<![A-Za-z0-9\\])([A-Za-z][A-Za-z0-9]*)_([{_HEADING_GREEK_CHARS}])"
+)
+_HEADING_GREEK_SUB_LATIN = re.compile(
+    rf"([{_HEADING_GREEK_CHARS}])_([A-Za-z][A-Za-z0-9]*)"
+)
+
+
+def _normalize_heading_compound_math(value: str) -> str:
+    """Preserve simple subscripted symbols as one math atom before per-glyph wrapping."""
+
+    def latin_sub_greek(match: re.Match[str]) -> str:
+        greek = _MATH_UNICODE[match.group(2)].strip()
+        return "$" + match.group(1) + "_{" + greek + "}$"
+
+    def greek_sub_latin(match: re.Match[str]) -> str:
+        greek = _MATH_UNICODE[match.group(1)].strip()
+        return "$" + greek + "_{" + match.group(2) + "}$"
+
+    value = _HEADING_LATIN_SUB_GREEK.sub(latin_sub_greek, value)
+    return _HEADING_GREEK_SUB_LATIN.sub(greek_sub_latin, value)
+
 def normalize_heading_math(value: str) -> str:
     """Make math commands in theorem/section titles safe for text-mode rendering."""
 
-    clean = strip_control_chars(value)
+    clean = _normalize_heading_compound_math(strip_control_chars(value))
     clean = _DOUBLE_DOLLAR_MATH.sub(
         lambda match: "$" + canonicalize_math_fragment(match.group(1)).strip() + "$",
         clean,
