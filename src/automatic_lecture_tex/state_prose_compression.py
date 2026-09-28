@@ -17,7 +17,7 @@ from .schemas import (
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_PROSE_COMPRESSION_VERSION = 3
+STATE_PROSE_COMPRESSION_VERSION = 4
 _SUMMARY_KINDS = {ObservationKind.REMARK, ObservationKind.NOTATION}
 _DEDUPE_KINDS = {ObservationKind.REMARK, ObservationKind.NOTATION}
 _FORMAL_TEXT_MARKERS = (
@@ -134,24 +134,21 @@ def _summary_runs(
     *,
     min_group_size: int,
 ) -> list[list[LectureObservation]]:
-    """Build prose runs while treating transitions as transparent structural evidence."""
+    """Return only the leading math-free prose burst of a section.
 
-    runs: list[list[LectureObservation]] = []
+    Generated prose is useful for introductory narration, but should not rewrite later
+    math-adjacent exposition. Transitions are transparent because hierarchy already consumed them.
+    """
+
     current: list[LectureObservation] = []
     for item in observations:
         if item.kind == ObservationKind.TRANSITION:
-            # Hierarchy already consumed this event. It should neither be rewritten nor split
-            # otherwise adjacent prose that belongs to one final-note setup.
             continue
         if _summary_candidate(item):
             current.append(item)
             continue
-        if len(current) >= min_group_size:
-            runs.append(current)
-        current = []
-    if len(current) >= min_group_size:
-        runs.append(current)
-    return runs
+        break
+    return [current] if len(current) >= min_group_size else []
 
 
 def _redundancy_candidates(
@@ -289,8 +286,18 @@ def _validate_summary_group(
         cited.update(sentence_sources)
         sentence_texts.append(text)
 
-    if cited != group_set:
-        return None, "sentence provenance does not cover the summary group exactly"
+    uncited = group_set - cited
+    if uncited:
+        if len(source_ids) < 5 or len(uncited) > 1:
+            return None, "summary may omit at most one noisy remark in a large prose burst"
+        by_id_for_coverage = {
+            item.id: item
+            for run in runs
+            for item in run
+        }
+        omitted = by_id_for_coverage.get(next(iter(uncited)))
+        if omitted is None or omitted.kind != ObservationKind.REMARK:
+            return None, "only one uncited remark may be treated as redundant/noisy"
 
     summary = " ".join(sentence_texts).strip()
     if _sentence_count(summary) > max_sentences:
@@ -337,7 +344,7 @@ def _validate_redundancy_group(
     *,
     candidates: list[LectureObservation],
     used_ids: set[str],
-    max_candidate_span: int = 8,
+    max_candidate_span: int = 12,
 ) -> tuple[set[str], str]:
     source_ids = list(dict.fromkeys(proposal.source_observation_ids))
     if len(source_ids) < 2:
@@ -444,13 +451,15 @@ SELECTION-ONLY REMARK/NOTATION CANDIDATES:
 You have TWO strictly different operations.
 
 1. summary_groups:
-- only use observations from ONE MATH-FREE SUMMARY RUN;
+- only use observations from the ONE leading MATH-FREE SUMMARY RUN of the section;
 - use at least {min_group_size} observations, preferably an entire repetitive run;
 - write at most {max_sentences} short final-note sentences;
-- every sentence cites exact source observation IDs and their union equals the group IDs;
+- every sentence cites the exact observations that actually support that sentence;
+- normally sentence citations cover the whole group; for a large burst you MAY leave at most ONE
+  remark uncited when it is redundant narration or an isolated unclear fragment;
+- never cite a noisy observation merely to force its unique wording into the summary;
 - preserve coherent explicit content such as a clear list of announced course topics;
-- for a mixed/noisy observation, prioritize facts repeated or stabilized by neighbouring observations;
-  you MAY omit isolated unclear enumeration fragments that are not corroborated by adjacent events;
+- prioritize facts repeated or stabilized by neighbouring observations;
 - remove narration about what the lecturer says/writes/repeats/points at;
 - write in language code {output_language};
 - output plain prose only: no formulas, LaTeX, relation symbols, provenance or reconstruction talk.
