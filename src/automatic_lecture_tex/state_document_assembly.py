@@ -189,6 +189,36 @@ def _language_ok(value: str, output_language: str) -> bool:
     return len(cyrillic) / len(letters) >= 0.45
 
 
+def _canonical_math_text(value: str) -> str:
+    replacements = {
+        r"\\mathbb{C}": "ℂ",
+        r"\\mathbb{R}": "ℝ",
+        r"\\mathbb{N}": "ℕ",
+        r"\\to": "→",
+        r"\\rightarrow": "→",
+        r"\\mapsto": "↦",
+        r"\\Rightarrow": "⇒",
+        r"\\Leftrightarrow": "⇔",
+        r"\\in": "∈",
+        r"\\leq": "≤",
+        r"\\le": "≤",
+        r"\\geq": "≥",
+        r"\\ge": "≥",
+        r"\\neq": "≠",
+        r"\\subset": "⊂",
+        r"\\subseteq": "⊆",
+    }
+    result = value
+    for source, target in replacements.items():
+        result = result.replace(source, target)
+    return result.replace("−", "-")
+
+
+def _relation_tokens(value: str) -> set[str]:
+    normalized = _canonical_math_text(value)
+    return {token for token in _RELATION_TOKENS if token in normalized}
+
+
 def _safe_generated_prose(
     value: str,
     *,
