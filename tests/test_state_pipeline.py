@@ -260,6 +260,30 @@ def test_state_ir_fingerprint_depends_on_state_pipeline_version(monkeypatch):
     assert before != after
 
 
+def test_state_ir_fingerprint_depends_on_semantic_graph_version(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state_20s.yaml"
+    )
+    config = load_config(config_path)
+    pipeline = pipeline_robust_module.Pipeline(config)
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[TranscriptSegment(id="seg_0", start=0.0, end=1.0, text="test")],
+    )
+
+    before = pipeline._ir_fingerprint(transcript, {})
+    monkeypatch.setattr(
+        pipeline_robust_module,
+        "STATE_SEMANTIC_GRAPH_VERSION",
+        pipeline_robust_module.STATE_SEMANTIC_GRAPH_VERSION + 1,
+    )
+    after = pipeline._ir_fingerprint(transcript, {})
+
+    assert before != after
+
+
 def test_state_ir_fingerprint_depends_on_semantic_text_version(monkeypatch):
     config_path = (
         Path(__file__).resolve().parents[1]
@@ -1725,10 +1749,9 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.chunk_overlap_seconds == 5
     assert config.notes.visual_chunk_board_scan is True
     assert config.notes.state_section_max_evidence_chars == 100000
-    assert config.notes.state_section_assembly == "document"
+    assert config.notes.state_section_assembly == "semantic"
+    assert config.notes.state_canonicalization_enabled is False
     assert config.notes.state_prose_compression_enabled is False
-    assert config.notes.state_document_max_prose_ratio == 0.45
-    assert config.notes.state_document_max_remarks_fraction == 0.20
     assert config.notes.state_section_raw_context_seconds == 90
     assert config.notes.state_section_raw_evidence_chars == 16000
     assert config.notes.state_observation_lookahead == 2
