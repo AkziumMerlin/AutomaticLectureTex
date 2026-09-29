@@ -24,6 +24,7 @@ from .linear_pipeline import LINEAR_PIPELINE_VERSION, run_linear_pipeline
 from .llm_robust import LectureModelClient as RobustLectureModelClient
 from .media import media_source_from_config
 from .state_canonicalization import STATE_CANONICALIZATION_VERSION
+from .state_document_assembly import STATE_DOCUMENT_ASSEMBLY_VERSION
 from .state_prose_compression import STATE_PROSE_COMPRESSION_VERSION
 from .schemas import Transcript
 from .util import atomic_json_dump, stable_hash
@@ -90,6 +91,17 @@ class Pipeline(_base_pipeline.Pipeline):
                 payload["state_section_writer_cache_version"] = STATE_SECTION_WRITER_CACHE_VERSION
                 if self.config.notes.state_canonicalization_enabled:
                     payload["state_canonicalization_version"] = STATE_CANONICALIZATION_VERSION
+                if self.config.notes.state_section_assembly == "document":
+                    payload["state_document_assembly"] = {
+                        "version": STATE_DOCUMENT_ASSEMBLY_VERSION,
+                        "max_prose_ratio": self.config.notes.state_document_max_prose_ratio,
+                        "max_remarks_fraction": (
+                            self.config.notes.state_document_max_remarks_fraction
+                        ),
+                        "max_blocks_per_section": (
+                            self.config.notes.state_document_max_blocks_per_section
+                        ),
+                    }
                 if self.config.notes.state_prose_compression_enabled:
                     payload["state_prose_compression"] = {
                         "version": STATE_PROSE_COMPRESSION_VERSION,
