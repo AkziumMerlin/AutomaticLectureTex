@@ -2840,6 +2840,15 @@ def run_knowledge_pipeline(
     state_document_assembly_unresolved: list[str] = []
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
+    state_semantic_graph_seconds = 0.0
+    state_semantic_graph_stats: dict[str, int] = {
+        "cache_hits": 0,
+        "model_calls": 0,
+        "episodes": 0,
+        "claims": 0,
+        "symbols": 0,
+    }
+    state_semantic_graph_unresolved: list[str] = []
 
     if state_mode:
         # Preserve the extraction/episode-tracking state for audit, then repair it exactly once.
@@ -2869,6 +2878,29 @@ def run_knowledge_pipeline(
             work / "lecture_state.json",
             make_lecture_state(kb).model_dump(mode="json"),
         )
+
+        if pipeline.config.notes.state_section_assembly == "semantic":
+            atomic_json_dump(
+                work / "lecture_state_post_repair_pre_graph.json",
+                make_lecture_state(kb).model_dump(mode="json"),
+            )
+            graph_started = time.perf_counter()
+            (
+                kb,
+                state_semantic_graph_stats,
+                state_semantic_graph_unresolved,
+            ) = _rebuild_semantic_graph_after_repair(
+                orchestrator,
+                repaired=kb,
+                work=work,
+                llm_config=pipeline.config.llm.model_dump(mode="json"),
+                force=force,
+            )
+            state_semantic_graph_seconds = time.perf_counter() - graph_started
+            atomic_json_dump(
+                work / "lecture_state.json",
+                make_lecture_state(kb).model_dump(mode="json"),
+            )
 
     atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
 
@@ -3005,7 +3037,12 @@ def run_knowledge_pipeline(
 
     if state_mode:
         note_sections: list[ChunkNotes] = []
-        if pipeline.config.notes.state_section_assembly == "deterministic":
+        if pipeline.config.notes.state_section_assembly == "semantic":
+            note_sections = [
+                _assemble_semantic_state_section(kb, section)
+                for section in outline.sections
+            ]
+        elif pipeline.config.notes.state_section_assembly == "deterministic":
             note_sections = [
                 _assemble_state_section_deterministically(
                     kb,
@@ -3128,6 +3165,7 @@ def run_knowledge_pipeline(
 
         state_pipeline_unresolved = [
             *state_repair_unresolved,
+            *state_semantic_graph_unresolved,
             *state_canonicalization_unresolved,
             *state_prose_compression_unresolved,
             *state_document_assembly_unresolved,
