@@ -61,7 +61,7 @@ _PROSE_BLOCK_TYPES = {
 }
 _FORMAL_PROSE_MARKERS = ("$", "\\", "→", "↦", "⇒", "⇔", "∑", "∫", "≤", "≥", "≠", "∈")
 _EQUALITY_SNIPPET_RE = re.compile(
-    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_*|() ]{0,24}\\s*=\\s*"
+    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_*|() ]{0,24}\s*=\s*"
     r"[A-Za-zА-Яа-яЁё0-9_*|() -]{1,32}"
 )
 _IMPORTANT_TEXT_KINDS = {
@@ -223,9 +223,9 @@ def _safe_generated_prose(
         )
 
     if "=" in value:
-        normalized_source = re.sub(r"\\s+", "", source).replace("−", "-")
+        normalized_source = re.sub(r"\s+", "", source).replace("−", "-")
         for snippet in _EQUALITY_SNIPPET_RE.findall(value):
-            normalized = re.sub(r"\\s+", "", snippet).replace("−", "-")
+            normalized = re.sub(r"\s+", "", snippet).replace("−", "-")
             if normalized not in normalized_source:
                 return False, "generated prose introduces an equality not found in its sources"
     return True, ""
