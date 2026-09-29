@@ -61,11 +61,6 @@ from .schemas import (
     VisualEvidence,
     WindowObservations,
 )
-from .state_canonicalization import CanonicalRenderPolicy, run_state_canonicalization
-from .state_prose_compression import (
-    ProseCompressionPolicy,
-    run_state_prose_compression,
-)
 from .util import atomic_json_dump, stable_hash
 from .vision import (
     dedupe_visual_requests,
@@ -110,13 +105,6 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_history",
     "state_observation_max_raw_windows",
     "state_observation_max_images",
-    "state_canonicalization_enabled",
-    "state_canonicalization_semantic_audit",
-    "state_prose_compression_enabled",
-    "state_prose_compression_min_group_size",
-    "state_prose_compression_max_sentences",
-    "state_prose_compression_max_ratio",
-    "state_prose_compression_max_summary_chars",
     "state_repaired_episode_batch_observations",
 }
 
@@ -2149,14 +2137,10 @@ def _episode_block_type(kind: EpisodeKind) -> BlockType:
 def _episode_body_from_repaired_state(
     kb: LectureKnowledgeBase,
     episode,
-    *,
-    render_policy: CanonicalRenderPolicy | None,
 ) -> tuple[str, list[str]]:
     """Serialize one semantic leaf without giving another model control over mathematical content."""
 
     by_id = {item.id: item for item in kb.observations}
-    suppress_text = set(render_policy.suppress_text_ids) if render_policy is not None else set()
-    suppress_latex = set(render_policy.suppress_latex_ids) if render_policy is not None else set()
     pieces: list[str] = []
     unresolved: list[str] = []
     seen_text: set[str] = set()
@@ -2176,13 +2160,13 @@ def _episode_body_from_repaired_state(
         if observation.kind == ObservationKind.TRANSITION:
             continue
 
-        if text and text != latex and observation.id not in suppress_text:
+        if text and text != latex:
             normalized_text = re.sub(r"\s+", " ", text).strip().casefold()
             if normalized_text and normalized_text not in seen_text:
                 pieces.append(escape_tex(text))
                 seen_text.add(normalized_text)
 
-        if latex and observation.id not in suppress_latex:
+        if latex:
             normalized_latex = re.sub(r"\s+", "", latex)
             if normalized_latex and normalized_latex not in seen_latex:
                 pieces.append("\\[\n" + latex + "\n\\]")
@@ -2194,12 +2178,8 @@ def _episode_body_from_repaired_state(
 def _assemble_state_section_deterministically(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
-    render_policy: CanonicalRenderPolicy | None = None,
-    prose_policy: ProseCompressionPolicy | None = None,
 ) -> ChunkNotes:
     """Realize repaired semantic episodes directly; observations are evidence, not document blocks."""
-
-    del prose_policy  # Legacy argument retained while old configs/tests migrate.
 
     blocks: list[NoteBlock] = []
     unresolved: list[str] = []
@@ -2236,11 +2216,7 @@ def _assemble_state_section_deterministically(
                 )
             )
 
-        body, episode_unresolved = _episode_body_from_repaired_state(
-            kb,
-            episode,
-            render_policy=render_policy,
-        )
+        body, episode_unresolved = _episode_body_from_repaired_state(kb, episode)
         unresolved.extend(episode_unresolved)
         if not body.strip():
             continue
@@ -2783,14 +2759,6 @@ def run_knowledge_pipeline(
     state_patches_rejected = 0
     state_patches_unresolved = 0
     state_resolution_seconds = 0.0
-    state_canonicalization_seconds = 0.0
-    state_canonicalization_stats: dict[str, int] = {}
-    state_canonicalization_policy = CanonicalRenderPolicy()
-    state_canonicalization_unresolved: list[str] = []
-    state_prose_compression_seconds = 0.0
-    state_prose_compression_stats: dict[str, int] = {}
-    state_prose_compression_policy = ProseCompressionPolicy()
-    state_prose_compression_unresolved: list[str] = []
     state_semantic_graph_seconds = 0.0
     state_semantic_graph_stats: dict[str, Any] = {}
     state_synthesis_seconds = 0.0
@@ -2929,64 +2897,11 @@ def run_knowledge_pipeline(
             make_lecture_state(kb, outline=outline).model_dump(mode="json"),
         )
 
-    # Hierarchy must see transition/boundary evidence. Canonicalization is therefore render-only
-    # and runs only after the outline has been fixed from the full repaired state.
-    if (
-        state_mode
-        and pipeline.config.notes.state_canonicalization_enabled
-        and pipeline.config.notes.state_section_assembly == "deterministic"
-    ):
-        canonicalization_started = time.perf_counter()
-        (
-            state_canonicalization_policy,
-            state_canonicalization_stats,
-            state_canonicalization_unresolved,
-        ) = run_state_canonicalization(
-            orchestrator,
-            kb=kb,
-            work=work,
-            llm_config=pipeline.config.llm.model_dump(mode="json"),
-            pipeline_version=STATE_PIPELINE_VERSION,
-            semantic_audit=pipeline.config.notes.state_canonicalization_semantic_audit,
-            force=force,
-        )
-        state_canonicalization_seconds = time.perf_counter() - canonicalization_started
-
-    if (
-        state_mode
-        and pipeline.config.notes.state_prose_compression_enabled
-        and pipeline.config.notes.state_section_assembly == "deterministic"
-    ):
-        prose_compression_started = time.perf_counter()
-        (
-            state_prose_compression_policy,
-            state_prose_compression_stats,
-            state_prose_compression_unresolved,
-        ) = run_state_prose_compression(
-            orchestrator,
-            kb=kb,
-            outline=outline,
-            work=work,
-            llm_config=pipeline.config.llm.model_dump(mode="json"),
-            pipeline_version=STATE_PIPELINE_VERSION,
-            min_group_size=pipeline.config.notes.state_prose_compression_min_group_size,
-            max_sentences=pipeline.config.notes.state_prose_compression_max_sentences,
-            max_ratio=pipeline.config.notes.state_prose_compression_max_ratio,
-            max_summary_chars=pipeline.config.notes.state_prose_compression_max_summary_chars,
-            force=force,
-        )
-        state_prose_compression_seconds = time.perf_counter() - prose_compression_started
-
     if state_mode:
         note_sections: list[ChunkNotes] = []
         if pipeline.config.notes.state_section_assembly == "deterministic":
             note_sections = [
-                _assemble_state_section_deterministically(
-                    kb,
-                    section,
-                    render_policy=state_canonicalization_policy,
-                    prose_policy=state_prose_compression_policy,
-                )
+                _assemble_state_section_deterministically(kb, section)
                 for section in outline.sections
             ]
         else:
@@ -3058,11 +2973,7 @@ def run_knowledge_pipeline(
 
                 note_sections.append(_merge_state_section_batches(section, generated_batches))
 
-        state_pipeline_unresolved = [
-            *state_repair_unresolved,
-            *state_canonicalization_unresolved,
-            *state_prose_compression_unresolved,
-        ]
+        state_pipeline_unresolved = list(state_repair_unresolved)
         if state_pipeline_unresolved and note_sections:
             note_sections[-1].unresolved = list(
                 dict.fromkeys([*note_sections[-1].unresolved, *state_pipeline_unresolved])
@@ -3222,16 +3133,6 @@ def run_knowledge_pipeline(
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
             "state_resolution_seconds": round(state_resolution_seconds, 3),
-            "state_canonicalization_seconds": round(state_canonicalization_seconds, 3),
-            "state_canonicalization_enabled": (
-                pipeline.config.notes.state_canonicalization_enabled if state_mode else False
-            ),
-            "state_canonicalization": state_canonicalization_stats,
-            "state_prose_compression_seconds": round(state_prose_compression_seconds, 3),
-            "state_prose_compression_enabled": (
-                pipeline.config.notes.state_prose_compression_enabled if state_mode else False
-            ),
-            "state_prose_compression": state_prose_compression_stats,
             "state_semantic_graph_seconds": round(state_semantic_graph_seconds, 3),
             "state_semantic_graph": state_semantic_graph_stats,
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
