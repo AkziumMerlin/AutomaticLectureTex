@@ -14,6 +14,7 @@ from .schemas import (
     ChunkNotes,
     LectureKnowledgeBase,
     LectureObservation,
+    NoteBlock,
     ObservationKind,
     OutlineSection,
 )
