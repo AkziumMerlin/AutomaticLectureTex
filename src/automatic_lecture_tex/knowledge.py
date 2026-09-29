@@ -136,6 +136,11 @@ def make_lecture_state(
         lecture_id=kb.lecture_id,
         title=kb.title,
         observations=[item.model_copy(deep=True) for item in kb.observations],
+        claims=[
+            item.model_copy(deep=True)
+            for item in kb.claims
+            if item.status == ClaimStatus.ACTIVE
+        ],
         symbols=[item.model_copy(deep=True) for item in kb.symbols if item.active],
         episodes=[item.model_copy(deep=True) for item in kb.episodes],
         unresolved=list(kb.unresolved),
