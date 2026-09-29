@@ -2791,22 +2791,8 @@ def run_knowledge_pipeline(
     state_prose_compression_stats: dict[str, int] = {}
     state_prose_compression_policy = ProseCompressionPolicy()
     state_prose_compression_unresolved: list[str] = []
-    state_document_assembly_seconds = 0.0
-    state_document_assembly_stats: dict[str, int] = {
-        "sections": 0,
-        "model_calls": 0,
-        "retry_calls": 0,
-        "cache_hits": 0,
-        "fallback_sections": 0,
-        "blocks": 0,
-        "prose_blocks": 0,
-        "formula_blocks": 0,
-        "subsections": 0,
-        "remarks": 0,
-        "omitted_text_channels": 0,
-        "omitted_formula_channels": 0,
-    }
-    state_document_assembly_unresolved: list[str] = []
+    state_semantic_graph_seconds = 0.0
+    state_semantic_graph_stats: dict[str, Any] = {}
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
 
@@ -2834,6 +2820,25 @@ def run_knowledge_pipeline(
         state_patches_replaced = int(repair_stats["replaced"])
         state_patches_rejected = int(repair_stats["rejected"])
         state_patches_unresolved = int(repair_stats["unresolved"])
+
+        # PR #3 made claims/episodes derived semantic state. Transactional repair (#83) changes the
+        # observations those objects were derived from, so the pre-repair graph is now audit-only.
+        atomic_json_dump(
+            work / "lecture_state_pre_semantic_graph.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+        semantic_graph_started = time.perf_counter()
+        kb, state_semantic_graph_stats = _rebuild_repaired_semantic_graph(
+            orchestrator,
+            repaired=kb,
+            work=work,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            batch_observations=(
+                pipeline.config.notes.state_repaired_episode_batch_observations
+            ),
+            force=force,
+        )
+        state_semantic_graph_seconds = time.perf_counter() - semantic_graph_started
         atomic_json_dump(
             work / "lecture_state.json",
             make_lecture_state(kb).model_dump(mode="json"),
