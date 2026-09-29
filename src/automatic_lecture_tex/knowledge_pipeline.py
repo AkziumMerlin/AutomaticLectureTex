@@ -3315,7 +3315,11 @@ def run_knowledge_pipeline(
         {
             "lecture_id": lecture.id,
             "architecture": (
-                "state_episode_graph_section_synthesis"
+                (
+                    "state_repaired_semantic_graph_deterministic"
+                    if pipeline.config.notes.state_section_assembly == "semantic"
+                    else "state_episode_graph_section_synthesis"
+                )
                 if state_mode
                 else "knowledge_episode_graph_bounded"
             ),
@@ -3329,6 +3333,8 @@ def run_knowledge_pipeline(
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
             "state_resolution_seconds": round(state_resolution_seconds, 3),
+            "state_semantic_graph_seconds": round(state_semantic_graph_seconds, 3),
+            "state_semantic_graph": state_semantic_graph_stats,
             "state_canonicalization_seconds": round(state_canonicalization_seconds, 3),
             "state_canonicalization_enabled": (
                 pipeline.config.notes.state_canonicalization_enabled if state_mode else False
