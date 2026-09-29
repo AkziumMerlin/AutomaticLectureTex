@@ -124,6 +124,7 @@ class BlockType(StrEnum):
     EQUATION = "equation"
     FIGURE = "figure"
     EXERCISE = "exercise"
+    SUBSECTION = "subsection"
 
 
 _RENDERER_BLOCK_ENVIRONMENTS = frozenset(
