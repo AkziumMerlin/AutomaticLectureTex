@@ -242,11 +242,8 @@ def test_document_plan_keeps_important_definition_fail_closed():
         block
         for block in plan.blocks
         if not (
-            getattr(block, "type", None) in {"definition", "formula"}
-            and (
-                getattr(block, "formula_observation_id", None) == "obs_def"
-                or "obs_def" in getattr(block, "source_observation_ids", [])
-            )
+            getattr(block, "formula_observation_id", None) == "obs_def"
+            or "obs_def" in getattr(block, "source_observation_ids", [])
         )
     ]
     plan.omissions = [
