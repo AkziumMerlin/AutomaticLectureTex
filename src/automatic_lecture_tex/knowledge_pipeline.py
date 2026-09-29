@@ -1839,6 +1839,10 @@ def _rebuild_semantic_graph_after_repair(
             key=lambda obs: (obs.start, obs.end, obs.id),
         )
     ]
+    # The old episode assignment is precisely the stale derived state being replaced, so it must
+    # neither leak into the rebuilt graph nor participate in its cache identity.
+    for item in ordered:
+        item.episode_id = ""
     fingerprint = stable_hash(
         {
             "semantic_graph_version": STATE_SEMANTIC_GRAPH_VERSION,
@@ -1879,9 +1883,6 @@ def _rebuild_semantic_graph_after_repair(
         anchors=[],
         unresolved=list(repaired.unresolved),
     )
-    for item in rebuilt.observations:
-        item.episode_id = ""
-
     unresolved: list[str] = []
     model_calls = 0
     for batch_index, start in enumerate(range(0, len(ordered), STATE_SEMANTIC_GRAPH_BATCH_SIZE)):
