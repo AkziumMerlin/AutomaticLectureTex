@@ -2040,7 +2040,7 @@ def _state_section_payload(
     payload.pop("transcript", None)
     # Legacy state modes still carry pre-repair derived claims. Semantic mode rebuilds the entire
     # derived graph after repair, so its claims are canonical and may be consumed downstream.
-    if config.state_section_assembly != "semantic":
+    if getattr(config, "state_section_assembly", "llm") != "semantic":
         payload["claims"] = []
     return payload
 
