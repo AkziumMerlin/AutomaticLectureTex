@@ -116,6 +116,30 @@ def test_state_ir_fingerprint_depends_on_semantic_text_retry_version(monkeypatch
     assert before != after
 
 
+def test_state_ir_fingerprint_depends_on_semantic_graph_version(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state.yaml"
+    )
+    config = load_config(config_path)
+    pipeline = pipeline_robust_module.Pipeline(config)
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[TranscriptSegment(id="seg_0", start=0.0, end=1.0, text="test")],
+    )
+
+    before = pipeline._ir_fingerprint(transcript, {})
+    monkeypatch.setattr(
+        pipeline_robust_module,
+        "STATE_SEMANTIC_GRAPH_VERSION",
+        pipeline_robust_module.STATE_SEMANTIC_GRAPH_VERSION + 1,
+    )
+    after = pipeline._ir_fingerprint(transcript, {})
+
+    assert before != after
+
+
 def test_state_ir_fingerprint_depends_on_writer_cache_version(monkeypatch):
     config_path = (
         Path(__file__).resolve().parents[1]
