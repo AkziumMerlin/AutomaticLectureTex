@@ -66,6 +66,8 @@ def render_block(block: NoteBlock) -> str:
     body = _body(block)
     if block.type == BlockType.PARAGRAPH:
         return body + "\n"
+    if block.type == BlockType.SUBSECTION:
+        return f"\\subsection{{{escape_tex_mixed(block.latex)}}}\n"
     if block.type == BlockType.EQUATION:
         math = canonicalize_math_fragment(strip_control_chars(block.latex)).strip()
         if looks_like_math_fragment(math):
