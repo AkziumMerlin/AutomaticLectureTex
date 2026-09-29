@@ -1816,6 +1816,219 @@ def _repair_lecture_state(
     repaired.unresolved = list(dict.fromkeys([*repaired.unresolved, *unresolved]))
     return repaired, stats, list(dict.fromkeys(unresolved))
 
+
+def _rebuild_semantic_graph_after_repair(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    repaired: LectureKnowledgeBase,
+    work: Path,
+    llm_config: dict[str, Any],
+    force: bool,
+) -> tuple[LectureKnowledgeBase, dict[str, int], list[str]]:
+    """Rebuild claims/symbols/episodes from repaired observations.
+
+    Episode tracking before transactional repair is evidence-time structure only. Once repair has
+    rejected/replaced observations, the derived semantic graph must be rebuilt from that canonical
+    sequence; otherwise claims and episode labels refer to stale pre-repair content.
+    """
+
+    ordered = [
+        item.model_copy(deep=True)
+        for item in sorted(
+            repaired.observations,
+            key=lambda obs: (obs.start, obs.end, obs.id),
+        )
+    ]
+    fingerprint = stable_hash(
+        {
+            "semantic_graph_version": STATE_SEMANTIC_GRAPH_VERSION,
+            "batch_size": STATE_SEMANTIC_GRAPH_BATCH_SIZE,
+            "observations": [item.model_dump(mode="json") for item in ordered],
+            "llm": llm_config,
+            "output_language": orchestrator.output_language,
+        }
+    )
+    path = work / "state_semantic_graph.json"
+    if path.exists() and not force:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("fingerprint") == fingerprint:
+                cached = LectureKnowledgeBase.model_validate(payload["kb"])
+                return (
+                    cached,
+                    {
+                        "cache_hits": 1,
+                        "model_calls": 0,
+                        "episodes": len(cached.episodes),
+                        "claims": len(cached.claims),
+                        "symbols": len([item for item in cached.symbols if item.active]),
+                    },
+                    list(payload.get("unresolved", [])),
+                )
+        except (json.JSONDecodeError, KeyError, ValidationError):
+            pass
+
+    rebuilt = LectureKnowledgeBase(
+        lecture_id=repaired.lecture_id,
+        title=repaired.title,
+        observations=ordered,
+        observation_aliases=dict(repaired.observation_aliases),
+        claims=[],
+        symbols=[],
+        episodes=[],
+        anchors=[],
+        unresolved=list(repaired.unresolved),
+    )
+    for item in rebuilt.observations:
+        item.episode_id = ""
+
+    unresolved: list[str] = []
+    model_calls = 0
+    for batch_index, start in enumerate(range(0, len(ordered), STATE_SEMANTIC_GRAPH_BATCH_SIZE)):
+        selected = ordered[start : start + STATE_SEMANTIC_GRAPH_BATCH_SIZE]
+        if not selected:
+            continue
+        observation_ids = [item.id for item in selected]
+        batch = WindowObservations(
+            window_id=f"repaired_graph_{batch_index:03d}",
+            start=selected[0].start,
+            end=selected[-1].end,
+            observations=[item.model_copy(deep=True) for item in selected],
+        )
+        update = orchestrator.track_episodes(
+            rebuilt,
+            batch,
+            observation_ids,
+        )
+        model_calls += 1
+        apply_episode_tracking(
+            rebuilt,
+            update,
+            observation_ids,
+            window_id=batch.window_id,
+        )
+        unresolved.extend(update.unresolved)
+
+    close_open_episodes(rebuilt)
+    rebuilt.unresolved = list(dict.fromkeys([*rebuilt.unresolved, *unresolved]))
+    atomic_json_dump(
+        path,
+        {
+            "fingerprint": fingerprint,
+            "version": STATE_SEMANTIC_GRAPH_VERSION,
+            "batch_size": STATE_SEMANTIC_GRAPH_BATCH_SIZE,
+            "kb": rebuilt.model_dump(mode="json"),
+            "unresolved": list(dict.fromkeys(unresolved)),
+        },
+    )
+    return (
+        rebuilt,
+        {
+            "cache_hits": 0,
+            "model_calls": model_calls,
+            "episodes": len(rebuilt.episodes),
+            "claims": len(rebuilt.claims),
+            "symbols": len([item for item in rebuilt.symbols if item.active]),
+        },
+        list(dict.fromkeys(unresolved)),
+    )
+
+
+def _semantic_episode_block_type(kind: EpisodeKind) -> BlockType:
+    return {
+        EpisodeKind.DEFINITION: BlockType.DEFINITION,
+        EpisodeKind.THEOREM: BlockType.THEOREM,
+        EpisodeKind.PROOF: BlockType.PROOF,
+        EpisodeKind.EXAMPLE: BlockType.EXAMPLE,
+        EpisodeKind.REMARK: BlockType.REMARK,
+    }.get(kind, BlockType.PARAGRAPH)
+
+
+def _assemble_semantic_state_section(
+    kb: LectureKnowledgeBase,
+    section: OutlineSection,
+) -> ChunkNotes:
+    """Render repaired semantic episodes deterministically from active derived claims."""
+
+    claim_by_id = {item.id: item for item in kb.claims}
+    active_claim_ids = {
+        item.id for item in kb.claims if str(item.status) == "active"
+    }
+    episode_by_id = {item.id: item for item in kb.episodes}
+    subsection_by_first_episode = {
+        item.episode_ids[0]: item.title
+        for item in section.subsections
+        if item.episode_ids
+    }
+
+    blocks: list[NoteBlock] = []
+    unresolved: list[str] = []
+    for episode_id in section.episode_ids:
+        episode = episode_by_id.get(episode_id)
+        if episode is None:
+            unresolved.append(f"Missing semantic episode {episode_id}.")
+            continue
+
+        subsection_title = subsection_by_first_episode.get(episode_id)
+        if subsection_title and subsection_title.strip() != section.title.strip():
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.SUBSECTION,
+                    latex=subsection_title,
+                    source_claim_ids=[
+                        claim_id
+                        for claim_id in episode.claim_ids
+                        if claim_id in active_claim_ids
+                    ],
+                    source_evidence_ids=list(episode.observation_ids),
+                )
+            )
+
+        claims = [
+            claim_by_id[claim_id]
+            for claim_id in episode.claim_ids
+            if claim_id in active_claim_ids and claim_id in claim_by_id
+        ]
+        claims.sort(key=lambda item: (item.introduced_at, item.id))
+        if not claims:
+            continue
+
+        body_parts: list[str] = []
+        source_claim_ids: list[str] = []
+        source_evidence_ids: list[str] = []
+        for claim in claims:
+            content = claim.content.strip()
+            latex = (claim.latex or "").strip()
+            if content and content != latex:
+                body_parts.append(escape_tex(content))
+            if latex:
+                body_parts.append("\\[\n" + latex + "\n\\]")
+            source_claim_ids.append(claim.id)
+            source_evidence_ids.extend(claim.evidence_ids)
+
+        body = "\n\n".join(part for part in body_parts if part.strip()).strip()
+        if not body:
+            continue
+        blocks.append(
+            NoteBlock(
+                type=_semantic_episode_block_type(episode.kind),
+                title=None,
+                latex=body,
+                source_claim_ids=list(dict.fromkeys(source_claim_ids)),
+                source_evidence_ids=list(dict.fromkeys(source_evidence_ids)),
+            )
+        )
+
+    return ChunkNotes(
+        chunk_id=section.id,
+        start=section.start,
+        end=section.end,
+        section_title=section.title,
+        blocks=blocks,
+        unresolved=list(dict.fromkeys(unresolved)),
+    )
+
+
 def _state_section_payload(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
