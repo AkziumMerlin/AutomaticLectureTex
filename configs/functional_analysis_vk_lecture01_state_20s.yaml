@@ -87,9 +87,10 @@ notes:
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
   state_section_max_evidence_chars: 100000
-  # Final notes are assembled at mathematical-document granularity. The model may compress prose
-  # and select existing formulas, but never regenerate or edit formula LaTeX.
-  state_section_assembly: document
+  # Repaired observations are retracked into semantic episodes; final TeX is then realized
+  # deterministically one mathematical episode at a time.
+  state_section_assembly: deterministic
+  state_repaired_episode_batch_observations: 24
   # Qwen3.8 official instruct/non-thinking sampling preset for final section synthesis.
   state_section_writer_thinking: false
   state_section_writer_temperature: 0.7
@@ -111,7 +112,7 @@ notes:
   # Compact only host-verifiable redundant repaired events. The canonicalizer may propose
   # ID-to-ID relations, but it cannot rewrite text/LaTeX; semantic supersession stays audit-only
   # unless backed by an explicit correction/retraction event.
-  state_canonicalization_enabled: true
+  state_canonicalization_enabled: false
   # Keep semantic LLM relations off in normal runs: the deterministic render policy already
   # removes structurally redundant/incomplete math, while long-range semantic audit is diagnostic.
   state_canonicalization_semantic_audit: false
@@ -122,12 +123,6 @@ notes:
   state_prose_compression_max_sentences: 2
   state_prose_compression_max_ratio: 0.55
   state_prose_compression_max_summary_chars: 500
-
-  # Reference-quality document contract: comparable to edited course notes rather than an
-  # observation ledger. Definitions/theorems/proofs/examples dominate; remarks stay exceptional.
-  state_document_max_prose_ratio: 0.45
-  state_document_max_remarks_fraction: 0.20
-  state_document_max_blocks_per_section: 44
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
