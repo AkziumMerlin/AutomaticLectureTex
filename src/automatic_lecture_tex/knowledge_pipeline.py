@@ -2037,8 +2037,10 @@ def _state_section_payload(
 ) -> dict[str, Any]:
     payload = evidence_for_section(kb, section, transcript, config)
     payload.pop("transcript", None)
-    # State repair owns canonical semantics. Pre-repair claims can no longer override repaired events.
-    payload["claims"] = []
+    # Legacy state modes still carry pre-repair derived claims. Semantic mode rebuilds the entire
+    # derived graph after repair, so its claims are canonical and may be consumed downstream.
+    if config.state_section_assembly != "semantic":
+        payload["claims"] = []
     return payload
 
 
