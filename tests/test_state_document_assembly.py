@@ -213,11 +213,44 @@ def test_document_plan_rejects_new_symbol_in_generated_prose():
     assert any("new standalone Latin symbols" in issue for issue in issues)
 
 
-def test_document_plan_requires_channel_accounting():
+def test_document_plan_may_implicitly_omit_routine_remark_and_proof_channels():
     _, section, observations = _fixture()
     plan = _good_plan()
+    plan.omissions = []
+
+    notes, issues, stats = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+    assert stats["omitted_text_channels"] >= 2
+    assert stats["omitted_formula_channels"] >= 1
+
+
+def test_document_plan_keeps_important_definition_fail_closed():
+    _, section, observations = _fixture()
+    plan = _good_plan()
+    plan.blocks = [
+        block
+        for block in plan.blocks
+        if not (
+            getattr(block, "type", None) in {"definition", "formula"}
+            and (
+                getattr(block, "formula_observation_id", None) == "obs_def"
+                or "obs_def" in getattr(block, "source_observation_ids", [])
+            )
+        )
+    ]
     plan.omissions = [
-        item for item in plan.omissions if item.observation_id != "obs_duplicate"
+        item for item in plan.omissions if item.observation_id != "obs_def"
     ]
 
     notes, issues, _ = _validate_and_render_plan(
@@ -232,7 +265,52 @@ def test_document_plan_requires_channel_accounting():
     )
 
     assert notes is None
-    assert any("obs_duplicate" in issue and "neither used nor omitted" in issue for issue in issues)
+    assert any("important text channel for obs_def" in issue for issue in issues)
+    assert any("important formula channel for obs_def" in issue for issue in issues)
+
+
+def test_document_plan_allows_semantic_reordering_within_section():
+    _, section, observations = _fixture()
+    plan = _good_plan()
+    proof = plan.blocks.pop(3)
+    formula = plan.blocks.pop(3)
+    plan.blocks.extend([formula, proof])
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+
+
+def test_document_plan_allows_literal_source_equality_in_prose():
+    _, section, observations = _fixture()
+    observations[1].text = "Для частей функционала используется равенство u = v."
+    plan = _good_plan()
+    plan.blocks[3].text = "Для частей функционала используется равенство u = v."
+    plan.blocks[3].source_observation_ids = ["obs_step"]
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
 
 
 def test_document_assembly_is_cached(tmp_path):
