@@ -577,7 +577,7 @@ def test_subsection_block_renders_as_heading():
     assert rendered == "\\subsection{Комплексно-линейные функционалы}\n"
 
 
-def test_functional_analysis_20s_config_uses_document_assembly():
+def test_functional_analysis_20s_config_uses_semantic_assembly():
     config_path = (
         Path(__file__).resolve().parents[1]
         / "configs"
@@ -585,7 +585,7 @@ def test_functional_analysis_20s_config_uses_document_assembly():
     )
     config = load_config(config_path)
 
-    assert config.notes.state_section_assembly == "document"
+    assert config.notes.state_section_assembly == "semantic"
     assert config.notes.state_prose_compression_enabled is False
     assert config.notes.state_document_max_prose_ratio == 0.45
     assert config.notes.state_document_max_remarks_fraction == 0.20
