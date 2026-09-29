@@ -111,13 +111,6 @@ class NotesConfig(BaseModel):
     state_observation_history: int = Field(default=4, ge=0, le=20)
     state_observation_max_raw_windows: int = Field(default=2, ge=1, le=8)
     state_observation_max_images: int = Field(default=2, ge=0, le=4)
-    state_canonicalization_enabled: bool = False
-    state_canonicalization_semantic_audit: bool = False
-    state_prose_compression_enabled: bool = False
-    state_prose_compression_min_group_size: int = Field(default=3, ge=3, le=12)
-    state_prose_compression_max_sentences: int = Field(default=2, ge=1, le=3)
-    state_prose_compression_max_ratio: float = Field(default=0.55, gt=0.1, le=0.9)
-    state_prose_compression_max_summary_chars: int = Field(default=700, ge=100, le=2400)
     state_repaired_episode_batch_observations: int = Field(default=24, ge=4, le=80)
     episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)
     episode_transcript_context_seconds: float = Field(
