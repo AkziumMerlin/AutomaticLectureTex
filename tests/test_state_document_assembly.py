@@ -14,7 +14,6 @@ from automatic_lecture_tex.schemas import (
 )
 from automatic_lecture_tex.state_canonicalization import CanonicalRenderPolicy
 from automatic_lecture_tex.state_document_assembly import (
-    StateDocumentBlockProposal,
     StateDocumentOmission,
     StateDocumentPlan,
     _validate_and_render_plan,
@@ -104,51 +103,67 @@ def _fixture():
 
 
 def _good_plan() -> StateDocumentPlan:
-    return StateDocumentPlan(
-        blocks=[
-            StateDocumentBlockProposal(
-                type="subsection",
-                text="Комплексно-линейные функционалы",
-                source_observation_ids=["obs_def"],
-            ),
-            StateDocumentBlockProposal(
-                type="definition",
-                text=(
-                    "Функционал f на комплексном пространстве X называется "
-                    "комплексно-линейным."
-                ),
-                source_observation_ids=["obs_def"],
-            ),
-            StateDocumentBlockProposal(
-                type="formula",
-                formula_observation_id="obs_def",
-            ),
-            StateDocumentBlockProposal(
-                type="proof",
-                text=(
-                    "Разложение функционала f на действительную и мнимую части "
-                    "связывает u и v."
-                ),
-                source_observation_ids=["obs_step", "obs_formula"],
-            ),
-            StateDocumentBlockProposal(
-                type="formula",
-                formula_observation_id="obs_formula",
-            ),
-        ],
-        omissions=[
-            StateDocumentOmission(
-                observation_id="obs_duplicate",
-                channel="text",
-                reason="duplicate",
-            ),
-            StateDocumentOmission(
-                observation_id="obs_intermediate",
-                channel="both",
-                reason="intermediate",
-            ),
-        ],
+    return StateDocumentPlan.model_validate(
+        {
+            "blocks": [
+                {
+                    "type": "subsection",
+                    "text": "Комплексно-линейные функционалы",
+                    "source_observation_ids": ["obs_def"],
+                },
+                {
+                    "type": "definition",
+                    "text": (
+                        "Функционал f на комплексном пространстве X называется "
+                        "комплексно-линейным."
+                    ),
+                    "source_observation_ids": ["obs_def"],
+                },
+                {
+                    "type": "formula",
+                    "formula_observation_id": "obs_def",
+                },
+                {
+                    "type": "proof",
+                    "text": (
+                        "Разложение функционала f на действительную и мнимую части "
+                        "связывает u и v."
+                    ),
+                    "source_observation_ids": ["obs_step", "obs_formula"],
+                },
+                {
+                    "type": "formula",
+                    "formula_observation_id": "obs_formula",
+                },
+            ],
+            "omissions": [
+                {
+                    "observation_id": "obs_duplicate",
+                    "channel": "text",
+                    "reason": "duplicate",
+                },
+                {
+                    "observation_id": "obs_intermediate",
+                    "channel": "both",
+                    "reason": "intermediate",
+                },
+            ],
+        }
     )
+
+
+def test_document_block_json_schema_encodes_type_specific_required_fields():
+    schema = StateDocumentPlan.model_json_schema()
+    prose = schema["$defs"]["StateDocumentProseBlock"]
+    formula = schema["$defs"]["StateDocumentFormulaBlock"]
+    block_items = schema["properties"]["blocks"]["items"]
+
+    assert "discriminator" in block_items
+    assert set(prose["required"]) >= {"type", "text", "source_observation_ids"}
+    assert "formula_observation_id" not in prose["properties"]
+    assert set(formula["required"]) == {"type", "formula_observation_id"}
+    assert "text" not in formula["properties"]
+    assert "title" not in formula["properties"]
 
 
 def test_document_plan_preserves_formula_latex_verbatim():
