@@ -20,6 +20,8 @@ from automatic_lecture_tex.knowledge_pipeline import (
 )
 from automatic_lecture_tex.schemas import (
     ChunkNotes,
+    EpisodeBoundary,
+    EpisodeKind,
     EpisodeStatus,
     EpisodeTrackingUpdate,
     LectureKnowledgeBase,
@@ -386,7 +388,7 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
-def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
+def test_deterministic_state_assembly_realizes_one_semantic_episode_block():
     observations = [
         LectureObservation(
             id="obs_definition",
@@ -413,7 +415,8 @@ def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
     ]
     episode = SemanticEpisode(
         id="episode_0",
-        title="Topic",
+        title="Норма функционала",
+        kind=EpisodeKind.DEFINITION,
         start=0.0,
         end=2.0,
         status=EpisodeStatus.CLOSED,
@@ -435,21 +438,139 @@ def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
 
     notes = knowledge_pipeline_module._assemble_state_section_deterministically(kb, section)
 
-    assert [block.type for block in notes.blocks] == [
-        "definition",
-        "equation",
-        "paragraph",
-        "equation",
-    ]
-    assert notes.blocks[0].latex == "Определение нормы функционала."
-    assert notes.blocks[2].latex == "Разложим вектор."
-    assert notes.blocks[1].latex == r"\|f\|=\sup_{\|x\|\le 1}|f(x)|"
+    assert len(notes.blocks) == 1
+    assert notes.blocks[0].type == "definition"
+    assert "Определение нормы функционала." in notes.blocks[0].latex
+    assert r"\|f\|=\sup_{\|x\|\le 1}|f(x)|" in notes.blocks[0].latex
     assert (
-        notes.blocks[3].latex
-        == r"x=\frac{f(x)}{f(z_f)}\,z_f+y,\qquad y\in\operatorname{Ker}f"
+        r"x=\frac{f(x)}{f(z_f)}\,z_f+y,\qquad y\in\operatorname{Ker}f"
+        in notes.blocks[0].latex
     )
-    assert notes.blocks[1].source_evidence_ids == ["obs_definition"]
-    assert notes.blocks[3].source_evidence_ids == ["obs_formula"]
+    assert notes.blocks[0].source_evidence_ids == ["obs_definition", "obs_formula"]
+
+
+def test_repaired_semantic_graph_rederives_claims_and_episode_roles(tmp_path):
+    observations = [
+        LectureObservation(
+            id="obs_def",
+            window_id="window_0",
+            start=0.0,
+            end=1.0,
+            kind=ObservationKind.DEFINITION,
+            text="Пространство X называется нормированным при наличии нормы.",
+            episode_id="old_episode",
+        ),
+        LectureObservation(
+            id="obs_theorem",
+            window_id="window_1",
+            start=1.0,
+            end=2.0,
+            kind=ObservationKind.CLAIM,
+            text="Формулируется теорема о продолжении функционала.",
+            episode_id="old_episode",
+        ),
+        LectureObservation(
+            id="obs_proof",
+            window_id="window_2",
+            start=2.0,
+            end=3.0,
+            kind=ObservationKind.PROOF_STEP,
+            text="Для доказательства строится продолжение.",
+            episode_id="old_episode",
+        ),
+    ]
+    repaired = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        episodes=[
+            SemanticEpisode(
+                id="old_episode",
+                title="Запись на доске",
+                kind=EpisodeKind.TOPIC,
+                start=0.0,
+                end=3.0,
+                status=EpisodeStatus.CLOSED,
+                observation_ids=[item.id for item in observations],
+            )
+        ],
+        symbols=[
+            SymbolRecord(
+                id="sym_x",
+                symbol="X",
+                meaning="пространство",
+                scope="old_episode",
+                episode_id="old_episode",
+                introduced_at=0.0,
+                evidence_ids=["obs_def"],
+            )
+        ],
+    )
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.calls = 0
+
+        def track_repaired_episodes(self, kb, batch, added_observation_ids):
+            self.calls += 1
+            return EpisodeTrackingUpdate(
+                boundaries=[
+                    EpisodeBoundary(
+                        before_observation_id="obs_def",
+                        kind=EpisodeKind.DEFINITION,
+                        title="Нормированное пространство",
+                    ),
+                    EpisodeBoundary(
+                        before_observation_id="obs_theorem",
+                        kind=EpisodeKind.THEOREM,
+                        title="Теорема о продолжении функционала",
+                    ),
+                    EpisodeBoundary(
+                        before_observation_id="obs_proof",
+                        kind=EpisodeKind.PROOF,
+                        title="Доказательство",
+                    ),
+                ]
+            )
+
+    orchestrator = FakeOrchestrator()
+    rebuilt, stats = knowledge_pipeline_module._rebuild_repaired_semantic_graph(
+        orchestrator,
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        batch_observations=10,
+        force=False,
+    )
+
+    assert orchestrator.calls == 1
+    assert stats["model_calls"] == 1
+    assert [episode.kind for episode in rebuilt.episodes] == [
+        EpisodeKind.DEFINITION,
+        EpisodeKind.THEOREM,
+        EpisodeKind.PROOF,
+    ]
+    assert [claim.content for claim in rebuilt.claims] == [
+        observation.text for observation in observations
+    ]
+    assert rebuilt.symbols[0].episode_id == rebuilt.episodes[0].id
+    assert rebuilt.symbols[0].scope == rebuilt.episodes[0].id
+
+    cached, cached_stats = knowledge_pipeline_module._rebuild_repaired_semantic_graph(
+        orchestrator,
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        batch_observations=10,
+        force=False,
+    )
+    assert orchestrator.calls == 1
+    assert cached_stats["cache_hits"] == 1
+    assert [episode.kind for episode in cached.episodes] == [
+        EpisodeKind.DEFINITION,
+        EpisodeKind.THEOREM,
+        EpisodeKind.PROOF,
+    ]
 
 
 def test_state_writer_uses_minimal_canonical_prompt_and_host_provenance():
