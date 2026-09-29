@@ -4,9 +4,9 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .latex import escape_tex
 from .schemas import (
@@ -22,7 +22,7 @@ from .state_canonicalization import CanonicalRenderPolicy
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_DOCUMENT_ASSEMBLY_VERSION = 1
+STATE_DOCUMENT_ASSEMBLY_VERSION = 2
 
 DocumentBlockKind = Literal[
     "subsection",
@@ -75,12 +75,26 @@ _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _ALPHA_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
 
 
-class StateDocumentBlockProposal(BaseModel):
-    type: DocumentBlockKind
-    text: str | None = None
+class StateDocumentProseBlock(BaseModel):
+    """Generated prose block whose required fields are visible to guided JSON decoding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        "subsection",
+        "paragraph",
+        "definition",
+        "theorem",
+        "lemma",
+        "proposition",
+        "corollary",
+        "proof",
+        "example",
+        "remark",
+    ]
+    text: str = Field(min_length=1)
     title: str | None = None
-    source_observation_ids: list[str] = Field(default_factory=list)
-    formula_observation_id: str | None = None
+    source_observation_ids: list[str] = Field(min_length=1)
 
     @field_validator("text", "title")
     @classmethod
@@ -88,28 +102,39 @@ class StateDocumentBlockProposal(BaseModel):
         if value is None:
             return None
         value = re.sub(r"\s+", " ", value.strip())
+        if not value and cls.__name__ == "StateDocumentProseBlock":
+            return value
         return value or None
+
+    @field_validator("text")
+    @classmethod
+    def require_text(cls, value: str) -> str:
+        if not value:
+            raise ValueError("prose block text must be non-empty")
+        return value
 
     @field_validator("source_observation_ids")
     @classmethod
     def unique_sources(cls, value: list[str]) -> list[str]:
-        return list(dict.fromkeys(item.strip() for item in value if item and item.strip()))
+        unique = list(dict.fromkeys(item.strip() for item in value if item and item.strip()))
+        if not unique:
+            raise ValueError("prose block requires source_observation_ids")
+        return unique
 
-    @model_validator(mode="after")
-    def validate_shape(self) -> StateDocumentBlockProposal:
-        if self.type == "formula":
-            if not self.formula_observation_id:
-                raise ValueError("formula block requires formula_observation_id")
-            if self.text is not None or self.title is not None:
-                raise ValueError("formula block cannot contain generated text/title")
-            return self
-        if self.formula_observation_id is not None:
-            raise ValueError("non-formula block cannot contain formula_observation_id")
-        if self.text is None:
-            raise ValueError(f"{self.type} block requires text")
-        if not self.source_observation_ids:
-            raise ValueError(f"{self.type} block requires source_observation_ids")
-        return self
+
+class StateDocumentFormulaBlock(BaseModel):
+    """Formula block: the model may only point at existing repaired LaTeX."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["formula"]
+    formula_observation_id: str = Field(min_length=1)
+
+
+StateDocumentBlockProposal = Annotated[
+    StateDocumentProseBlock | StateDocumentFormulaBlock,
+    Field(discriminator="type"),
+]
 
 
 class StateDocumentOmission(BaseModel):
