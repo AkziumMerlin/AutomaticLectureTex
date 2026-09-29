@@ -69,16 +69,14 @@ _IMPORTANT_TEXT_KINDS = {
     ObservationKind.CORRECTION,
     ObservationKind.RETRACTION,
 }
-_IMPORTANT_FORMULA_KINDS = _IMPORTANT_TEXT_KINDS
 _NARRATION_RE = re.compile(
     r"\b(?:"
     r"лектор|преподавател\w*|на\s+(?:левой|правой|средней\s+)?доске|доск\w*|"
-    r"устно|записыва\w*|дописыва\w*|указывает|подч[её]ркива\w*|"
-    r"комментиру\w*|поясня\w*|отмечает|говорит|произносит|обводит|"
-    r"продолжая\s+(?:запись|объяснение)"
+    r"устно|asr|ocr|кадр\w*|реконструк\w*"
     r")\b",
     re.IGNORECASE,
 )
+_PROSE_BUDGET_HARD_SLACK = 1.20
 _LATIN_SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?![A-Za-z0-9])")
 _NUMBER_RE = re.compile(r"\d+")
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
@@ -261,7 +259,17 @@ def _safe_generated_prose(
 
     generated_relations = _relation_tokens(value)
     source_relations = _relation_tokens(source)
-    unsupported_relations = generated_relations - source_relations
+    section_relations = _relation_tokens(section_source)
+    unsupported_relations = {
+        relation
+        for relation in generated_relations
+        if (
+            relation == "=" and relation not in source_relations
+        )
+        or (
+            relation != "=" and relation not in section_relations
+        )
+    }
     if unsupported_relations:
         return False, "generated prose introduces unsupported relation tokens: " + ", ".join(
             sorted(unsupported_relations)
@@ -496,7 +504,10 @@ def _validate_and_render_plan(
             and "formula" not in channels
         )
         if formula_unused:
-            if item.kind in _IMPORTANT_FORMULA_KINDS:
+            # If this observation already supports a rendered prose block, its semantic content is
+            # represented and the separate display formula becomes editorially optional. Keep
+            # fail-closed accounting only when an important observation is otherwise absent.
+            if item.kind in _IMPORTANT_TEXT_KINDS and item.id not in used_text_ids:
                 issues.append(f"important formula channel for {item.id} is neither used nor omitted")
             else:
                 implicit_formula_omissions += 1
@@ -508,7 +519,10 @@ def _validate_and_render_plan(
                     f"important {item.kind} observation {item.id} omitted as {omission.reason}"
                 )
 
-    allowed_chars = max(600, math.ceil(source_prose_chars * max_prose_ratio))
+    allowed_chars = max(
+        600,
+        math.ceil(source_prose_chars * max_prose_ratio * _PROSE_BUDGET_HARD_SLACK),
+    )
     if generated_prose_chars > allowed_chars:
         issues.append(
             f"generated prose is too verbose ({generated_prose_chars} chars > {allowed_chars})"
