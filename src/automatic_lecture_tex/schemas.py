@@ -466,11 +466,12 @@ class LectureOutline(BaseModel):
 
 
 class LectureState(BaseModel):
-    """Persistent semantic state assembled before any final note blocks are written."""
+    """Persistent repaired semantic state exposed to hierarchy and deterministic note realization."""
 
     lecture_id: str
     title: str
     observations: list[LectureObservation] = Field(default_factory=list)
+    claims: list[KnowledgeClaim] = Field(default_factory=list)
     symbols: list[SymbolRecord] = Field(default_factory=list)
     episodes: list[SemanticEpisode] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
