@@ -24,8 +24,6 @@ from .linear_llm_policy import (
 from .linear_pipeline import LINEAR_PIPELINE_VERSION, run_linear_pipeline
 from .llm_robust import LectureModelClient as RobustLectureModelClient
 from .media import media_source_from_config
-from .state_canonicalization import STATE_CANONICALIZATION_VERSION
-from .state_prose_compression import STATE_PROSE_COMPRESSION_VERSION
 from .schemas import Transcript
 from .util import atomic_json_dump, stable_hash
 
@@ -89,24 +87,12 @@ class Pipeline(_base_pipeline.Pipeline):
                     STATE_SEMANTIC_TEXT_RETRY_VERSION
                 )
                 payload["state_section_writer_cache_version"] = STATE_SECTION_WRITER_CACHE_VERSION
-                if self.config.notes.state_canonicalization_enabled:
-                    payload["state_canonicalization_version"] = STATE_CANONICALIZATION_VERSION
                 payload["state_semantic_graph"] = {
                     "version": STATE_SEMANTIC_GRAPH_VERSION,
                     "batch_observations": (
                         self.config.notes.state_repaired_episode_batch_observations
                     ),
                 }
-                if self.config.notes.state_prose_compression_enabled:
-                    payload["state_prose_compression"] = {
-                        "version": STATE_PROSE_COMPRESSION_VERSION,
-                        "min_group_size": self.config.notes.state_prose_compression_min_group_size,
-                        "max_sentences": self.config.notes.state_prose_compression_max_sentences,
-                        "max_ratio": self.config.notes.state_prose_compression_max_ratio,
-                        "max_summary_chars": (
-                            self.config.notes.state_prose_compression_max_summary_chars
-                        ),
-                    }
             return stable_hash(payload)
         return base
 
