@@ -477,6 +477,7 @@ def build_state_document_section(
     observations, compact = _compact_inputs(kb, section, render_policy=render_policy)
     stats = {
         "model_calls": 0,
+        "retry_calls": 0,
         "cache_hits": 0,
         "blocks": 0,
         "prose_blocks": 0,
@@ -601,6 +602,73 @@ Compression target:
     )
     for key, value in render_stats.items():
         stats[key] = value
+
+    if issues:
+        retry_prompt = f"""Repair a rejected mathematical-document plan.
+
+Section title:
+{section.title}
+
+Canonical observations:
+{json.dumps(compact, ensure_ascii=False, separators=(",", ":"))}
+
+Rejected plan:
+{json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
+
+Host validation errors:
+{json.dumps(issues, ensure_ascii=False)}
+
+Return a COMPLETE corrected StateDocumentPlan, not a patch.
+
+Do not weaken the document contract:
+- formulas are existing formula_observation_id references only;
+- generated prose contains no formulas/LaTeX and no lecturer/board narration;
+- every available text/formula channel is either used or explicitly omitted;
+- important definitions/claims/examples are not discarded as routine material;
+- keep document-level structure and aggressive semantic compression;
+- write in language code {orchestrator.output_language}.
+"""
+        try:
+            plan = orchestrator._structured(
+                retry_prompt,
+                StateDocumentPlan,
+                operation="state_document_assembly_retry",
+                max_tokens=8192,
+                split_oversized_task=True,
+                thinking=False,
+                temperature=0.3,
+                top_p=0.8,
+                top_k=20,
+                min_p=0.0,
+                presence_penalty=0.0,
+                repetition_penalty=1.0,
+            )
+            stats["retry_calls"] = 1
+            notes, issues, render_stats = _validate_and_render_plan(
+                plan,
+                section=section,
+                observations=observations,
+                render_policy=render_policy,
+                output_language=str(orchestrator.output_language or ""),
+                max_prose_ratio=max_prose_ratio,
+                max_remarks_fraction=max_remarks_fraction,
+                max_blocks=max_blocks,
+            )
+            for key, value in render_stats.items():
+                stats[key] = value
+            if not issues:
+                atomic_json_dump(
+                    path,
+                    {
+                        "fingerprint": fingerprint,
+                        "inputs": compact,
+                        "plan": plan.model_dump(mode="json"),
+                        "repaired_after_validation": True,
+                    },
+                )
+        except Exception as exc:
+            issues = [*issues, f"document retry failed: {type(exc).__name__}: {exc}"]
+
     if issues:
         atomic_json_dump(
             work / "state_document_sections" / f"{section.id}.validation.json",
