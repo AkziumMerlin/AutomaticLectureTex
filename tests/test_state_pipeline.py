@@ -19,7 +19,10 @@ from automatic_lecture_tex.knowledge_pipeline import (
     _write_state_section_batch_resilient,
 )
 from automatic_lecture_tex.schemas import (
+    BlockType,
     ChunkNotes,
+    EpisodeBoundary,
+    EpisodeKind,
     EpisodeStatus,
     EpisodeTrackingUpdate,
     LectureKnowledgeBase,
@@ -33,6 +36,197 @@ from automatic_lecture_tex.schemas import (
     Transcript,
     TranscriptSegment,
 )
+
+
+def test_rebuild_semantic_graph_discards_stale_pre_repair_claims(tmp_path):
+    repaired = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[
+            LectureObservation(
+                id="obs_def",
+                start=0.0,
+                end=1.0,
+                kind=ObservationKind.DEFINITION,
+                text="Пространство X называется нормированным.",
+                latex=r"\|x\|",
+            ),
+            LectureObservation(
+                id="obs_eq",
+                start=1.0,
+                end=2.0,
+                kind=ObservationKind.EQUATION,
+                text="Выполняется равенство нормы.",
+                latex=r"\|x\|=0",
+            ),
+            LectureObservation(
+                id="obs_proof",
+                start=2.0,
+                end=3.0,
+                kind=ObservationKind.PROOF_STEP,
+                text="Из условия следует требуемое утверждение.",
+            ),
+        ],
+        claims=[
+            {
+                "id": "stale_claim",
+                "content": "Этот claim относится к уже отвергнутому наблюдению.",
+                "evidence_ids": ["obs_rejected"],
+            }
+        ],
+        episodes=[
+            SemanticEpisode(
+                id="stale_episode",
+                title="Лектор пишет на доске",
+                kind=EpisodeKind.TOPIC,
+                start=0.0,
+                end=3.0,
+                status=EpisodeStatus.CLOSED,
+                observation_ids=["obs_def", "obs_eq", "obs_proof"],
+                claim_ids=["stale_claim"],
+            )
+        ],
+    )
+
+    class StubOrchestrator:
+        output_language = "ru"
+
+        def __init__(self):
+            self.calls = 0
+
+        def track_episodes(self, kb, batch, added_observation_ids):
+            self.calls += 1
+            return EpisodeTrackingUpdate(
+                boundaries=[
+                    EpisodeBoundary(
+                        before_observation_id="obs_def",
+                        kind=EpisodeKind.DEFINITION,
+                        title="Нормированное пространство",
+                    ),
+                    EpisodeBoundary(
+                        before_observation_id="obs_proof",
+                        kind=EpisodeKind.PROOF,
+                        title="Доказательство",
+                    ),
+                ]
+            )
+
+    orchestrator = StubOrchestrator()
+    rebuilt, stats, unresolved = knowledge_pipeline_module._rebuild_semantic_graph_after_repair(
+        orchestrator,
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=False,
+    )
+
+    assert unresolved == []
+    assert orchestrator.calls == 1
+    assert stats["model_calls"] == 1
+    assert [episode.kind for episode in rebuilt.episodes] == [
+        EpisodeKind.DEFINITION,
+        EpisodeKind.PROOF,
+    ]
+    assert "stale_claim" not in {claim.id for claim in rebuilt.claims}
+    assert {evidence_id for claim in rebuilt.claims for evidence_id in claim.evidence_ids} == {
+        "obs_def",
+        "obs_eq",
+        "obs_proof",
+    }
+
+    cached, cached_stats, _ = knowledge_pipeline_module._rebuild_semantic_graph_after_repair(
+        orchestrator,
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=False,
+    )
+    assert orchestrator.calls == 1
+    assert cached_stats["cache_hits"] == 1
+    assert cached.model_dump(mode="json") == rebuilt.model_dump(mode="json")
+
+
+def test_semantic_state_assembly_renders_one_block_per_episode(tmp_path):
+    repaired = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=[
+            LectureObservation(
+                id="obs_def",
+                start=0.0,
+                end=1.0,
+                kind=ObservationKind.DEFINITION,
+                text="Определяется пространство X.",
+            ),
+            LectureObservation(
+                id="obs_formula",
+                start=1.0,
+                end=2.0,
+                kind=ObservationKind.EQUATION,
+                text="Для нормы используется равенство.",
+                latex=r"\|x\|_X=0",
+            ),
+            LectureObservation(
+                id="obs_step_1",
+                start=2.0,
+                end=3.0,
+                kind=ObservationKind.PROOF_STEP,
+                text="Первый шаг доказательства.",
+            ),
+            LectureObservation(
+                id="obs_step_2",
+                start=3.0,
+                end=4.0,
+                kind=ObservationKind.PROOF_STEP,
+                text="Второй шаг доказательства.",
+                latex=r"f(x)=0",
+            ),
+        ],
+    )
+
+    class StubOrchestrator:
+        output_language = "ru"
+
+        def track_episodes(self, kb, batch, added_observation_ids):
+            return EpisodeTrackingUpdate(
+                boundaries=[
+                    EpisodeBoundary(
+                        before_observation_id="obs_def",
+                        kind=EpisodeKind.DEFINITION,
+                        title="Определение",
+                    ),
+                    EpisodeBoundary(
+                        before_observation_id="obs_step_1",
+                        kind=EpisodeKind.PROOF,
+                        title="Доказательство",
+                    ),
+                ]
+            )
+
+    rebuilt, _, _ = knowledge_pipeline_module._rebuild_semantic_graph_after_repair(
+        StubOrchestrator(),
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        force=True,
+    )
+    section = OutlineSection(
+        id="topic_000",
+        title="Тема",
+        start=0.0,
+        end=4.0,
+        episode_ids=[item.id for item in rebuilt.episodes],
+    )
+    notes = knowledge_pipeline_module._assemble_semantic_state_section(rebuilt, section)
+
+    assert [block.type for block in notes.blocks] == [
+        BlockType.DEFINITION,
+        BlockType.PROOF,
+    ]
+    assert notes.blocks[0].source_claim_ids
+    assert notes.blocks[1].source_claim_ids
+    assert r"\|x\|_X=0" in notes.blocks[0].latex
+    assert r"f(x)=0" in notes.blocks[1].latex
 
 
 def test_state_ir_fingerprint_depends_on_state_pipeline_version(monkeypatch):
