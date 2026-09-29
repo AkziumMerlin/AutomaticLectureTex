@@ -688,7 +688,7 @@ Critical rules:
 - prose is plain text only. Do not write LaTeX commands or math delimiters in prose; a short
   equality is allowed only when it is literally present in the cited source observations;
 - every prose block must cite the observation ids supporting it;
-- definitions/claims/examples/notation/corrections must be represented or explicitly omitted as
+- definitions/claims/examples/corrections must be represented or explicitly omitted as
   duplicate/incomplete; routine proof-step/remark/equation channels may be omitted implicitly;
 - do not mention lecturer/board/audio/OCR/reconstruction/timestamps;
 - do not add textbook facts or silently correct the lecture from external knowledge. Preserve the
@@ -766,7 +766,7 @@ Return a COMPLETE corrected StateDocumentPlan, not a patch.
 Do not weaken the document contract:
 - formulas are existing formula_observation_id references only;
 - generated prose contains no formulas/LaTeX and no lecturer/board narration;
-- important definitions/claims/examples/notation/corrections are represented or explicitly
+- important definitions/claims/examples/corrections are represented or explicitly
   omitted as duplicate/incomplete; routine proof-step/remark/equation channels may be unselected;
 - keep document-level structure and aggressive semantic compression;
 - write in language code {orchestrator.output_language}.
