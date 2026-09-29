@@ -223,6 +223,7 @@ def _safe_generated_prose(
     value: str,
     *,
     source_items: list[LectureObservation],
+    section_items: list[LectureObservation],
     output_language: str,
 ) -> tuple[bool, str]:
     if any(marker in value for marker in _FORMAL_PROSE_MARKERS):
@@ -238,7 +239,16 @@ def _safe_generated_prose(
         for part in ((item.text or ""), (item.latex or ""))
         if part
     )
-    new_symbols = set(_LATIN_SYMBOL_RE.findall(value)) - set(_LATIN_SYMBOL_RE.findall(source))
+    section_source = " ".join(
+        part
+        for item in section_items
+        for part in ((item.text or ""), (item.latex or ""))
+        if part
+    )
+    new_symbols = (
+        set(_LATIN_SYMBOL_RE.findall(value))
+        - set(_LATIN_SYMBOL_RE.findall(section_source))
+    )
     if new_symbols:
         return False, "generated prose introduces new standalone Latin symbols: " + ", ".join(
             sorted(new_symbols)
@@ -249,12 +259,13 @@ def _safe_generated_prose(
             sorted(new_numbers)
         )
 
-    if "=" in value:
-        normalized_source = re.sub(r"\s+", "", source).replace("−", "-")
-        for snippet in _EQUALITY_SNIPPET_RE.findall(value):
-            normalized = re.sub(r"\s+", "", snippet).replace("−", "-")
-            if normalized not in normalized_source:
-                return False, "generated prose introduces an equality not found in its sources"
+    generated_relations = _relation_tokens(value)
+    source_relations = _relation_tokens(source)
+    unsupported_relations = generated_relations - source_relations
+    if unsupported_relations:
+        return False, "generated prose introduces unsupported relation tokens: " + ", ".join(
+            sorted(unsupported_relations)
+        )
     return True, ""
 
 
@@ -415,6 +426,7 @@ def _validate_and_render_plan(
         safe, reason = _safe_generated_prose(
             block.text or "",
             source_items=source_items,
+            section_items=observations,
             output_language=output_language,
         )
         if not safe:
