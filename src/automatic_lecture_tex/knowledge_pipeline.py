@@ -47,7 +47,9 @@ from .media import copy_asset
 from .schemas import (
     BlockType,
     ChunkNotes,
+    ClaimStatus,
     EpisodeHierarchyPlan,
+    EpisodeKind,
     EpisodeTrackingUpdate,
     LectureIR,
     LectureKnowledgeBase,
@@ -60,7 +62,6 @@ from .schemas import (
     WindowObservations,
 )
 from .state_canonicalization import CanonicalRenderPolicy, run_state_canonicalization
-from .state_document_assembly import build_state_document_section
 from .state_prose_compression import (
     ProseCompressionPolicy,
     run_state_prose_compression,
@@ -85,6 +86,7 @@ KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 10
 STATE_SEMANTIC_TEXT_VERSION = 1
 STATE_SEMANTIC_TEXT_RETRY_VERSION = 1
+STATE_SEMANTIC_GRAPH_VERSION = 1
 STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
@@ -115,9 +117,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_prose_compression_max_sentences",
     "state_prose_compression_max_ratio",
     "state_prose_compression_max_summary_chars",
-    "state_document_max_prose_ratio",
-    "state_document_max_remarks_fraction",
-    "state_document_max_blocks_per_section",
+    "state_repaired_episode_batch_observations",
 }
 
 
@@ -1812,6 +1812,151 @@ def _repair_lecture_state(
 
     repaired.unresolved = list(dict.fromkeys([*repaired.unresolved, *unresolved]))
     return repaired, stats, list(dict.fromkeys(unresolved))
+
+def _rebind_symbols_to_repaired_graph(
+    rebuilt: LectureKnowledgeBase,
+    source_symbols,
+) -> None:
+    """Preserve symbol evidence while deriving scope from the rebuilt repaired episode graph."""
+
+    by_observation = {item.id: item for item in rebuilt.observations}
+    by_episode = {item.id: item for item in rebuilt.episodes}
+    rebuilt.symbols = []
+    for raw in source_symbols:
+        if not raw.active:
+            continue
+        symbol = raw.model_copy(deep=True)
+        symbol.evidence_ids = [
+            evidence_id
+            for evidence_id in symbol.evidence_ids
+            if evidence_id in by_observation
+        ]
+        if not symbol.evidence_ids:
+            continue
+        episode_ids = [
+            by_observation[evidence_id].episode_id
+            for evidence_id in symbol.evidence_ids
+            if by_observation[evidence_id].episode_id
+        ]
+        symbol.episode_id = episode_ids[0] if episode_ids else ""
+        symbol.scope = symbol.episode_id or "lecture"
+        rebuilt.symbols.append(symbol)
+        episode = by_episode.get(symbol.episode_id)
+        if episode is not None and symbol.id and symbol.id not in episode.symbol_ids:
+            episode.symbol_ids.append(symbol.id)
+
+
+def _rebuild_repaired_semantic_graph(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    repaired: LectureKnowledgeBase,
+    work: Path,
+    llm_config: dict[str, Any],
+    batch_observations: int,
+    force: bool,
+) -> tuple[LectureKnowledgeBase, dict[str, Any]]:
+    """Re-derive claims and semantic episodes from repaired observations.
+
+    The pre-repair graph is evidence-tracking state. Once repair has replaced/rejected observations,
+    its derived claims and episode labels are stale. Rebuild them from the repaired sequence before
+    hierarchy or note realization.
+    """
+
+    ordered = sorted(repaired.observations, key=lambda item: (item.start, item.end, item.id))
+    fingerprint = stable_hash(
+        {
+            "semantic_graph_version": STATE_SEMANTIC_GRAPH_VERSION,
+            "observations": [item.model_dump(mode="json") for item in ordered],
+            "symbols": [
+                item.model_dump(mode="json")
+                for item in repaired.symbols
+                if item.active
+            ],
+            "batch_observations": batch_observations,
+            "llm": llm_config,
+        }
+    )
+    path = work / "repaired_semantic_graph.json"
+    if path.exists() and not force:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("fingerprint") == fingerprint:
+                cached = LectureKnowledgeBase.model_validate(payload["kb"])
+                return cached, {
+                    "cache_hits": 1,
+                    "model_calls": 0,
+                    "observations": len(cached.observations),
+                    "claims": len(cached.claims),
+                    "episodes": len(cached.episodes),
+                }
+        except (json.JSONDecodeError, KeyError, ValidationError):
+            pass
+
+    rebuilt_observations = []
+    for item in ordered:
+        observation = item.model_copy(deep=True)
+        observation.episode_id = ""
+        rebuilt_observations.append(observation)
+
+    rebuilt = LectureKnowledgeBase(
+        lecture_id=repaired.lecture_id,
+        title=repaired.title,
+        observations=rebuilt_observations,
+        observation_aliases=dict(repaired.observation_aliases),
+        claims=[],
+        symbols=[],
+        episodes=[],
+        anchors=[],
+        unresolved=list(repaired.unresolved),
+    )
+
+    model_calls = 0
+    for batch_index, start in enumerate(range(0, len(rebuilt_observations), batch_observations)):
+        selected = rebuilt_observations[start : start + batch_observations]
+        if not selected:
+            continue
+        batch = WindowObservations(
+            window_id=f"repaired_semantic_{batch_index:04d}",
+            start=selected[0].start,
+            end=selected[-1].end,
+            observations=[item.model_copy(deep=True) for item in selected],
+        )
+        ids = [item.id for item in selected]
+        update = orchestrator.track_repaired_episodes(rebuilt, batch, ids)
+        model_calls += 1
+        apply_episode_tracking(
+            rebuilt,
+            update,
+            ids,
+            window_id=batch.window_id,
+        )
+
+    close_open_episodes(rebuilt)
+    _rebind_symbols_to_repaired_graph(rebuilt, repaired.symbols)
+
+    stats: dict[str, Any] = {
+        "cache_hits": 0,
+        "model_calls": model_calls,
+        "observations": len(rebuilt.observations),
+        "claims": len(rebuilt.claims),
+        "episodes": len(rebuilt.episodes),
+        "episode_kinds": {},
+    }
+    for episode in rebuilt.episodes:
+        key = str(episode.kind)
+        stats["episode_kinds"][key] = int(stats["episode_kinds"].get(key, 0)) + 1
+
+    atomic_json_dump(
+        path,
+        {
+            "fingerprint": fingerprint,
+            "version": STATE_SEMANTIC_GRAPH_VERSION,
+            "stats": stats,
+            "kb": rebuilt.model_dump(mode="json"),
+        },
+    )
+    return rebuilt, stats
+
 
 def _state_section_payload(
     kb: LectureKnowledgeBase,
