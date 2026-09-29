@@ -109,20 +109,6 @@ notes:
   state_observation_history: 4
   state_observation_max_raw_windows: 2
   state_observation_max_images: 2
-  # Compact only host-verifiable redundant repaired events. The canonicalizer may propose
-  # ID-to-ID relations, but it cannot rewrite text/LaTeX; semantic supersession stays audit-only
-  # unless backed by an explicit correction/retraction event.
-  state_canonicalization_enabled: false
-  # Keep semantic LLM relations off in normal runs: the deterministic render policy already
-  # removes structurally redundant/incomplete math, while long-range semantic audit is diagnostic.
-  state_canonicalization_semantic_audit: false
-  # Semantic compression is deliberately prose-only. It sees no LaTeX-bearing/formal events and
-  # can only replace contiguous remark/transition/notation runs after the global outline is fixed.
-  state_prose_compression_enabled: false
-  state_prose_compression_min_group_size: 3
-  state_prose_compression_max_sentences: 2
-  state_prose_compression_max_ratio: 0.55
-  state_prose_compression_max_summary_chars: 500
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
