@@ -20,10 +20,12 @@ from automatic_lecture_tex.knowledge_pipeline import (
 )
 from automatic_lecture_tex.schemas import (
     ChunkNotes,
+    ClaimStatus,
     EpisodeBoundary,
     EpisodeKind,
     EpisodeStatus,
     EpisodeTrackingUpdate,
+    KnowledgeClaim,
     LectureKnowledgeBase,
     LectureObservation,
     LectureOutline,
@@ -471,6 +473,90 @@ def test_deterministic_state_assembly_realizes_one_semantic_episode_block():
         in notes.blocks[0].latex
     )
     assert notes.blocks[0].source_evidence_ids == ["obs_definition", "obs_formula"]
+
+
+def test_semantic_episode_rendering_uses_only_active_claims():
+    observations = [
+        LectureObservation(
+            id="obs_old",
+            window_id="window_0",
+            start=0.0,
+            end=1.0,
+            kind=ObservationKind.CLAIM,
+            text="Ошибочное утверждение.",
+            latex=r"x=0",
+            episode_id="episode_0",
+        ),
+        LectureObservation(
+            id="obs_fix",
+            window_id="window_1",
+            start=1.0,
+            end=2.0,
+            kind=ObservationKind.CORRECTION,
+            text="Исправленное утверждение.",
+            latex=r"x\\neq0",
+            episode_id="episode_0",
+            target_observation_id="obs_old",
+        ),
+    ]
+    claims = [
+        KnowledgeClaim(
+            id="claim_old",
+            kind=ObservationKind.CLAIM,
+            content="Ошибочное утверждение.",
+            latex=r"x=0",
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.SUPERSEDED,
+            evidence_ids=["obs_old"],
+            introduced_at=0.0,
+        ),
+        KnowledgeClaim(
+            id="claim_fix",
+            kind=ObservationKind.CLAIM,
+            content="Исправленное утверждение.",
+            latex=r"x\\neq0",
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.ACTIVE,
+            evidence_ids=["obs_fix"],
+            supersedes=["claim_old"],
+            introduced_at=1.0,
+        ),
+    ]
+    episode = SemanticEpisode(
+        id="episode_0",
+        title="Исправление",
+        kind=EpisodeKind.REMARK,
+        start=0.0,
+        end=2.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=["obs_old", "obs_fix"],
+        claim_ids=["claim_old", "claim_fix"],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        claims=claims,
+        episodes=[episode],
+    )
+    section = OutlineSection(
+        id="section_0",
+        title="Topic",
+        start=0.0,
+        end=2.0,
+        episode_ids=["episode_0"],
+    )
+
+    notes = knowledge_pipeline_module._assemble_state_section_deterministically(kb, section)
+
+    assert len(notes.blocks) == 1
+    assert "Исправленное утверждение." in notes.blocks[0].latex
+    assert r"x\\neq0" in notes.blocks[0].latex
+    assert "Ошибочное утверждение." not in notes.blocks[0].latex
+    assert r"x=0" not in notes.blocks[0].latex
+    assert notes.blocks[0].source_claim_ids == ["claim_fix"]
 
 
 def test_repaired_semantic_graph_rederives_claims_and_episode_roles(tmp_path):
