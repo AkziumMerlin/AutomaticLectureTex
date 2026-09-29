@@ -87,8 +87,9 @@ notes:
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
   state_section_max_evidence_chars: 100000
-  # Baseline: render repaired state directly without a final generative writer.
-  state_section_assembly: deterministic
+  # Final notes are assembled at mathematical-document granularity. The model may compress prose
+  # and select existing formulas, but never regenerate or edit formula LaTeX.
+  state_section_assembly: document
   # Qwen3.8 official instruct/non-thinking sampling preset for final section synthesis.
   state_section_writer_thinking: false
   state_section_writer_temperature: 0.7
@@ -116,11 +117,17 @@ notes:
   state_canonicalization_semantic_audit: false
   # Semantic compression is deliberately prose-only. It sees no LaTeX-bearing/formal events and
   # can only replace contiguous remark/transition/notation runs after the global outline is fixed.
-  state_prose_compression_enabled: true
+  state_prose_compression_enabled: false
   state_prose_compression_min_group_size: 3
   state_prose_compression_max_sentences: 2
   state_prose_compression_max_ratio: 0.55
   state_prose_compression_max_summary_chars: 500
+
+  # Reference-quality document contract: comparable to edited course notes rather than an
+  # observation ledger. Definitions/theorems/proofs/examples dominate; remarks stay exceptional.
+  state_document_max_prose_ratio: 0.45
+  state_document_max_remarks_fraction: 0.20
+  state_document_max_blocks_per_section: 44
 
 vision:
   frame_offsets_seconds: [-3, 2, 7]
