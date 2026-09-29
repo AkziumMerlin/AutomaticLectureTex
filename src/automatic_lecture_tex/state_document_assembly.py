@@ -22,7 +22,7 @@ from .state_canonicalization import CanonicalRenderPolicy
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_DOCUMENT_ASSEMBLY_VERSION = 3
+STATE_DOCUMENT_ASSEMBLY_VERSION = 4
 
 DocumentBlockKind = Literal[
     "subsection",
@@ -59,11 +59,8 @@ _PROSE_BLOCK_TYPES = {
     "example",
     "remark",
 }
-_FORMAL_PROSE_MARKERS = ("$", "\\", "→", "↦", "⇒", "⇔", "∑", "∫", "≤", "≥", "≠", "∈")
-_EQUALITY_SNIPPET_RE = re.compile(
-    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_*|() ]{0,24}\s*=\s*"
-    r"[A-Za-zА-Яа-яЁё0-9_*|() -]{1,32}"
-)
+_FORMAL_PROSE_MARKERS = ("$", "\\")
+_RELATION_TOKENS = ("=", "→", "↦", "⇒", "⇔", "≤", "≥", "≠", "∈", "⊂", "⊆")
 _IMPORTANT_TEXT_KINDS = {
     ObservationKind.DEFINITION,
     ObservationKind.CLAIM,
@@ -78,7 +75,7 @@ _NARRATION_RE = re.compile(
     r"лектор|преподавател\w*|на\s+(?:левой|правой|средней\s+)?доске|доск\w*|"
     r"устно|записыва\w*|дописыва\w*|указывает|подч[её]ркива\w*|"
     r"комментиру\w*|поясня\w*|отмечает|говорит|произносит|обводит|"
-    r"переходя\s+к|продолжая\s+(?:запись|объяснение)"
+    r"продолжая\s+(?:запись|объяснение)"
     r")\b",
     re.IGNORECASE,
 )
@@ -192,10 +189,41 @@ def _language_ok(value: str, output_language: str) -> bool:
     return len(cyrillic) / len(letters) >= 0.45
 
 
+def _canonical_math_text(value: str) -> str:
+    replacements = {
+        r"\\mathbb{C}": "ℂ",
+        r"\\mathbb{R}": "ℝ",
+        r"\\mathbb{N}": "ℕ",
+        r"\\to": "→",
+        r"\\rightarrow": "→",
+        r"\\mapsto": "↦",
+        r"\\Rightarrow": "⇒",
+        r"\\Leftrightarrow": "⇔",
+        r"\\in": "∈",
+        r"\\leq": "≤",
+        r"\\le": "≤",
+        r"\\geq": "≥",
+        r"\\ge": "≥",
+        r"\\neq": "≠",
+        r"\\subset": "⊂",
+        r"\\subseteq": "⊆",
+    }
+    result = value
+    for source, target in replacements.items():
+        result = result.replace(source, target)
+    return result.replace("−", "-")
+
+
+def _relation_tokens(value: str) -> set[str]:
+    normalized = _canonical_math_text(value)
+    return {token for token in _RELATION_TOKENS if token in normalized}
+
+
 def _safe_generated_prose(
     value: str,
     *,
     source_items: list[LectureObservation],
+    section_items: list[LectureObservation],
     output_language: str,
 ) -> tuple[bool, str]:
     if any(marker in value for marker in _FORMAL_PROSE_MARKERS):
@@ -211,7 +239,16 @@ def _safe_generated_prose(
         for part in ((item.text or ""), (item.latex or ""))
         if part
     )
-    new_symbols = set(_LATIN_SYMBOL_RE.findall(value)) - set(_LATIN_SYMBOL_RE.findall(source))
+    section_source = " ".join(
+        part
+        for item in section_items
+        for part in ((item.text or ""), (item.latex or ""))
+        if part
+    )
+    new_symbols = (
+        set(_LATIN_SYMBOL_RE.findall(value))
+        - set(_LATIN_SYMBOL_RE.findall(section_source))
+    )
     if new_symbols:
         return False, "generated prose introduces new standalone Latin symbols: " + ", ".join(
             sorted(new_symbols)
@@ -222,12 +259,13 @@ def _safe_generated_prose(
             sorted(new_numbers)
         )
 
-    if "=" in value:
-        normalized_source = re.sub(r"\s+", "", source).replace("−", "-")
-        for snippet in _EQUALITY_SNIPPET_RE.findall(value):
-            normalized = re.sub(r"\s+", "", snippet).replace("−", "-")
-            if normalized not in normalized_source:
-                return False, "generated prose introduces an equality not found in its sources"
+    generated_relations = _relation_tokens(value)
+    source_relations = _relation_tokens(source)
+    unsupported_relations = generated_relations - source_relations
+    if unsupported_relations:
+        return False, "generated prose introduces unsupported relation tokens: " + ", ".join(
+            sorted(unsupported_relations)
+        )
     return True, ""
 
 
@@ -388,6 +426,7 @@ def _validate_and_render_plan(
         safe, reason = _safe_generated_prose(
             block.text or "",
             source_items=source_items,
+            section_items=observations,
             output_language=output_language,
         )
         if not safe:
