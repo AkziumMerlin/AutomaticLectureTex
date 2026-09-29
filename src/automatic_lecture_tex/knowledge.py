@@ -539,6 +539,10 @@ window began. If the first observations continue the currently open proof/topic,
 A lecturer correction normally stays in the same episode. `close_after_observation_ids` is optional
 and should be used only when an episode clearly ends without another episode starting immediately.
 
+A boundary title names the MATHEMATICAL CONTENT of the episode: the object being defined, theorem,
+proof, example, or mathematical subtopic. Never title an episode by lecturer actions, speech,
+writing/erasing, board side/location, camera/frame state, or reconstruction process.
+
 For symbols, give meaning/type_hint and cite canonical observation ids in evidence_ids. Do not choose
 a global scope: the host derives symbol scope from the semantic episode containing the evidence.
 Do not repeat unchanged symbols just because they reappear in an overlapping window.
