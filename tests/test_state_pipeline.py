@@ -1531,10 +1531,10 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.chunk_overlap_seconds == 5
     assert config.notes.visual_chunk_board_scan is True
     assert config.notes.state_section_max_evidence_chars == 100000
-    assert config.notes.state_section_assembly == "document"
+    assert config.notes.state_section_assembly == "deterministic"
     assert config.notes.state_prose_compression_enabled is False
-    assert config.notes.state_document_max_prose_ratio == 0.45
-    assert config.notes.state_document_max_remarks_fraction == 0.20
+    assert config.notes.state_canonicalization_enabled is False
+    assert config.notes.state_repaired_episode_batch_observations == 24
     assert config.notes.state_section_raw_context_seconds == 90
     assert config.notes.state_section_raw_evidence_chars == 16000
     assert config.notes.state_observation_lookahead == 2
