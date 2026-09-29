@@ -3208,7 +3208,7 @@ def run_knowledge_pipeline(
         {
             "lecture_id": lecture.id,
             "architecture": (
-                "state_episode_graph_section_synthesis"
+                "state_repaired_semantic_graph"
                 if state_mode
                 else "knowledge_episode_graph_bounded"
             ),
