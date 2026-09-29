@@ -102,8 +102,6 @@ class StateDocumentProseBlock(BaseModel):
         if value is None:
             return None
         value = re.sub(r"\s+", " ", value.strip())
-        if not value and cls.__name__ == "StateDocumentProseBlock":
-            return value
         return value or None
 
     @field_validator("text")
