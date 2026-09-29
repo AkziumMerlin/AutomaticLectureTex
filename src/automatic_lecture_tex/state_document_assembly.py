@@ -65,7 +65,6 @@ _IMPORTANT_TEXT_KINDS = {
     ObservationKind.DEFINITION,
     ObservationKind.CLAIM,
     ObservationKind.EXAMPLE,
-    ObservationKind.NOTATION,
     ObservationKind.CORRECTION,
     ObservationKind.RETRACTION,
 }
@@ -81,6 +80,26 @@ _LATIN_SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?![A-Za-z0-9])")
 _NUMBER_RE = re.compile(r"\d+")
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _ALPHA_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+
+
+_CONTENT_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁёΦφΣσℓ]+")
+_DEFINITION_COVERAGE_THRESHOLD = 0.75
+
+
+def _content_words(value: str) -> set[str]:
+    return {
+        token.casefold()
+        for token in _CONTENT_WORD_RE.findall(value)
+        if len(token) >= 2
+    }
+
+
+def _definition_covered_by_document(value: str, rendered_prose: str) -> bool:
+    source_words = _content_words(value)
+    if len(source_words) < 6:
+        return False
+    rendered_words = _content_words(rendered_prose)
+    return len(source_words & rendered_words) / len(source_words) >= _DEFINITION_COVERAGE_THRESHOLD
 
 
 class StateDocumentProseBlock(BaseModel):
@@ -395,6 +414,7 @@ def _validate_and_render_plan(
         and item.kind not in {ObservationKind.TRANSITION, ObservationKind.UNRESOLVED}
     )
     generated_prose_chars = 0
+    generated_prose_parts: list[str] = []
 
     for index, block in enumerate(plan.blocks):
         if block.type == "formula":
@@ -452,6 +472,7 @@ def _validate_and_render_plan(
 
         used_text_ids.update(block.source_observation_ids)
         generated_prose_chars += len(block.text or "")
+        generated_prose_parts.append(block.text or "")
         if block.type == "subsection":
             rendered.append(
                 NoteBlock(
@@ -482,6 +503,7 @@ def _validate_and_render_plan(
     # document planner back into an observation-ledger accountant. Important semantic channels
     # remain fail-closed: they must be represented or explicitly omitted as duplicate/incomplete.
     omission_by_id = {item.observation_id: item for item in plan.omissions}
+    rendered_prose = " ".join(generated_prose_parts)
     implicit_text_omissions = 0
     implicit_formula_omissions = 0
     for item in observations:
@@ -492,7 +514,11 @@ def _validate_and_render_plan(
         text_available = item.id not in suppress_text and bool(item.text.strip())
         text_unused = text_available and item.id not in used_text_ids and "text" not in channels
         if text_unused:
-            if item.kind in _IMPORTANT_TEXT_KINDS:
+            definition_covered = (
+                item.kind == ObservationKind.DEFINITION
+                and _definition_covered_by_document(item.text, rendered_prose)
+            )
+            if item.kind in _IMPORTANT_TEXT_KINDS and not definition_covered:
                 issues.append(f"important text channel for {item.id} is neither used nor omitted")
             else:
                 implicit_text_omissions += 1
@@ -504,17 +530,33 @@ def _validate_and_render_plan(
             and "formula" not in channels
         )
         if formula_unused:
-            # If this observation already supports a rendered prose block, its semantic content is
-            # represented and the separate display formula becomes editorially optional. Keep
-            # fail-closed accounting only when an important observation is otherwise absent.
-            if item.kind in _IMPORTANT_TEXT_KINDS and item.id not in used_text_ids:
+            definition_covered = (
+                item.kind == ObservationKind.DEFINITION
+                and _definition_covered_by_document(item.text, rendered_prose)
+            )
+            # If this observation already supports rendered prose, or a duplicate definition is
+            # deterministically covered by the assembled document, its separate display formula is
+            # editorially optional. Claims/examples/corrections/retractions remain fail-closed.
+            if (
+                item.kind in _IMPORTANT_TEXT_KINDS
+                and item.id not in used_text_ids
+                and not definition_covered
+            ):
                 issues.append(f"important formula channel for {item.id} is neither used nor omitted")
             else:
                 implicit_formula_omissions += 1
 
         if item.kind in _IMPORTANT_TEXT_KINDS and item.id not in used_text_ids:
+            definition_covered = (
+                item.kind == ObservationKind.DEFINITION
+                and _definition_covered_by_document(item.text, rendered_prose)
+            )
             omission = omission_by_id.get(item.id)
-            if omission is not None and omission.reason not in {"duplicate", "incomplete"}:
+            if (
+                not definition_covered
+                and omission is not None
+                and omission.reason not in {"duplicate", "incomplete"}
+            ):
                 issues.append(
                     f"important {item.kind} observation {item.id} omitted as {omission.reason}"
                 )
@@ -646,7 +688,7 @@ Critical rules:
 - prose is plain text only. Do not write LaTeX commands or math delimiters in prose; a short
   equality is allowed only when it is literally present in the cited source observations;
 - every prose block must cite the observation ids supporting it;
-- definitions/claims/examples/notation/corrections must be represented or explicitly omitted as
+- definitions/claims/examples/corrections must be represented or explicitly omitted as
   duplicate/incomplete; routine proof-step/remark/equation channels may be omitted implicitly;
 - do not mention lecturer/board/audio/OCR/reconstruction/timestamps;
 - do not add textbook facts or silently correct the lecture from external knowledge. Preserve the
@@ -724,7 +766,7 @@ Return a COMPLETE corrected StateDocumentPlan, not a patch.
 Do not weaken the document contract:
 - formulas are existing formula_observation_id references only;
 - generated prose contains no formulas/LaTeX and no lecturer/board narration;
-- important definitions/claims/examples/notation/corrections are represented or explicitly
+- important definitions/claims/examples/corrections are represented or explicitly
   omitted as duplicate/incomplete; routine proof-step/remark/equation channels may be unselected;
 - keep document-level structure and aggressive semantic compression;
 - write in language code {orchestrator.output_language}.

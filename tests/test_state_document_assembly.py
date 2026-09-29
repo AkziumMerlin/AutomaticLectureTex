@@ -378,6 +378,95 @@ def test_document_narration_gate_allows_passive_note_style():
     assert notes is not None
 
 
+def test_document_plan_may_omit_redundant_notation_without_explicit_accounting():
+    _, section, observations = _fixture()
+    observations.append(
+        _observation(
+            "obs_notation",
+            start=5.0,
+            kind=ObservationKind.NOTATION,
+            text="Обозначение X используется для комплексного пространства.",
+            latex=None,
+        )
+    )
+    plan = _good_plan()
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+
+
+def test_document_plan_may_omit_definition_when_document_covers_its_content():
+    _, section, observations = _fixture()
+    observations.append(
+        _observation(
+            "obs_duplicate_definition",
+            start=5.0,
+            kind=ObservationKind.DEFINITION,
+            text=(
+                "Функционал f на комплексном пространстве X называется "
+                "комплексно-линейным."
+            ),
+            latex=r"f:X\to\mathbb{C}",
+        )
+    )
+    plan = _good_plan()
+
+    notes, issues, stats = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+    assert stats["omitted_text_channels"] >= 1
+    assert stats["omitted_formula_channels"] >= 1
+
+
+def test_document_plan_does_not_hide_uncovered_definition():
+    _, section, observations = _fixture()
+    observations.append(
+        _observation(
+            "obs_new_definition",
+            start=5.0,
+            kind=ObservationKind.DEFINITION,
+            text="Новый оператор T называется компактным при выполнении отдельного условия.",
+            latex=None,
+        )
+    )
+    plan = _good_plan()
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert notes is None
+    assert any("important text channel for obs_new_definition" in issue for issue in issues)
+
+
 def test_document_plan_allows_section_level_notation_and_source_relations():
     _, section, observations = _fixture()
     observations[0].text = "Рассматривается пространство X и функционал f: X → ℂ."
