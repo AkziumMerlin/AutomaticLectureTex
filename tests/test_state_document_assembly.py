@@ -310,6 +310,54 @@ def test_document_plan_allows_literal_source_equality_in_prose():
     assert notes is not None
 
 
+def test_document_plan_allows_section_level_notation_and_source_relations():
+    _, section, observations = _fixture()
+    observations[0].text = "Рассматривается пространство X и функционал f: X → ℂ."
+    observations[1].text = "Для x∈X выполняется f(x) = 0."
+    plan = _good_plan()
+    plan.blocks[1].text = "Функционал f: X → ℂ рассматривается на пространстве X."
+    plan.blocks[1].source_observation_ids = ["obs_def"]
+    plan.blocks[3].text = "Для x∈X используется равенство f(x) = 0."
+    plan.blocks[3].source_observation_ids = ["obs_step"]
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+
+
+def test_document_narration_gate_does_not_reject_mathematical_transition_phrase():
+    _, section, observations = _fixture()
+    plan = _good_plan()
+    plan.blocks[3].text = (
+        "Переходя к супремуму, получаем оценку нормы функционала f."
+    )
+    plan.blocks[3].source_observation_ids = ["obs_step"]
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+
+
 def test_document_assembly_is_cached(tmp_path):
     kb, section, _ = _fixture()
 
