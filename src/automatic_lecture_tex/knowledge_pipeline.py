@@ -2934,7 +2934,7 @@ def run_knowledge_pipeline(
     if (
         state_mode
         and pipeline.config.notes.state_canonicalization_enabled
-        and pipeline.config.notes.state_section_assembly in {"deterministic", "document"}
+        and pipeline.config.notes.state_section_assembly == "deterministic"
     ):
         canonicalization_started = time.perf_counter()
         (
@@ -2989,48 +2989,6 @@ def run_knowledge_pipeline(
                 )
                 for section in outline.sections
             ]
-        elif pipeline.config.notes.state_section_assembly == "document":
-            document_started = time.perf_counter()
-            for section in outline.sections:
-                notes, document_stats, document_unresolved = build_state_document_section(
-                    orchestrator,
-                    kb=kb,
-                    section=section,
-                    render_policy=state_canonicalization_policy,
-                    work=work,
-                    llm_config=pipeline.config.llm.model_dump(mode="json"),
-                    max_prose_ratio=pipeline.config.notes.state_document_max_prose_ratio,
-                    max_remarks_fraction=(
-                        pipeline.config.notes.state_document_max_remarks_fraction
-                    ),
-                    max_blocks=pipeline.config.notes.state_document_max_blocks_per_section,
-                    force=force,
-                )
-                state_document_assembly_stats["sections"] += 1
-                for key in (
-                    "model_calls",
-                    "retry_calls",
-                    "cache_hits",
-                    "blocks",
-                    "prose_blocks",
-                    "formula_blocks",
-                    "subsections",
-                    "remarks",
-                    "omitted_text_channels",
-                    "omitted_formula_channels",
-                ):
-                    state_document_assembly_stats[key] += int(document_stats.get(key, 0))
-                state_document_assembly_unresolved.extend(document_unresolved)
-                if notes is None:
-                    state_document_assembly_stats["fallback_sections"] += 1
-                    notes = _assemble_state_section_deterministically(
-                        kb,
-                        section,
-                        render_policy=state_canonicalization_policy,
-                        prose_policy=None,
-                    )
-                note_sections.append(notes)
-            state_document_assembly_seconds = time.perf_counter() - document_started
         else:
             for section in outline.sections:
                 evidence_batches = _state_section_batches(
@@ -3104,7 +3062,6 @@ def run_knowledge_pipeline(
             *state_repair_unresolved,
             *state_canonicalization_unresolved,
             *state_prose_compression_unresolved,
-            *state_document_assembly_unresolved,
         ]
         if state_pipeline_unresolved and note_sections:
             note_sections[-1].unresolved = list(
@@ -3275,8 +3232,8 @@ def run_knowledge_pipeline(
                 pipeline.config.notes.state_prose_compression_enabled if state_mode else False
             ),
             "state_prose_compression": state_prose_compression_stats,
-            "state_document_assembly_seconds": round(state_document_assembly_seconds, 3),
-            "state_document_assembly": state_document_assembly_stats,
+            "state_semantic_graph_seconds": round(state_semantic_graph_seconds, 3),
+            "state_semantic_graph": state_semantic_graph_stats,
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "state_section_assembly": (
                 pipeline.config.notes.state_section_assembly if state_mode else None
