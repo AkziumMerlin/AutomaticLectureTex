@@ -22,7 +22,7 @@ from .state_canonicalization import CanonicalRenderPolicy
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_DOCUMENT_ASSEMBLY_VERSION = 2
+STATE_DOCUMENT_ASSEMBLY_VERSION = 3
 
 DocumentBlockKind = Literal[
     "subsection",
@@ -59,7 +59,20 @@ _PROSE_BLOCK_TYPES = {
     "example",
     "remark",
 }
-_FORMAL_PROSE_MARKERS = ("$", "\\", "=", "→", "↦", "⇒", "⇔", "∑", "∫", "≤", "≥", "≠", "∈")
+_FORMAL_PROSE_MARKERS = ("$", "\\", "→", "↦", "⇒", "⇔", "∑", "∫", "≤", "≥", "≠", "∈")
+_EQUALITY_SNIPPET_RE = re.compile(
+    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_*|() ]{0,24}\s*=\s*"
+    r"[A-Za-zА-Яа-яЁё0-9_*|() -]{1,32}"
+)
+_IMPORTANT_TEXT_KINDS = {
+    ObservationKind.DEFINITION,
+    ObservationKind.CLAIM,
+    ObservationKind.EXAMPLE,
+    ObservationKind.NOTATION,
+    ObservationKind.CORRECTION,
+    ObservationKind.RETRACTION,
+}
+_IMPORTANT_FORMULA_KINDS = _IMPORTANT_TEXT_KINDS
 _NARRATION_RE = re.compile(
     r"\b(?:"
     r"лектор|преподавател\w*|на\s+(?:левой|правой|средней\s+)?доске|доск\w*|"
@@ -186,7 +199,7 @@ def _safe_generated_prose(
     output_language: str,
 ) -> tuple[bool, str]:
     if any(marker in value for marker in _FORMAL_PROSE_MARKERS):
-        return False, "generated prose contains mathematical syntax; formulas must use formula refs"
+        return False, "generated prose contains unsupported mathematical syntax"
     if _NARRATION_RE.search(value):
         return False, "generated prose contains lecturer/board narration"
     if not _language_ok(value, output_language):
@@ -208,6 +221,13 @@ def _safe_generated_prose(
         return False, "generated prose introduces new numeric tokens: " + ", ".join(
             sorted(new_numbers)
         )
+
+    if "=" in value:
+        normalized_source = re.sub(r"\s+", "", source).replace("−", "-")
+        for snippet in _EQUALITY_SNIPPET_RE.findall(value):
+            normalized = re.sub(r"\s+", "", snippet).replace("−", "-")
+            if normalized not in normalized_source:
+                return False, "generated prose introduces an equality not found in its sources"
     return True, ""
 
 
@@ -310,7 +330,6 @@ def _validate_and_render_plan(
         return None, [f"document plan has {len(plan.blocks)} blocks > max_blocks={max_blocks}"], stats
 
     by_id = {item.id: item for item in observations}
-    position = {item.id: index for index, item in enumerate(observations)}
     suppress_text = set(render_policy.suppress_text_ids)
     suppress_latex = set(render_policy.suppress_latex_ids)
     omission_channels, omission_errors = _omission_channels(plan)
@@ -323,7 +342,6 @@ def _validate_and_render_plan(
     rendered: list[NoteBlock] = []
     used_text_ids: set[str] = set()
     used_formula_ids: set[str] = set()
-    previous_anchor = -1
     source_prose_chars = sum(
         len(item.text.strip())
         for item in observations
@@ -349,11 +367,6 @@ def _validate_and_render_plan(
             if observation_id in used_formula_ids:
                 issues.append(f"block {index}: formula {observation_id} rendered more than once")
                 continue
-            anchor = position[observation_id]
-            if anchor < previous_anchor:
-                issues.append(f"block {index}: formula order goes backwards in lecture time")
-                continue
-            previous_anchor = anchor
             used_formula_ids.add(observation_id)
             rendered.append(
                 NoteBlock(
@@ -372,12 +385,6 @@ def _validate_and_render_plan(
             )
             continue
         source_items = [by_id[item] for item in block.source_observation_ids]
-        anchor = min(position[item.id] for item in source_items)
-        if anchor < previous_anchor:
-            issues.append(f"block {index}: prose block order goes backwards in lecture time")
-            continue
-        previous_anchor = anchor
-
         safe, reason = _safe_generated_prose(
             block.text or "",
             source_items=source_items,
@@ -423,31 +430,44 @@ def _validate_and_render_plan(
     if issues:
         return None, issues, stats
 
-    # Every canonical text channel must be either represented or explicitly omitted. Transitions are
-    # structural evidence and need not appear in final notes.
+    # Document editing is selective by design. Routine proof/remark/equation channels may be
+    # omitted implicitly; requiring one JSON omission row per intermediate board state turns the
+    # document planner back into an observation-ledger accountant. Important semantic channels
+    # remain fail-closed: they must be represented or explicitly omitted as duplicate/incomplete.
+    omission_by_id = {item.observation_id: item for item in plan.omissions}
+    implicit_text_omissions = 0
+    implicit_formula_omissions = 0
     for item in observations:
         if item.kind in {ObservationKind.TRANSITION, ObservationKind.UNRESOLVED}:
             continue
-        if item.id not in suppress_text and item.text.strip():
-            if item.id not in used_text_ids and "text" not in omission_channels.get(item.id, set()):
-                issues.append(f"text channel for {item.id} is neither used nor omitted")
-        if item.id not in suppress_latex and (item.latex or "").strip():
-            if item.id not in used_formula_ids and "formula" not in omission_channels.get(item.id, set()):
-                issues.append(f"formula channel for {item.id} is neither used nor omitted")
+        channels = omission_channels.get(item.id, set())
 
-    # Important semantic observations cannot disappear merely as routine/scratch material.
-    important = {ObservationKind.DEFINITION, ObservationKind.CLAIM, ObservationKind.EXAMPLE}
-    omission_by_id = {item.observation_id: item for item in plan.omissions}
-    for item in observations:
-        if item.kind not in important or item.id in used_text_ids:
-            continue
-        omission = omission_by_id.get(item.id)
-        if omission is None:
-            continue
-        if omission.reason not in {"duplicate", "incomplete"}:
-            issues.append(
-                f"important {item.kind} observation {item.id} omitted as {omission.reason}"
-            )
+        text_available = item.id not in suppress_text and bool(item.text.strip())
+        text_unused = text_available and item.id not in used_text_ids and "text" not in channels
+        if text_unused:
+            if item.kind in _IMPORTANT_TEXT_KINDS:
+                issues.append(f"important text channel for {item.id} is neither used nor omitted")
+            else:
+                implicit_text_omissions += 1
+
+        formula_available = item.id not in suppress_latex and bool((item.latex or "").strip())
+        formula_unused = (
+            formula_available
+            and item.id not in used_formula_ids
+            and "formula" not in channels
+        )
+        if formula_unused:
+            if item.kind in _IMPORTANT_FORMULA_KINDS:
+                issues.append(f"important formula channel for {item.id} is neither used nor omitted")
+            else:
+                implicit_formula_omissions += 1
+
+        if item.kind in _IMPORTANT_TEXT_KINDS and item.id not in used_text_ids:
+            omission = omission_by_id.get(item.id)
+            if omission is not None and omission.reason not in {"duplicate", "incomplete"}:
+                issues.append(
+                    f"important {item.kind} observation {item.id} omitted as {omission.reason}"
+                )
 
     allowed_chars = max(600, math.ceil(source_prose_chars * max_prose_ratio))
     if generated_prose_chars > allowed_chars:
@@ -465,6 +485,8 @@ def _validate_and_render_plan(
         return None, issues, stats
 
     stats["blocks"] = len(rendered)
+    stats["omitted_text_channels"] += implicit_text_omissions
+    stats["omitted_formula_channels"] += implicit_formula_omissions
     for item in plan.omissions:
         if item.channel in {"text", "both"}:
             stats["omitted_text_channels"] += 1
@@ -568,9 +590,11 @@ Critical rules:
 - retain only equations needed to state a result or follow a proof; intermediate/scratch/repeated
   formulas may be omitted explicitly;
 - formula blocks contain ONLY formula_observation_id. Never transcribe, edit or regenerate LaTeX;
-- prose is plain text only. Do not write formulas, LaTeX commands or math delimiters in prose;
+- prose is plain text only. Do not write LaTeX commands or math delimiters in prose; a short
+  equality is allowed only when it is literally present in the cited source observations;
 - every prose block must cite the observation ids supporting it;
-- every unused text/formula channel must be listed in omissions with a concrete reason;
+- definitions/claims/examples/notation/corrections must be represented or explicitly omitted as
+  duplicate/incomplete; routine proof-step/remark/equation channels may be omitted implicitly;
 - do not mention lecturer/board/audio/OCR/reconstruction/timestamps;
 - do not add textbook facts or silently correct the lecture from external knowledge. Preserve the
   repaired state's mathematical content even when the lecturer may have made a typo;
@@ -647,8 +671,8 @@ Return a COMPLETE corrected StateDocumentPlan, not a patch.
 Do not weaken the document contract:
 - formulas are existing formula_observation_id references only;
 - generated prose contains no formulas/LaTeX and no lecturer/board narration;
-- every available text/formula channel is either used or explicitly omitted;
-- important definitions/claims/examples are not discarded as routine material;
+- important definitions/claims/examples/notation/corrections are represented or explicitly
+  omitted as duplicate/incomplete; routine proof-step/remark/equation channels may be unselected;
 - keep document-level structure and aggressive semantic compression;
 - write in language code {orchestrator.output_language}.
 """
