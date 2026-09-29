@@ -2136,14 +2136,59 @@ def _state_section_observations(
     return list(unique.values())
 
 
-def _deterministic_text_block_type(kind: ObservationKind) -> BlockType:
+def _episode_block_type(kind: EpisodeKind) -> BlockType:
     return {
-        ObservationKind.DEFINITION: BlockType.DEFINITION,
-        ObservationKind.EXAMPLE: BlockType.EXAMPLE,
-        ObservationKind.REMARK: BlockType.REMARK,
-        ObservationKind.CORRECTION: BlockType.REMARK,
-        ObservationKind.RETRACTION: BlockType.REMARK,
+        EpisodeKind.DEFINITION: BlockType.DEFINITION,
+        EpisodeKind.THEOREM: BlockType.THEOREM,
+        EpisodeKind.PROOF: BlockType.PROOF,
+        EpisodeKind.EXAMPLE: BlockType.EXAMPLE,
+        EpisodeKind.REMARK: BlockType.REMARK,
     }.get(kind, BlockType.PARAGRAPH)
+
+
+def _episode_body_from_repaired_state(
+    kb: LectureKnowledgeBase,
+    episode,
+    *,
+    render_policy: CanonicalRenderPolicy | None,
+) -> tuple[str, list[str]]:
+    """Serialize one semantic leaf without giving another model control over mathematical content."""
+
+    by_id = {item.id: item for item in kb.observations}
+    suppress_text = set(render_policy.suppress_text_ids) if render_policy is not None else set()
+    suppress_latex = set(render_policy.suppress_latex_ids) if render_policy is not None else set()
+    pieces: list[str] = []
+    unresolved: list[str] = []
+    seen_text: set[str] = set()
+    seen_latex: set[str] = set()
+
+    for observation_id in episode.observation_ids:
+        observation = by_id.get(observation_id)
+        if observation is None:
+            continue
+        text = observation.text.strip()
+        latex = (observation.latex or "").strip()
+
+        if observation.kind == ObservationKind.UNRESOLVED:
+            if text:
+                unresolved.append(text)
+            continue
+        if observation.kind == ObservationKind.TRANSITION:
+            continue
+
+        if text and text != latex and observation.id not in suppress_text:
+            normalized_text = re.sub(r"\s+", " ", text).strip().casefold()
+            if normalized_text and normalized_text not in seen_text:
+                pieces.append(escape_tex(text))
+                seen_text.add(normalized_text)
+
+        if latex and observation.id not in suppress_latex:
+            normalized_latex = re.sub(r"\s+", "", latex)
+            if normalized_latex and normalized_latex not in seen_latex:
+                pieces.append("\\[\n" + latex + "\n\\]")
+                seen_latex.add(normalized_latex)
+
+    return "\n\n".join(pieces), unresolved
 
 
 def _assemble_state_section_deterministically(
@@ -2152,69 +2197,66 @@ def _assemble_state_section_deterministically(
     render_policy: CanonicalRenderPolicy | None = None,
     prose_policy: ProseCompressionPolicy | None = None,
 ) -> ChunkNotes:
-    """Render canonical repaired observations without another generative model pass."""
+    """Realize repaired semantic episodes directly; observations are evidence, not document blocks."""
+
+    del prose_policy  # Legacy argument retained while old configs/tests migrate.
 
     blocks: list[NoteBlock] = []
     unresolved: list[str] = []
-    suppress_text = set(render_policy.suppress_text_ids) if render_policy is not None else set()
-    suppress_latex = set(render_policy.suppress_latex_ids) if render_policy is not None else set()
-    prose_groups = [
-        group
-        for group in (prose_policy.groups if prose_policy is not None else [])
-        if group.section_id == section.id
-    ]
-    prose_by_anchor = {group.anchor_observation_id: group for group in prose_groups}
-    compressed_text_ids = {
-        observation_id
-        for group in prose_groups
-        for observation_id in group.source_observation_ids
+    by_episode = {item.id: item for item in kb.episodes}
+    active_claims = {
+        item.id
+        for item in kb.claims
+        if item.status == ClaimStatus.ACTIVE
     }
-    compressed_text_ids.update(
-        prose_policy.suppress_text_ids if prose_policy is not None else []
-    )
 
-    for observation in _state_section_observations(kb, section):
-        source_ids = [observation.id] if observation.id else []
-        text = observation.text.strip()
-        latex = (observation.latex or "").strip()
+    subsection_before: dict[str, str] = {}
+    if len(section.subsections) > 1:
+        for subsection in section.subsections:
+            if subsection.episode_ids:
+                subsection_before[subsection.episode_ids[0]] = subsection.title
 
-        if observation.kind == ObservationKind.UNRESOLVED:
-            if text:
-                unresolved.append(text)
+    for episode_id in section.episode_ids:
+        episode = by_episode.get(episode_id)
+        if episode is None or not episode.observation_ids:
             continue
 
-        prose_group = prose_by_anchor.get(observation.id)
-        if prose_group is not None:
+        subsection_title = subsection_before.get(episode_id)
+        if subsection_title:
             blocks.append(
                 NoteBlock(
-                    type=BlockType.PARAGRAPH,
-                    latex=escape_tex(prose_group.summary_text),
-                    source_evidence_ids=prose_group.source_observation_ids,
+                    type=BlockType.SUBSECTION,
+                    latex=subsection_title,
+                    source_claim_ids=[
+                        claim_id
+                        for claim_id in episode.claim_ids
+                        if claim_id in active_claims
+                    ],
+                    source_evidence_ids=list(episode.observation_ids),
                 )
             )
-        # Everything outside an accepted prose-compression group stays byte-for-byte equivalent
-        # to the deterministic baseline. Mathematical LaTeX is handled separately below.
-        elif (
-            text
-            and text != latex
-            and observation.id not in compressed_text_ids
-            and observation.id not in suppress_text
-        ):
-            blocks.append(
-                NoteBlock(
-                    type=_deterministic_text_block_type(observation.kind),
-                    latex=escape_tex(text),
-                    source_evidence_ids=source_ids,
-                )
+
+        body, episode_unresolved = _episode_body_from_repaired_state(
+            kb,
+            episode,
+            render_policy=render_policy,
+        )
+        unresolved.extend(episode_unresolved)
+        if not body.strip():
+            continue
+
+        blocks.append(
+            NoteBlock(
+                type=_episode_block_type(episode.kind),
+                latex=body,
+                source_claim_ids=[
+                    claim_id
+                    for claim_id in episode.claim_ids
+                    if claim_id in active_claims
+                ],
+                source_evidence_ids=list(episode.observation_ids),
             )
-        if latex and observation.id not in suppress_latex:
-            blocks.append(
-                NoteBlock(
-                    type=BlockType.EQUATION,
-                    latex=latex,
-                    source_evidence_ids=source_ids,
-                )
-            )
+        )
 
     return ChunkNotes(
         chunk_id=section.id,
