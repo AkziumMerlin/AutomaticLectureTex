@@ -310,6 +310,74 @@ def test_document_plan_allows_literal_source_equality_in_prose():
     assert notes is not None
 
 
+def test_document_plan_may_omit_formula_when_important_observation_is_used_as_prose():
+    _, section, observations = _fixture()
+    plan = _good_plan()
+    plan.blocks = [
+        block
+        for block in plan.blocks
+        if getattr(block, "formula_observation_id", None) != "obs_def"
+    ]
+
+    notes, issues, stats = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+    assert stats["omitted_formula_channels"] >= 1
+
+
+def test_document_plan_allows_section_scoped_non_equality_relation_tokens():
+    _, section, observations = _fixture()
+    observations[0].text = "Рассматривается отображение f: X → X."
+    plan = _good_plan()
+    plan.blocks[3].text = "Отображение f действует X → X и связывает u и v."
+    plan.blocks[3].source_observation_ids = ["obs_step"]
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+
+
+def test_document_narration_gate_allows_passive_note_style():
+    _, section, observations = _fixture()
+    plan = _good_plan()
+    plan.blocks[3].text = "Равенство записывается в двух эквивалентных формах."
+    plan.blocks[3].source_observation_ids = ["obs_step"]
+
+    notes, issues, _ = _validate_and_render_plan(
+        plan,
+        section=section,
+        observations=observations,
+        render_policy=CanonicalRenderPolicy(),
+        output_language="ru",
+        max_prose_ratio=0.90,
+        max_remarks_fraction=0.25,
+        max_blocks=20,
+    )
+
+    assert issues == []
+    assert notes is not None
+
+
 def test_document_plan_allows_section_level_notation_and_source_relations():
     _, section, observations = _fixture()
     observations[0].text = "Рассматривается пространство X и функционал f: X → ℂ."
