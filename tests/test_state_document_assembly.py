@@ -14,7 +14,6 @@ from automatic_lecture_tex.schemas import (
 )
 from automatic_lecture_tex.state_canonicalization import CanonicalRenderPolicy
 from automatic_lecture_tex.state_document_assembly import (
-    StateDocumentOmission,
     StateDocumentPlan,
     _validate_and_render_plan,
     build_state_document_section,
