@@ -1966,8 +1966,8 @@ def _state_section_payload(
 ) -> dict[str, Any]:
     payload = evidence_for_section(kb, section, transcript, config)
     payload.pop("transcript", None)
-    # State repair owns canonical semantics. Pre-repair claims can no longer override repaired events.
-    payload["claims"] = []
+    # Claims and episodes have been re-derived from the repaired observations, so they are once
+    # again valid canonical semantic state rather than stale pre-repair metadata.
     return payload
 
 
