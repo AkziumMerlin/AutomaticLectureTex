@@ -362,6 +362,7 @@ def _clean_repaired_semantic_prose(
     stats = {
         "candidates": 0,
         "model_calls": 0,
+        "retry_calls": 0,
         "cache_hits": 0,
         "accepted": 0,
         "rejected": 0,
@@ -2816,6 +2817,7 @@ def run_knowledge_pipeline(
                 state_document_assembly_stats["sections"] += 1
                 for key in (
                     "model_calls",
+                    "retry_calls",
                     "cache_hits",
                     "blocks",
                     "prose_blocks",
