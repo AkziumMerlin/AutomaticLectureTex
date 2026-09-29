@@ -48,6 +48,7 @@ from .schemas import (
     BlockType,
     ChunkNotes,
     EpisodeHierarchyPlan,
+    EpisodeKind,
     EpisodeTrackingUpdate,
     LectureIR,
     LectureKnowledgeBase,
@@ -85,6 +86,8 @@ KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 10
 STATE_SEMANTIC_TEXT_VERSION = 1
 STATE_SEMANTIC_TEXT_RETRY_VERSION = 1
+STATE_SEMANTIC_GRAPH_VERSION = 1
+STATE_SEMANTIC_GRAPH_BATCH_SIZE = 32
 STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
