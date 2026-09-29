@@ -97,7 +97,7 @@ class NotesConfig(BaseModel):
     hierarchy_batch_episodes: int = Field(default=24, ge=2, le=100)
     episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
     state_section_max_evidence_chars: int = Field(default=100000, ge=8000, le=200000)
-    state_section_assembly: Literal["llm", "deterministic", "document"] = "llm"
+    state_section_assembly: Literal["llm", "deterministic"] = "llm"
     state_section_raw_context_seconds: float = Field(default=90.0, ge=0.0, le=300.0)
     state_section_raw_evidence_chars: int = Field(default=16000, ge=2000, le=60000)
     state_section_writer_thinking: bool = False
@@ -111,16 +111,7 @@ class NotesConfig(BaseModel):
     state_observation_history: int = Field(default=4, ge=0, le=20)
     state_observation_max_raw_windows: int = Field(default=2, ge=1, le=8)
     state_observation_max_images: int = Field(default=2, ge=0, le=4)
-    state_canonicalization_enabled: bool = False
-    state_canonicalization_semantic_audit: bool = False
-    state_prose_compression_enabled: bool = False
-    state_prose_compression_min_group_size: int = Field(default=3, ge=3, le=12)
-    state_prose_compression_max_sentences: int = Field(default=2, ge=1, le=3)
-    state_prose_compression_max_ratio: float = Field(default=0.55, gt=0.1, le=0.9)
-    state_prose_compression_max_summary_chars: int = Field(default=700, ge=100, le=2400)
-    state_document_max_prose_ratio: float = Field(default=0.50, gt=0.15, le=0.90)
-    state_document_max_remarks_fraction: float = Field(default=0.25, ge=0.0, le=0.75)
-    state_document_max_blocks_per_section: int = Field(default=48, ge=4, le=160)
+    state_repaired_episode_batch_observations: int = Field(default=24, ge=4, le=80)
     episode_symbol_context_limit: int = Field(default=24, ge=0, le=200)
     episode_transcript_context_seconds: float = Field(
         default=0.0,

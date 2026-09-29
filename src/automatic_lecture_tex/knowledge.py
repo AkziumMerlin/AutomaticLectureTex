@@ -136,6 +136,11 @@ def make_lecture_state(
         lecture_id=kb.lecture_id,
         title=kb.title,
         observations=[item.model_copy(deep=True) for item in kb.observations],
+        claims=[
+            item.model_copy(deep=True)
+            for item in kb.claims
+            if item.status == ClaimStatus.ACTIVE
+        ],
         symbols=[item.model_copy(deep=True) for item in kb.symbols if item.active],
         episodes=[item.model_copy(deep=True) for item in kb.episodes],
         unresolved=list(kb.unresolved),
@@ -552,6 +557,68 @@ in language code `{self.output_language}`.
             operation="episode_track",
             split_oversized_task=True,
         )
+
+    def track_repaired_episodes(
+        self,
+        kb: LectureKnowledgeBase,
+        batch: WindowObservations,
+        added_observation_ids: list[str],
+    ) -> EpisodeTrackingUpdate:
+        """Rebuild semantic leaves from repaired observations, not raw-window interpretations."""
+
+        new_ids = set(added_observation_ids)
+        new_observations = [
+            item.model_dump(mode="json")
+            for item in kb.observations
+            if item.id in new_ids
+        ]
+        recent_episodes = [
+            item.model_dump(mode="json")
+            for item in kb.episodes[-8:]
+        ]
+        prompt = f"""Rebuild semantic episodes from ALREADY REPAIRED mathematical observations.
+
+Recent/open rebuilt episodes:
+{json.dumps(recent_episodes, ensure_ascii=False, separators=(",", ":"))}
+
+Next repaired observations:
+{json.dumps(new_observations, ensure_ascii=False, separators=(",", ":"))}
+
+The host will assign EVERY observation to exactly one episode. Return only semantic boundary
+decisions. Do not create claims, formulas, document sections, or new mathematical content.
+
+Episode kinds are mathematical roles, not video actions:
+- definition: one mathematical definition;
+- theorem: a theorem/proposition/criterion statement;
+- proof: the proof of a preceding/current result;
+- example: one worked example;
+- derivation: a calculation or derivation not presented as a theorem proof;
+- notation: an actual notation-introduction unit;
+- remark: a genuine mathematical side remark;
+- topic: exposition that does not fit a more specific role.
+
+Place a boundary BEFORE an observation only when a new mathematical unit begins. Do not create a
+boundary merely because a technical batch begins. A theorem and its proof should normally be
+distinct adjacent episodes. A definition and later theorem should be distinct when the lecture
+presents them separately.
+
+Titles must be short final-note labels naming mathematical content. Never mention the lecturer,
+teacher, board, speech, writing/erasing, frames, OCR/ASR, reconstruction, or chronology such as
+"переход к". Prefer labels such as "Комплексно-линейные функционалы", "Теорема Хана—Банаха",
+"Доказательство хаусдорфовости", "Слабая сходимость".
+
+The repaired observations are final evidence: preserve genuine terminology and possible lecturer
+mistakes; do not silently replace them with textbook knowledge. Preserve ambiguity in unresolved.
+Do not emit symbols here; symbol evidence is rebound host-side after the graph is rebuilt.
+Write labels/descriptions in language code "{self.output_language}".
+"""
+        return self._structured(
+            prompt,
+            EpisodeTrackingUpdate,
+            operation="repaired_episode_track",
+            split_oversized_task=True,
+        )
+
 
     def plan_episode_hierarchy(
         self,

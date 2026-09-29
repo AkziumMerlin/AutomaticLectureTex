@@ -20,8 +20,12 @@ from automatic_lecture_tex.knowledge_pipeline import (
 )
 from automatic_lecture_tex.schemas import (
     ChunkNotes,
+    ClaimStatus,
+    EpisodeBoundary,
+    EpisodeKind,
     EpisodeStatus,
     EpisodeTrackingUpdate,
+    KnowledgeClaim,
     LectureKnowledgeBase,
     LectureObservation,
     LectureOutline,
@@ -108,6 +112,30 @@ def test_state_ir_fingerprint_depends_on_semantic_text_retry_version(monkeypatch
         pipeline_robust_module,
         "STATE_SEMANTIC_TEXT_RETRY_VERSION",
         pipeline_robust_module.STATE_SEMANTIC_TEXT_RETRY_VERSION + 1,
+    )
+    after = pipeline._ir_fingerprint(transcript, {})
+
+    assert before != after
+
+
+def test_state_ir_fingerprint_depends_on_semantic_graph_version(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state.yaml"
+    )
+    config = load_config(config_path)
+    pipeline = pipeline_robust_module.Pipeline(config)
+    transcript = Transcript(
+        lecture_id="lecture",
+        segments=[TranscriptSegment(id="seg_0", start=0.0, end=1.0, text="test")],
+    )
+
+    before = pipeline._ir_fingerprint(transcript, {})
+    monkeypatch.setattr(
+        pipeline_robust_module,
+        "STATE_SEMANTIC_GRAPH_VERSION",
+        pipeline_robust_module.STATE_SEMANTIC_GRAPH_VERSION + 1,
     )
     after = pipeline._ir_fingerprint(transcript, {})
 
@@ -386,7 +414,7 @@ def test_state_writer_raw_context_is_bounded_bidirectional_and_keeps_literal_ocr
     assert "unrelated future material" not in str(context)
 
 
-def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
+def test_deterministic_state_assembly_realizes_one_semantic_episode_block():
     observations = [
         LectureObservation(
             id="obs_definition",
@@ -411,18 +439,45 @@ def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
             episode_id="episode_0",
         ),
     ]
+    claims = [
+        KnowledgeClaim(
+            id="claim_obs_definition",
+            kind=ObservationKind.DEFINITION,
+            content=observations[0].text,
+            latex=observations[0].latex,
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.ACTIVE,
+            evidence_ids=["obs_definition"],
+            introduced_at=0.0,
+        ),
+        KnowledgeClaim(
+            id="claim_obs_formula",
+            kind=ObservationKind.PROOF_STEP,
+            content=observations[1].text,
+            latex=observations[1].latex,
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.ACTIVE,
+            evidence_ids=["obs_formula"],
+            introduced_at=1.0,
+        ),
+    ]
     episode = SemanticEpisode(
         id="episode_0",
-        title="Topic",
+        title="Норма функционала",
+        kind=EpisodeKind.DEFINITION,
         start=0.0,
         end=2.0,
         status=EpisodeStatus.CLOSED,
         observation_ids=[item.id for item in observations],
+        claim_ids=[item.id for item in claims],
     )
     kb = LectureKnowledgeBase(
         lecture_id="lecture",
         title="Lecture",
         observations=observations,
+        claims=claims,
         episodes=[episode],
     )
     section = OutlineSection(
@@ -435,21 +490,223 @@ def test_deterministic_state_assembly_preserves_canonical_latex_verbatim():
 
     notes = knowledge_pipeline_module._assemble_state_section_deterministically(kb, section)
 
-    assert [block.type for block in notes.blocks] == [
-        "definition",
-        "equation",
-        "paragraph",
-        "equation",
-    ]
-    assert notes.blocks[0].latex == "Определение нормы функционала."
-    assert notes.blocks[2].latex == "Разложим вектор."
-    assert notes.blocks[1].latex == r"\|f\|=\sup_{\|x\|\le 1}|f(x)|"
+    assert len(notes.blocks) == 1
+    assert notes.blocks[0].type == "definition"
+    assert "Определение нормы функционала." in notes.blocks[0].latex
+    assert r"\|f\|=\sup_{\|x\|\le 1}|f(x)|" in notes.blocks[0].latex
     assert (
-        notes.blocks[3].latex
-        == r"x=\frac{f(x)}{f(z_f)}\,z_f+y,\qquad y\in\operatorname{Ker}f"
+        r"x=\frac{f(x)}{f(z_f)}\,z_f+y,\qquad y\in\operatorname{Ker}f"
+        in notes.blocks[0].latex
     )
-    assert notes.blocks[1].source_evidence_ids == ["obs_definition"]
-    assert notes.blocks[3].source_evidence_ids == ["obs_formula"]
+    assert notes.blocks[0].source_evidence_ids == ["obs_definition", "obs_formula"]
+
+
+def test_semantic_episode_rendering_uses_only_active_claims():
+    observations = [
+        LectureObservation(
+            id="obs_old",
+            window_id="window_0",
+            start=0.0,
+            end=1.0,
+            kind=ObservationKind.CLAIM,
+            text="Ошибочное утверждение.",
+            latex=r"x=0",
+            episode_id="episode_0",
+        ),
+        LectureObservation(
+            id="obs_fix",
+            window_id="window_1",
+            start=1.0,
+            end=2.0,
+            kind=ObservationKind.CORRECTION,
+            text="Исправленное утверждение.",
+            latex=r"x\\neq0",
+            episode_id="episode_0",
+            target_observation_id="obs_old",
+        ),
+    ]
+    claims = [
+        KnowledgeClaim(
+            id="claim_old",
+            kind=ObservationKind.CLAIM,
+            content="Ошибочное утверждение.",
+            latex=r"x=0",
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.SUPERSEDED,
+            evidence_ids=["obs_old"],
+            introduced_at=0.0,
+        ),
+        KnowledgeClaim(
+            id="claim_fix",
+            kind=ObservationKind.CLAIM,
+            content="Исправленное утверждение.",
+            latex=r"x\\neq0",
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.ACTIVE,
+            evidence_ids=["obs_fix"],
+            supersedes=["claim_old"],
+            introduced_at=1.0,
+        ),
+    ]
+    episode = SemanticEpisode(
+        id="episode_0",
+        title="Исправление",
+        kind=EpisodeKind.REMARK,
+        start=0.0,
+        end=2.0,
+        status=EpisodeStatus.CLOSED,
+        observation_ids=["obs_old", "obs_fix"],
+        claim_ids=["claim_old", "claim_fix"],
+    )
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        claims=claims,
+        episodes=[episode],
+    )
+    section = OutlineSection(
+        id="section_0",
+        title="Topic",
+        start=0.0,
+        end=2.0,
+        episode_ids=["episode_0"],
+    )
+
+    notes = knowledge_pipeline_module._assemble_state_section_deterministically(kb, section)
+
+    assert len(notes.blocks) == 1
+    assert "Исправленное утверждение." in notes.blocks[0].latex
+    assert r"x\\neq0" in notes.blocks[0].latex
+    assert "Ошибочное утверждение." not in notes.blocks[0].latex
+    assert r"x=0" not in notes.blocks[0].latex
+    assert notes.blocks[0].source_claim_ids == ["claim_fix"]
+
+
+def test_repaired_semantic_graph_rederives_claims_and_episode_roles(tmp_path):
+    observations = [
+        LectureObservation(
+            id="obs_def",
+            window_id="window_0",
+            start=0.0,
+            end=1.0,
+            kind=ObservationKind.DEFINITION,
+            text="Пространство X называется нормированным при наличии нормы.",
+            episode_id="old_episode",
+        ),
+        LectureObservation(
+            id="obs_theorem",
+            window_id="window_1",
+            start=1.0,
+            end=2.0,
+            kind=ObservationKind.CLAIM,
+            text="Формулируется теорема о продолжении функционала.",
+            episode_id="old_episode",
+        ),
+        LectureObservation(
+            id="obs_proof",
+            window_id="window_2",
+            start=2.0,
+            end=3.0,
+            kind=ObservationKind.PROOF_STEP,
+            text="Для доказательства строится продолжение.",
+            episode_id="old_episode",
+        ),
+    ]
+    repaired = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        observations=observations,
+        episodes=[
+            SemanticEpisode(
+                id="old_episode",
+                title="Запись на доске",
+                kind=EpisodeKind.TOPIC,
+                start=0.0,
+                end=3.0,
+                status=EpisodeStatus.CLOSED,
+                observation_ids=[item.id for item in observations],
+            )
+        ],
+        symbols=[
+            SymbolRecord(
+                id="sym_x",
+                symbol="X",
+                meaning="пространство",
+                scope="old_episode",
+                episode_id="old_episode",
+                introduced_at=0.0,
+                evidence_ids=["obs_def"],
+            )
+        ],
+    )
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.calls = 0
+
+        def track_repaired_episodes(self, kb, batch, added_observation_ids):
+            self.calls += 1
+            return EpisodeTrackingUpdate(
+                boundaries=[
+                    EpisodeBoundary(
+                        before_observation_id="obs_def",
+                        kind=EpisodeKind.DEFINITION,
+                        title="Нормированное пространство",
+                    ),
+                    EpisodeBoundary(
+                        before_observation_id="obs_theorem",
+                        kind=EpisodeKind.THEOREM,
+                        title="Теорема о продолжении функционала",
+                    ),
+                    EpisodeBoundary(
+                        before_observation_id="obs_proof",
+                        kind=EpisodeKind.PROOF,
+                        title="Доказательство",
+                    ),
+                ]
+            )
+
+    orchestrator = FakeOrchestrator()
+    rebuilt, stats = knowledge_pipeline_module._rebuild_repaired_semantic_graph(
+        orchestrator,
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        batch_observations=10,
+        force=False,
+    )
+
+    assert orchestrator.calls == 1
+    assert stats["model_calls"] == 1
+    assert [episode.kind for episode in rebuilt.episodes] == [
+        EpisodeKind.DEFINITION,
+        EpisodeKind.THEOREM,
+        EpisodeKind.PROOF,
+    ]
+    assert [claim.content for claim in rebuilt.claims] == [
+        observation.text for observation in observations
+    ]
+    assert rebuilt.symbols[0].episode_id == rebuilt.episodes[0].id
+    assert rebuilt.symbols[0].scope == rebuilt.episodes[0].id
+
+    cached, cached_stats = knowledge_pipeline_module._rebuild_repaired_semantic_graph(
+        orchestrator,
+        repaired=repaired,
+        work=tmp_path,
+        llm_config={"model": "stub"},
+        batch_observations=10,
+        force=False,
+    )
+    assert orchestrator.calls == 1
+    assert cached_stats["cache_hits"] == 1
+    assert [episode.kind for episode in cached.episodes] == [
+        EpisodeKind.DEFINITION,
+        EpisodeKind.THEOREM,
+        EpisodeKind.PROOF,
+    ]
 
 
 def test_state_writer_uses_minimal_canonical_prompt_and_host_provenance():
@@ -1531,10 +1788,8 @@ def test_functional_analysis_20s_ablation_uses_fine_windows_and_five_image_budge
     assert config.notes.chunk_overlap_seconds == 5
     assert config.notes.visual_chunk_board_scan is True
     assert config.notes.state_section_max_evidence_chars == 100000
-    assert config.notes.state_section_assembly == "document"
-    assert config.notes.state_prose_compression_enabled is False
-    assert config.notes.state_document_max_prose_ratio == 0.45
-    assert config.notes.state_document_max_remarks_fraction == 0.20
+    assert config.notes.state_section_assembly == "deterministic"
+    assert config.notes.state_repaired_episode_batch_observations == 24
     assert config.notes.state_section_raw_context_seconds == 90
     assert config.notes.state_section_raw_evidence_chars == 16000
     assert config.notes.state_observation_lookahead == 2

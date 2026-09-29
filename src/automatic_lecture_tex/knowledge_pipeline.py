@@ -47,7 +47,9 @@ from .media import copy_asset
 from .schemas import (
     BlockType,
     ChunkNotes,
+    ClaimStatus,
     EpisodeHierarchyPlan,
+    EpisodeKind,
     EpisodeTrackingUpdate,
     LectureIR,
     LectureKnowledgeBase,
@@ -58,12 +60,6 @@ from .schemas import (
     OutlineSection,
     VisualEvidence,
     WindowObservations,
-)
-from .state_canonicalization import CanonicalRenderPolicy, run_state_canonicalization
-from .state_document_assembly import build_state_document_section
-from .state_prose_compression import (
-    ProseCompressionPolicy,
-    run_state_prose_compression,
 )
 from .util import atomic_json_dump, stable_hash
 from .vision import (
@@ -85,6 +81,7 @@ KNOWLEDGE_CACHE_VERSION = 3
 STATE_PIPELINE_VERSION = 10
 STATE_SEMANTIC_TEXT_VERSION = 1
 STATE_SEMANTIC_TEXT_RETRY_VERSION = 1
+STATE_SEMANTIC_GRAPH_VERSION = 1
 STATE_SECTION_WRITER_CACHE_VERSION = 4
 
 # These settings affect only hierarchy/synthesis. Excluding them from the extraction fingerprint is
@@ -108,16 +105,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_observation_history",
     "state_observation_max_raw_windows",
     "state_observation_max_images",
-    "state_canonicalization_enabled",
-    "state_canonicalization_semantic_audit",
-    "state_prose_compression_enabled",
-    "state_prose_compression_min_group_size",
-    "state_prose_compression_max_sentences",
-    "state_prose_compression_max_ratio",
-    "state_prose_compression_max_summary_chars",
-    "state_document_max_prose_ratio",
-    "state_document_max_remarks_fraction",
-    "state_document_max_blocks_per_section",
+    "state_repaired_episode_batch_observations",
 }
 
 
@@ -1813,6 +1801,151 @@ def _repair_lecture_state(
     repaired.unresolved = list(dict.fromkeys([*repaired.unresolved, *unresolved]))
     return repaired, stats, list(dict.fromkeys(unresolved))
 
+def _rebind_symbols_to_repaired_graph(
+    rebuilt: LectureKnowledgeBase,
+    source_symbols,
+) -> None:
+    """Preserve symbol evidence while deriving scope from the rebuilt repaired episode graph."""
+
+    by_observation = {item.id: item for item in rebuilt.observations}
+    by_episode = {item.id: item for item in rebuilt.episodes}
+    rebuilt.symbols = []
+    for raw in source_symbols:
+        if not raw.active:
+            continue
+        symbol = raw.model_copy(deep=True)
+        symbol.evidence_ids = [
+            evidence_id
+            for evidence_id in symbol.evidence_ids
+            if evidence_id in by_observation
+        ]
+        if not symbol.evidence_ids:
+            continue
+        episode_ids = [
+            by_observation[evidence_id].episode_id
+            for evidence_id in symbol.evidence_ids
+            if by_observation[evidence_id].episode_id
+        ]
+        symbol.episode_id = episode_ids[0] if episode_ids else ""
+        symbol.scope = symbol.episode_id or "lecture"
+        rebuilt.symbols.append(symbol)
+        episode = by_episode.get(symbol.episode_id)
+        if episode is not None and symbol.id and symbol.id not in episode.symbol_ids:
+            episode.symbol_ids.append(symbol.id)
+
+
+def _rebuild_repaired_semantic_graph(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    repaired: LectureKnowledgeBase,
+    work: Path,
+    llm_config: dict[str, Any],
+    batch_observations: int,
+    force: bool,
+) -> tuple[LectureKnowledgeBase, dict[str, Any]]:
+    """Re-derive claims and semantic episodes from repaired observations.
+
+    The pre-repair graph is evidence-tracking state. Once repair has replaced/rejected observations,
+    its derived claims and episode labels are stale. Rebuild them from the repaired sequence before
+    hierarchy or note realization.
+    """
+
+    ordered = sorted(repaired.observations, key=lambda item: (item.start, item.end, item.id))
+    fingerprint = stable_hash(
+        {
+            "semantic_graph_version": STATE_SEMANTIC_GRAPH_VERSION,
+            "observations": [item.model_dump(mode="json") for item in ordered],
+            "symbols": [
+                item.model_dump(mode="json")
+                for item in repaired.symbols
+                if item.active
+            ],
+            "batch_observations": batch_observations,
+            "llm": llm_config,
+        }
+    )
+    path = work / "repaired_semantic_graph.json"
+    if path.exists() and not force:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("fingerprint") == fingerprint:
+                cached = LectureKnowledgeBase.model_validate(payload["kb"])
+                return cached, {
+                    "cache_hits": 1,
+                    "model_calls": 0,
+                    "observations": len(cached.observations),
+                    "claims": len(cached.claims),
+                    "episodes": len(cached.episodes),
+                }
+        except (json.JSONDecodeError, KeyError, ValidationError):
+            pass
+
+    rebuilt_observations = []
+    for item in ordered:
+        observation = item.model_copy(deep=True)
+        observation.episode_id = ""
+        rebuilt_observations.append(observation)
+
+    rebuilt = LectureKnowledgeBase(
+        lecture_id=repaired.lecture_id,
+        title=repaired.title,
+        observations=rebuilt_observations,
+        observation_aliases=dict(repaired.observation_aliases),
+        claims=[],
+        symbols=[],
+        episodes=[],
+        anchors=[],
+        unresolved=list(repaired.unresolved),
+    )
+
+    model_calls = 0
+    for batch_index, start in enumerate(range(0, len(rebuilt_observations), batch_observations)):
+        selected = rebuilt_observations[start : start + batch_observations]
+        if not selected:
+            continue
+        batch = WindowObservations(
+            window_id=f"repaired_semantic_{batch_index:04d}",
+            start=selected[0].start,
+            end=selected[-1].end,
+            observations=[item.model_copy(deep=True) for item in selected],
+        )
+        ids = [item.id for item in selected]
+        update = orchestrator.track_repaired_episodes(rebuilt, batch, ids)
+        model_calls += 1
+        apply_episode_tracking(
+            rebuilt,
+            update,
+            ids,
+            window_id=batch.window_id,
+        )
+
+    close_open_episodes(rebuilt)
+    _rebind_symbols_to_repaired_graph(rebuilt, repaired.symbols)
+
+    stats: dict[str, Any] = {
+        "cache_hits": 0,
+        "model_calls": model_calls,
+        "observations": len(rebuilt.observations),
+        "claims": len(rebuilt.claims),
+        "episodes": len(rebuilt.episodes),
+        "episode_kinds": {},
+    }
+    for episode in rebuilt.episodes:
+        key = str(episode.kind)
+        stats["episode_kinds"][key] = int(stats["episode_kinds"].get(key, 0)) + 1
+
+    atomic_json_dump(
+        path,
+        {
+            "fingerprint": fingerprint,
+            "version": STATE_SEMANTIC_GRAPH_VERSION,
+            "stats": stats,
+            "kb": rebuilt.model_dump(mode="json"),
+        },
+    )
+    return rebuilt, stats
+
+
 def _state_section_payload(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
@@ -1821,8 +1954,8 @@ def _state_section_payload(
 ) -> dict[str, Any]:
     payload = evidence_for_section(kb, section, transcript, config)
     payload.pop("transcript", None)
-    # State repair owns canonical semantics. Pre-repair claims can no longer override repaired events.
-    payload["claims"] = []
+    # Claims and episodes have been re-derived from the repaired observations, so they are once
+    # again valid canonical semantic state rather than stale pre-repair metadata.
     return payload
 
 
@@ -1991,85 +2124,125 @@ def _state_section_observations(
     return list(unique.values())
 
 
-def _deterministic_text_block_type(kind: ObservationKind) -> BlockType:
+def _episode_block_type(kind: EpisodeKind) -> BlockType:
     return {
-        ObservationKind.DEFINITION: BlockType.DEFINITION,
-        ObservationKind.EXAMPLE: BlockType.EXAMPLE,
-        ObservationKind.REMARK: BlockType.REMARK,
-        ObservationKind.CORRECTION: BlockType.REMARK,
-        ObservationKind.RETRACTION: BlockType.REMARK,
+        EpisodeKind.DEFINITION: BlockType.DEFINITION,
+        EpisodeKind.THEOREM: BlockType.THEOREM,
+        EpisodeKind.PROOF: BlockType.PROOF,
+        EpisodeKind.EXAMPLE: BlockType.EXAMPLE,
+        EpisodeKind.REMARK: BlockType.REMARK,
     }.get(kind, BlockType.PARAGRAPH)
+
+
+def _episode_body_from_repaired_state(
+    kb: LectureKnowledgeBase,
+    episode,
+) -> tuple[str, list[str]]:
+    """Serialize one semantic leaf from ACTIVE repaired claims.
+
+    Repaired observations remain immutable provenance. Corrections/retractions are interpreted when
+    the repaired semantic graph derives KnowledgeClaim status, so rendering observations directly
+    would resurrect superseded content.
+    """
+
+    claim_by_id = {item.id: item for item in kb.claims}
+    observation_by_id = {item.id: item for item in kb.observations}
+    claims = [
+        claim_by_id[claim_id]
+        for claim_id in episode.claim_ids
+        if claim_id in claim_by_id and claim_by_id[claim_id].status == ClaimStatus.ACTIVE
+    ]
+    claims.sort(key=lambda item: (item.introduced_at, item.id))
+
+    pieces: list[str] = []
+    unresolved: list[str] = []
+    seen_text: set[str] = set()
+    seen_latex: set[str] = set()
+
+    for claim in claims:
+        text = claim.content.strip()
+        latex = (claim.latex or "").strip()
+        if text and text != latex:
+            normalized_text = re.sub(r"\s+", " ", text).strip().casefold()
+            if normalized_text and normalized_text not in seen_text:
+                pieces.append(escape_tex(text))
+                seen_text.add(normalized_text)
+        if latex:
+            normalized_latex = re.sub(r"\s+", "", latex)
+            if normalized_latex and normalized_latex not in seen_latex:
+                pieces.append("\\[\n" + latex + "\n\\]")
+                seen_latex.add(normalized_latex)
+
+    for observation_id in episode.observation_ids:
+        observation = observation_by_id.get(observation_id)
+        if (
+            observation is not None
+            and observation.kind == ObservationKind.UNRESOLVED
+            and observation.text.strip()
+        ):
+            unresolved.append(observation.text.strip())
+
+    return "\n\n".join(pieces), unresolved
 
 
 def _assemble_state_section_deterministically(
     kb: LectureKnowledgeBase,
     section: OutlineSection,
-    render_policy: CanonicalRenderPolicy | None = None,
-    prose_policy: ProseCompressionPolicy | None = None,
 ) -> ChunkNotes:
-    """Render canonical repaired observations without another generative model pass."""
+    """Realize repaired semantic episodes directly; observations are evidence, not document blocks."""
 
     blocks: list[NoteBlock] = []
     unresolved: list[str] = []
-    suppress_text = set(render_policy.suppress_text_ids) if render_policy is not None else set()
-    suppress_latex = set(render_policy.suppress_latex_ids) if render_policy is not None else set()
-    prose_groups = [
-        group
-        for group in (prose_policy.groups if prose_policy is not None else [])
-        if group.section_id == section.id
-    ]
-    prose_by_anchor = {group.anchor_observation_id: group for group in prose_groups}
-    compressed_text_ids = {
-        observation_id
-        for group in prose_groups
-        for observation_id in group.source_observation_ids
+    by_episode = {item.id: item for item in kb.episodes}
+    active_claims = {
+        item.id
+        for item in kb.claims
+        if item.status == ClaimStatus.ACTIVE
     }
-    compressed_text_ids.update(
-        prose_policy.suppress_text_ids if prose_policy is not None else []
-    )
 
-    for observation in _state_section_observations(kb, section):
-        source_ids = [observation.id] if observation.id else []
-        text = observation.text.strip()
-        latex = (observation.latex or "").strip()
+    subsection_before: dict[str, str] = {}
+    if len(section.subsections) > 1:
+        for subsection in section.subsections:
+            if subsection.episode_ids:
+                subsection_before[subsection.episode_ids[0]] = subsection.title
 
-        if observation.kind == ObservationKind.UNRESOLVED:
-            if text:
-                unresolved.append(text)
+    for episode_id in section.episode_ids:
+        episode = by_episode.get(episode_id)
+        if episode is None or not episode.observation_ids:
             continue
 
-        prose_group = prose_by_anchor.get(observation.id)
-        if prose_group is not None:
+        subsection_title = subsection_before.get(episode_id)
+        if subsection_title:
             blocks.append(
                 NoteBlock(
-                    type=BlockType.PARAGRAPH,
-                    latex=escape_tex(prose_group.summary_text),
-                    source_evidence_ids=prose_group.source_observation_ids,
+                    type=BlockType.SUBSECTION,
+                    latex=subsection_title,
+                    source_claim_ids=[
+                        claim_id
+                        for claim_id in episode.claim_ids
+                        if claim_id in active_claims
+                    ],
+                    source_evidence_ids=list(episode.observation_ids),
                 )
             )
-        # Everything outside an accepted prose-compression group stays byte-for-byte equivalent
-        # to the deterministic baseline. Mathematical LaTeX is handled separately below.
-        elif (
-            text
-            and text != latex
-            and observation.id not in compressed_text_ids
-            and observation.id not in suppress_text
-        ):
-            blocks.append(
-                NoteBlock(
-                    type=_deterministic_text_block_type(observation.kind),
-                    latex=escape_tex(text),
-                    source_evidence_ids=source_ids,
-                )
+
+        body, episode_unresolved = _episode_body_from_repaired_state(kb, episode)
+        unresolved.extend(episode_unresolved)
+        if not body.strip():
+            continue
+
+        blocks.append(
+            NoteBlock(
+                type=_episode_block_type(episode.kind),
+                latex=body,
+                source_claim_ids=[
+                    claim_id
+                    for claim_id in episode.claim_ids
+                    if claim_id in active_claims
+                ],
+                source_evidence_ids=list(episode.observation_ids),
             )
-        if latex and observation.id not in suppress_latex:
-            blocks.append(
-                NoteBlock(
-                    type=BlockType.EQUATION,
-                    latex=latex,
-                    source_evidence_ids=source_ids,
-                )
-            )
+        )
 
     return ChunkNotes(
         chunk_id=section.id,
@@ -2596,30 +2769,8 @@ def run_knowledge_pipeline(
     state_patches_rejected = 0
     state_patches_unresolved = 0
     state_resolution_seconds = 0.0
-    state_canonicalization_seconds = 0.0
-    state_canonicalization_stats: dict[str, int] = {}
-    state_canonicalization_policy = CanonicalRenderPolicy()
-    state_canonicalization_unresolved: list[str] = []
-    state_prose_compression_seconds = 0.0
-    state_prose_compression_stats: dict[str, int] = {}
-    state_prose_compression_policy = ProseCompressionPolicy()
-    state_prose_compression_unresolved: list[str] = []
-    state_document_assembly_seconds = 0.0
-    state_document_assembly_stats: dict[str, int] = {
-        "sections": 0,
-        "model_calls": 0,
-        "retry_calls": 0,
-        "cache_hits": 0,
-        "fallback_sections": 0,
-        "blocks": 0,
-        "prose_blocks": 0,
-        "formula_blocks": 0,
-        "subsections": 0,
-        "remarks": 0,
-        "omitted_text_channels": 0,
-        "omitted_formula_channels": 0,
-    }
-    state_document_assembly_unresolved: list[str] = []
+    state_semantic_graph_seconds = 0.0
+    state_semantic_graph_stats: dict[str, Any] = {}
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
 
@@ -2647,6 +2798,25 @@ def run_knowledge_pipeline(
         state_patches_replaced = int(repair_stats["replaced"])
         state_patches_rejected = int(repair_stats["rejected"])
         state_patches_unresolved = int(repair_stats["unresolved"])
+
+        # PR #3 made claims/episodes derived semantic state. Transactional repair (#83) changes the
+        # observations those objects were derived from, so the pre-repair graph is now audit-only.
+        atomic_json_dump(
+            work / "lecture_state_pre_semantic_graph.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+        semantic_graph_started = time.perf_counter()
+        kb, state_semantic_graph_stats = _rebuild_repaired_semantic_graph(
+            orchestrator,
+            repaired=kb,
+            work=work,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            batch_observations=(
+                pipeline.config.notes.state_repaired_episode_batch_observations
+            ),
+            force=force,
+        )
+        state_semantic_graph_seconds = time.perf_counter() - semantic_graph_started
         atomic_json_dump(
             work / "lecture_state.json",
             make_lecture_state(kb).model_dump(mode="json"),
@@ -2737,108 +2907,13 @@ def run_knowledge_pipeline(
             make_lecture_state(kb, outline=outline).model_dump(mode="json"),
         )
 
-    # Hierarchy must see transition/boundary evidence. Canonicalization is therefore render-only
-    # and runs only after the outline has been fixed from the full repaired state.
-    if (
-        state_mode
-        and pipeline.config.notes.state_canonicalization_enabled
-        and pipeline.config.notes.state_section_assembly in {"deterministic", "document"}
-    ):
-        canonicalization_started = time.perf_counter()
-        (
-            state_canonicalization_policy,
-            state_canonicalization_stats,
-            state_canonicalization_unresolved,
-        ) = run_state_canonicalization(
-            orchestrator,
-            kb=kb,
-            work=work,
-            llm_config=pipeline.config.llm.model_dump(mode="json"),
-            pipeline_version=STATE_PIPELINE_VERSION,
-            semantic_audit=pipeline.config.notes.state_canonicalization_semantic_audit,
-            force=force,
-        )
-        state_canonicalization_seconds = time.perf_counter() - canonicalization_started
-
-    if (
-        state_mode
-        and pipeline.config.notes.state_prose_compression_enabled
-        and pipeline.config.notes.state_section_assembly == "deterministic"
-    ):
-        prose_compression_started = time.perf_counter()
-        (
-            state_prose_compression_policy,
-            state_prose_compression_stats,
-            state_prose_compression_unresolved,
-        ) = run_state_prose_compression(
-            orchestrator,
-            kb=kb,
-            outline=outline,
-            work=work,
-            llm_config=pipeline.config.llm.model_dump(mode="json"),
-            pipeline_version=STATE_PIPELINE_VERSION,
-            min_group_size=pipeline.config.notes.state_prose_compression_min_group_size,
-            max_sentences=pipeline.config.notes.state_prose_compression_max_sentences,
-            max_ratio=pipeline.config.notes.state_prose_compression_max_ratio,
-            max_summary_chars=pipeline.config.notes.state_prose_compression_max_summary_chars,
-            force=force,
-        )
-        state_prose_compression_seconds = time.perf_counter() - prose_compression_started
-
     if state_mode:
         note_sections: list[ChunkNotes] = []
         if pipeline.config.notes.state_section_assembly == "deterministic":
             note_sections = [
-                _assemble_state_section_deterministically(
-                    kb,
-                    section,
-                    render_policy=state_canonicalization_policy,
-                    prose_policy=state_prose_compression_policy,
-                )
+                _assemble_state_section_deterministically(kb, section)
                 for section in outline.sections
             ]
-        elif pipeline.config.notes.state_section_assembly == "document":
-            document_started = time.perf_counter()
-            for section in outline.sections:
-                notes, document_stats, document_unresolved = build_state_document_section(
-                    orchestrator,
-                    kb=kb,
-                    section=section,
-                    render_policy=state_canonicalization_policy,
-                    work=work,
-                    llm_config=pipeline.config.llm.model_dump(mode="json"),
-                    max_prose_ratio=pipeline.config.notes.state_document_max_prose_ratio,
-                    max_remarks_fraction=(
-                        pipeline.config.notes.state_document_max_remarks_fraction
-                    ),
-                    max_blocks=pipeline.config.notes.state_document_max_blocks_per_section,
-                    force=force,
-                )
-                state_document_assembly_stats["sections"] += 1
-                for key in (
-                    "model_calls",
-                    "retry_calls",
-                    "cache_hits",
-                    "blocks",
-                    "prose_blocks",
-                    "formula_blocks",
-                    "subsections",
-                    "remarks",
-                    "omitted_text_channels",
-                    "omitted_formula_channels",
-                ):
-                    state_document_assembly_stats[key] += int(document_stats.get(key, 0))
-                state_document_assembly_unresolved.extend(document_unresolved)
-                if notes is None:
-                    state_document_assembly_stats["fallback_sections"] += 1
-                    notes = _assemble_state_section_deterministically(
-                        kb,
-                        section,
-                        render_policy=state_canonicalization_policy,
-                        prose_policy=None,
-                    )
-                note_sections.append(notes)
-            state_document_assembly_seconds = time.perf_counter() - document_started
         else:
             for section in outline.sections:
                 evidence_batches = _state_section_batches(
@@ -2908,12 +2983,7 @@ def run_knowledge_pipeline(
 
                 note_sections.append(_merge_state_section_batches(section, generated_batches))
 
-        state_pipeline_unresolved = [
-            *state_repair_unresolved,
-            *state_canonicalization_unresolved,
-            *state_prose_compression_unresolved,
-            *state_document_assembly_unresolved,
-        ]
+        state_pipeline_unresolved = list(state_repair_unresolved)
         if state_pipeline_unresolved and note_sections:
             note_sections[-1].unresolved = list(
                 dict.fromkeys([*note_sections[-1].unresolved, *state_pipeline_unresolved])
@@ -3059,7 +3129,7 @@ def run_knowledge_pipeline(
         {
             "lecture_id": lecture.id,
             "architecture": (
-                "state_episode_graph_section_synthesis"
+                "state_repaired_semantic_graph"
                 if state_mode
                 else "knowledge_episode_graph_bounded"
             ),
@@ -3073,18 +3143,8 @@ def run_knowledge_pipeline(
             "episode_synthesis_seconds": round(episode_synthesis_seconds, 3),
             "episode_validation_seconds": round(episode_validation_seconds, 3),
             "state_resolution_seconds": round(state_resolution_seconds, 3),
-            "state_canonicalization_seconds": round(state_canonicalization_seconds, 3),
-            "state_canonicalization_enabled": (
-                pipeline.config.notes.state_canonicalization_enabled if state_mode else False
-            ),
-            "state_canonicalization": state_canonicalization_stats,
-            "state_prose_compression_seconds": round(state_prose_compression_seconds, 3),
-            "state_prose_compression_enabled": (
-                pipeline.config.notes.state_prose_compression_enabled if state_mode else False
-            ),
-            "state_prose_compression": state_prose_compression_stats,
-            "state_document_assembly_seconds": round(state_document_assembly_seconds, 3),
-            "state_document_assembly": state_document_assembly_stats,
+            "state_semantic_graph_seconds": round(state_semantic_graph_seconds, 3),
+            "state_semantic_graph": state_semantic_graph_stats,
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "state_section_assembly": (
                 pipeline.config.notes.state_section_assembly if state_mode else None
