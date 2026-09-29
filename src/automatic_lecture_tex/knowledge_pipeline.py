@@ -2138,39 +2138,49 @@ def _episode_body_from_repaired_state(
     kb: LectureKnowledgeBase,
     episode,
 ) -> tuple[str, list[str]]:
-    """Serialize one semantic leaf without giving another model control over mathematical content."""
+    """Serialize one semantic leaf from ACTIVE repaired claims.
 
-    by_id = {item.id: item for item in kb.observations}
+    Repaired observations remain immutable provenance. Corrections/retractions are interpreted when
+    the repaired semantic graph derives KnowledgeClaim status, so rendering observations directly
+    would resurrect superseded content.
+    """
+
+    claim_by_id = {item.id: item for item in kb.claims}
+    observation_by_id = {item.id: item for item in kb.observations}
+    claims = [
+        claim_by_id[claim_id]
+        for claim_id in episode.claim_ids
+        if claim_id in claim_by_id and claim_by_id[claim_id].status == ClaimStatus.ACTIVE
+    ]
+    claims.sort(key=lambda item: (item.introduced_at, item.id))
+
     pieces: list[str] = []
     unresolved: list[str] = []
     seen_text: set[str] = set()
     seen_latex: set[str] = set()
 
-    for observation_id in episode.observation_ids:
-        observation = by_id.get(observation_id)
-        if observation is None:
-            continue
-        text = observation.text.strip()
-        latex = (observation.latex or "").strip()
-
-        if observation.kind == ObservationKind.UNRESOLVED:
-            if text:
-                unresolved.append(text)
-            continue
-        if observation.kind == ObservationKind.TRANSITION:
-            continue
-
+    for claim in claims:
+        text = claim.content.strip()
+        latex = (claim.latex or "").strip()
         if text and text != latex:
             normalized_text = re.sub(r"\s+", " ", text).strip().casefold()
             if normalized_text and normalized_text not in seen_text:
                 pieces.append(escape_tex(text))
                 seen_text.add(normalized_text)
-
         if latex:
             normalized_latex = re.sub(r"\s+", "", latex)
             if normalized_latex and normalized_latex not in seen_latex:
                 pieces.append("\\[\n" + latex + "\n\\]")
                 seen_latex.add(normalized_latex)
+
+    for observation_id in episode.observation_ids:
+        observation = observation_by_id.get(observation_id)
+        if (
+            observation is not None
+            and observation.kind == ObservationKind.UNRESOLVED
+            and observation.text.strip()
+        ):
+            unresolved.append(observation.text.strip())
 
     return "\n\n".join(pieces), unresolved
 
