@@ -439,6 +439,30 @@ def test_deterministic_state_assembly_realizes_one_semantic_episode_block():
             episode_id="episode_0",
         ),
     ]
+    claims = [
+        KnowledgeClaim(
+            id="claim_obs_definition",
+            kind=ObservationKind.DEFINITION,
+            content=observations[0].text,
+            latex=observations[0].latex,
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.ACTIVE,
+            evidence_ids=["obs_definition"],
+            introduced_at=0.0,
+        ),
+        KnowledgeClaim(
+            id="claim_obs_formula",
+            kind=ObservationKind.PROOF_STEP,
+            content=observations[1].text,
+            latex=observations[1].latex,
+            episode_id="episode_0",
+            scope="episode_0",
+            status=ClaimStatus.ACTIVE,
+            evidence_ids=["obs_formula"],
+            introduced_at=1.0,
+        ),
+    ]
     episode = SemanticEpisode(
         id="episode_0",
         title="Норма функционала",
@@ -447,11 +471,13 @@ def test_deterministic_state_assembly_realizes_one_semantic_episode_block():
         end=2.0,
         status=EpisodeStatus.CLOSED,
         observation_ids=[item.id for item in observations],
+        claim_ids=[item.id for item in claims],
     )
     kb = LectureKnowledgeBase(
         lecture_id="lecture",
         title="Lecture",
         observations=observations,
+        claims=claims,
         episodes=[episode],
     )
     section = OutlineSection(
