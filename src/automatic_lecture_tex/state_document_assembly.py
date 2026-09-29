@@ -22,7 +22,7 @@ from .state_canonicalization import CanonicalRenderPolicy
 from .util import atomic_json_dump, stable_hash
 
 
-STATE_DOCUMENT_ASSEMBLY_VERSION = 3
+STATE_DOCUMENT_ASSEMBLY_VERSION = 4
 
 DocumentBlockKind = Literal[
     "subsection",
@@ -59,11 +59,8 @@ _PROSE_BLOCK_TYPES = {
     "example",
     "remark",
 }
-_FORMAL_PROSE_MARKERS = ("$", "\\", "→", "↦", "⇒", "⇔", "∑", "∫", "≤", "≥", "≠", "∈")
-_EQUALITY_SNIPPET_RE = re.compile(
-    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_*|() ]{0,24}\s*=\s*"
-    r"[A-Za-zА-Яа-яЁё0-9_*|() -]{1,32}"
-)
+_FORMAL_PROSE_MARKERS = ("$", "\\")
+_RELATION_TOKENS = ("=", "→", "↦", "⇒", "⇔", "≤", "≥", "≠", "∈", "⊂", "⊆")
 _IMPORTANT_TEXT_KINDS = {
     ObservationKind.DEFINITION,
     ObservationKind.CLAIM,
@@ -78,7 +75,7 @@ _NARRATION_RE = re.compile(
     r"лектор|преподавател\w*|на\s+(?:левой|правой|средней\s+)?доске|доск\w*|"
     r"устно|записыва\w*|дописыва\w*|указывает|подч[её]ркива\w*|"
     r"комментиру\w*|поясня\w*|отмечает|говорит|произносит|обводит|"
-    r"переходя\s+к|продолжая\s+(?:запись|объяснение)"
+    r"продолжая\s+(?:запись|объяснение)"
     r")\b",
     re.IGNORECASE,
 )
