@@ -122,11 +122,16 @@ def _compact_catalog(
             ]
         )
 
+    focus_node_ids = {
+        node.id
+        for node in active
+        if focus_ids.intersection(node.evidence_ids)
+    }
     related_ids: set[str] = set()
     for edge in state.edges:
-        if edge.source in {node.id for node in active if focus_ids.intersection(node.evidence_ids)}:
+        if edge.source in focus_node_ids:
             related_ids.add(edge.target)
-        if edge.target in {node.id for node in active if focus_ids.intersection(node.evidence_ids)}:
+        if edge.target in focus_node_ids:
             related_ids.add(edge.source)
 
     def detail_priority(node: Any) -> tuple[int, float, str]:
@@ -456,7 +461,7 @@ def _proposal_fingerprint(
     focus_id: str,
     focus_evidence: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
-    catalog: list[dict[str, Any]],
+    catalog: dict[str, list[Any]],
     frontier_summary: list[dict[str, Any]],
     llm_config: dict[str, Any],
 ) -> str:
