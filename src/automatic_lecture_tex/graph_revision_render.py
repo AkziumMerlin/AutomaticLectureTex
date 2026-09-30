@@ -80,7 +80,7 @@ def _render_node_body(node: GraphNode) -> str:
     if text and text != latex:
         pieces.append(escape_tex(text))
     if latex:
-        pieces.append("\\\\[\\n" + latex + "\\n\\\\]")
+        pieces.append("\\[\n" + latex + "\n\\]")
     return "\n\n".join(pieces)
 
 
