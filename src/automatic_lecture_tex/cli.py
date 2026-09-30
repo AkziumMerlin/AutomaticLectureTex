@@ -7,9 +7,12 @@ import logging
 import os
 import shutil
 import sys
+from pathlib import Path
 
 from .config import load_config
 from .graph_reconstruction import run_graph_reconstruction
+from .graph_revision import GraphRevisionPlan, run_revision_plan
+from .schemas import LectureState
 from .pipeline_robust import Pipeline
 
 
@@ -51,6 +54,15 @@ def _parser() -> argparse.ArgumentParser:
     reconstruct.add_argument("--top-k", type=int, default=8)
     reconstruct.add_argument("--pairwise-weight", type=float, default=1.0)
     reconstruct.add_argument("--force", action="store_true")
+
+    revise = sub.add_parser(
+        "revise-graph",
+        help="apply/search generic mutable graph patches over stored lecture evidence",
+    )
+    revise.add_argument("--config", required=True)
+    revise.add_argument("--lecture", required=True)
+    revise.add_argument("--plan", required=True)
+    revise.add_argument("--output-dir")
 
     return parser
 
@@ -124,6 +136,46 @@ def main(argv: list[str] | None = None) -> int:
         return _doctor(cfg)
 
     pipeline = Pipeline(cfg)
+    if args.command == "revise-graph":
+        lecture = next(
+            (item for item in cfg.course.lectures if item.id == args.lecture),
+            None,
+        )
+        if lecture is None:
+            available = ", ".join(item.id for item in cfg.course.lectures)
+            parser.error(f"unknown lecture {args.lecture!r}; available: {available}")
+
+        work = cfg.runtime.work_dir / lecture.id
+        state_path = next(
+            (
+                path
+                for path in (
+                    work / "lecture_state_pre_semantic_graph.json",
+                    work / "lecture_state_pre_claim_compaction.json",
+                    work / "lecture_state.json",
+                )
+                if path.exists()
+            ),
+            None,
+        )
+        if state_path is None:
+            parser.error(f"no lecture state artifact found in {work}")
+
+        plan_path = Path(args.plan).resolve()
+        state = LectureState.model_validate_json(state_path.read_text(encoding="utf-8"))
+        plan = GraphRevisionPlan.model_validate_json(
+            plan_path.read_text(encoding="utf-8")
+        )
+        output_dir = (
+            Path(args.output_dir).resolve()
+            if args.output_dir
+            else work / "graph_revision"
+        )
+        frontier = run_revision_plan(state, plan, output_dir=output_dir)
+        print(output_dir / "summary.json")
+        print(f"frontier_states={len(frontier)}")
+        return 0
+
     if args.command == "reconstruct-graph":
         lecture = next(
             (item for item in cfg.course.lectures if item.id == args.lecture),
