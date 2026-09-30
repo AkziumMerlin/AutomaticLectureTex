@@ -11,6 +11,7 @@ from automatic_lecture_tex.graph_revision import (
 )
 from automatic_lecture_tex.graph_revision_pipeline import (
     GraphRevisionProposal,
+    _compact_catalog,
     run_iterative_graph_revision,
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
@@ -352,3 +353,103 @@ def test_oversized_graph_focus_splits_sequentially_and_caches_split(
     assert cached.calls == 0
     assert cached_result.stats["split_cache_hits"] == 1
     assert cached_result.consensus.nodes["shared"].kind == "definition"
+
+
+def test_global_catalog_index_keeps_late_canonical_node_under_tight_budget() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    evidence = {
+        "early": EvidenceRecord(id="early", start=0.0, end=1.0, text="early"),
+        "late": EvidenceRecord(id="late", start=4000.0, end=4001.0, text="late"),
+    }
+    graph = GraphState(evidence=evidence)
+    for index in range(30):
+        graph.nodes[f"early_{index:02d}"] = GraphNode(
+            id=f"early_{index:02d}",
+            kind="claim",
+            title=f"Early canonical node {index}",
+            text="x" * 300,
+            evidence_ids=["early"],
+        )
+    graph.nodes["riesz_late"] = GraphNode(
+        id="riesz_late",
+        kind="theorem",
+        title="Late Riesz theorem",
+        text="late canonical mathematics",
+        evidence_ids=["late"],
+    )
+
+    catalog = _compact_catalog(
+        graph,
+        5000,
+        focus_evidence_ids=["late"],
+    )
+
+    index_ids = {row[0] for row in catalog["index"]}
+    detail_ids = {row["id"] for row in catalog["detail"]}
+    assert "riesz_late" in index_ids
+    assert "riesz_late" in detail_ids
+
+
+def test_renderer_collapses_child_topics_and_preserves_pretopic_material() -> None:
+    from automatic_lecture_tex.graph_revision import (
+        EvidenceRecord,
+        GraphState,
+    )
+
+    graph = GraphState(
+        evidence={
+            "pre": EvidenceRecord(id="pre", start=0.0, end=1.0, text="pre"),
+            "root": EvidenceRecord(id="root", start=10.0, end=11.0, text="root"),
+            "child": EvidenceRecord(id="child", start=20.0, end=21.0, text="child"),
+        }
+    )
+    graph.nodes["pre_math"] = GraphNode(
+        id="pre_math",
+        kind="definition",
+        title="Initial definition",
+        text="Material before the first topic.",
+        evidence_ids=["pre"],
+    )
+    graph.nodes["root_topic"] = GraphNode(
+        id="root_topic",
+        kind="topic",
+        title="Root topic",
+        evidence_ids=["root"],
+    )
+    graph.nodes["child_topic"] = GraphNode(
+        id="child_topic",
+        kind="topic",
+        title="Child topic",
+        evidence_ids=["child"],
+    )
+    graph.nodes["child_math"] = GraphNode(
+        id="child_math",
+        kind="theorem",
+        title="Child theorem",
+        text="Nested mathematics.",
+        evidence_ids=["child"],
+    )
+    graph.edges.extend(
+        [
+            GraphEdge(
+                source="child_topic",
+                target="root_topic",
+                relation="part_of",
+            ),
+            GraphEdge(
+                source="child_topic",
+                target="child_math",
+                relation="contains",
+            ),
+        ]
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+
+    assert [chunk.section_title for chunk in ir.chunks] == [
+        "Начало лекции",
+        "Root topic",
+    ]
+    assert [block.title for block in ir.chunks[0].blocks] == ["Initial definition"]
+    assert any(block.title == "Child theorem" for block in ir.chunks[1].blocks)
