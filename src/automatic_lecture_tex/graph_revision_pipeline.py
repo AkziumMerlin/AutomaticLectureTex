@@ -544,6 +544,7 @@ def run_iterative_graph_revision(
     catalog_chars: int,
     raw_context_chars: int,
     max_images: int,
+    max_tokens: int,
     force: bool,
 ) -> GraphRevisionRun:
     root = work / "graph_revision"
@@ -623,6 +624,7 @@ def run_iterative_graph_revision(
                     images=images or None,
                     guided_json=not bool(images),
                     split_oversized_task=True,
+                    max_tokens=max_tokens,
                     thinking=True,
                     temperature=0.6,
                     top_p=0.9,
