@@ -251,6 +251,40 @@ other jobs sharing the GPU; the included four-sequence launch profile allows the
 calls to overlap. A cache-hit rerun takes about 0.3 seconds because normalized audio, transcript,
 frames, and completed chunks are reused.
 
+## Experimental global graph reconstruction
+
+The repository also contains an ablation path that does not commit each noisy observation to one
+canonical interpretation before later stages. It reuses the pre-semantic state and retained raw
+sensor context, proposes several local hypotheses plus an explicit NULL hypothesis, scores sparse
+pairwise relations, and performs top-K global MAP inference with a max-sum beam.
+
+Run it on an existing state-pipeline work directory:
+
+```bash
+automatic-lecture-tex reconstruct-graph \
+  --config configs/functional_analysis_vk_lecture01_state_20s.yaml \
+  --lecture lecture_01 \
+  --start-seconds 0 \
+  --end-seconds 900
+```
+
+For a cheap first ablation, also set `--max-observations 40`. The command does not modify
+`lecture_ir.json` or the normal TeX path. It writes resumable artifacts under
+`work/<lecture>/graph_reconstruction/`:
+
+```text
+graph_reconstruction/
+├── candidates/
+├── edges/
+├── graph_reconstruction.json
+└── canonical_lecture_graph.json
+```
+
+`graph_reconstruction.json` contains the independent local-best assignment, top-K global
+hypotheses, approximate top-K marginal mass, and the observation IDs whose selected interpretation
+changes under global inference. This is intentionally an experimental inference backend, not a new
+repair/writer stage.
+
 ## What is deliberately not in the MVP
 
 The current MVP does not yet implement global board-state indexing, automatic crop detection, TikZ
