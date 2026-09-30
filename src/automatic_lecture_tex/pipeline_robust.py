@@ -4,6 +4,7 @@ import json
 
 from . import pipeline as _base_pipeline
 from .asr import make_asr_backend
+from .claim_compaction import STATE_CLAIM_COMPACTION_VERSION
 from .episode_synthesis_resilient import EPISODE_SYNTHESIS_CACHE_VERSION
 from .gigaam_vad import VadGigaAMBackend
 from .knowledge_pipeline import (
@@ -93,6 +94,9 @@ class Pipeline(_base_pipeline.Pipeline):
                         self.config.notes.state_repaired_episode_batch_observations
                     ),
                 }
+                payload["state_claim_compaction_version"] = (
+                    STATE_CLAIM_COMPACTION_VERSION
+                )
             return stable_hash(payload)
         return base
 
