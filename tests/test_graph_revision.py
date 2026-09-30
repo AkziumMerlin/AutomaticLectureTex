@@ -253,3 +253,40 @@ def test_consensus_preserves_invariant_node_and_marks_metadata_ambiguity() -> No
     assert consensus.nodes["riesz"].text == "f(x)=(x,y_f)"
     assert "frontier_metadata_alternatives" in consensus.nodes["riesz"].metadata
     assert any("riesz" in note for note in consensus.notes)
+
+
+def test_canonical_node_automatically_suppresses_absorbed_provisional() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="raw observation")},
+        nodes={
+            "obs::e1": GraphNode(
+                id="obs::e1",
+                kind="provisional_equation",
+                text="raw observation",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="canonicalize",
+            description="Canonicalize one observation.",
+            operations=[
+                AddNodeOp(
+                    op="add_node",
+                    node=GraphNode(
+                        id="canonical",
+                        kind="equation",
+                        text="canonical mathematics",
+                        evidence_ids=["e1"],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    assert revised.nodes["obs::e1"].status == "suppressed"
+    assert revised.nodes["canonical"].status == "active"
+    assert metrics(revised).unsupported_nodes == 0
