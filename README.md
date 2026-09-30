@@ -314,6 +314,23 @@ Outputs are written to `work/<lecture>/graph_revision/`: one JSON graph per fron
 summary of all searched states. Competing globally consistent interpretations can therefore remain
 on the frontier instead of being collapsed prematurely.
 
+The state pipeline can also use this graph as its semantic backend directly:
+
+```yaml
+notes:
+  architecture: state
+  state_semantic_backend: mutable_graph
+  state_graph_revision_rounds: 3
+  state_graph_revision_frontier_width: 3
+```
+
+In this mode extraction-level observations and saved ASR/OCR remain immutable evidence. The legacy
+sequential observation repair, repaired episode graph, hierarchy planner, and claim compaction are
+bypassed. The model iteratively proposes generic graph patches against the current whole-lecture
+catalog, the controller keeps a small frontier of globally viable states, and the semantic
+intersection of that frontier is realized directly as `LectureIR`. Graph dependencies, rather
+than observation timestamps, determine block order when the two disagree.
+
 ## What is deliberately not in the MVP
 
 The current MVP does not yet implement global board-state indexing, automatic crop detection, TikZ
