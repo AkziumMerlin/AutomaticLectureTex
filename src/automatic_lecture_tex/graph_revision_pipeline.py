@@ -284,6 +284,12 @@ Important invariants:
   organization, but do not invent a rigid outline just to satisfy formatting.
 - Do not create duplicate nodes for repeated/overlapping measurements of the same mathematical
   event.
+- Nodes whose kind starts with provisional_ are only weak initialization from raw observations.
+  Once their evidence has been absorbed into canonical nodes, merge/suppress them or explicitly
+  mark that evidence as context/repetition; do not leave a second canonical copy.
+- Maintain a small coherent set of topic/section nodes with contains/part_of relations when the
+  lecture has clear thematic structure. These nodes are for organization only and must follow the
+  mathematics rather than imposing arbitrary fixed-duration sections.
 - A patch may resolve violations diagnosed in this same response by their exact ids.
 - Patch ids and new node ids must be globally descriptive and stable; reuse existing ids when
   revising existing mathematics.
