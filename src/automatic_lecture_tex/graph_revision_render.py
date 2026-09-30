@@ -339,7 +339,13 @@ def graph_state_to_ir(
                 end=end,
                 section_title=section_title.replace("$", ""),
                 blocks=blocks,
-                unresolved=list(dict.fromkeys(unresolved_global if index == len(section_nodes) - 1 else [])),
+                unresolved=list(
+                    dict.fromkeys(
+                        unresolved_global
+                        if index == len(section_nodes) - 1
+                        else []
+                    )
+                ),
             )
         )
 
