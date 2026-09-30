@@ -9,6 +9,7 @@ import shutil
 import sys
 
 from .config import load_config
+from .graph_reconstruction import run_graph_reconstruction
 from .pipeline_robust import Pipeline
 
 
@@ -30,6 +31,26 @@ def _parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="check external executables")
     doctor.add_argument("--config", required=True)
+
+    reconstruct = sub.add_parser(
+        "reconstruct-graph",
+        help="experimental global reconstruction from noisy lecture observations",
+    )
+    reconstruct.add_argument("--config", required=True)
+    reconstruct.add_argument("--lecture", required=True)
+    reconstruct.add_argument("--start-seconds", type=float)
+    reconstruct.add_argument("--end-seconds", type=float)
+    reconstruct.add_argument("--max-observations", type=int)
+    reconstruct.add_argument("--candidate-count", type=int, default=4)
+    reconstruct.add_argument("--candidate-batch-size", type=int, default=6)
+    reconstruct.add_argument("--edge-batch-size", type=int, default=5)
+    reconstruct.add_argument("--neighbor-span", type=int, default=2)
+    reconstruct.add_argument("--max-gap-seconds", type=float, default=90.0)
+    reconstruct.add_argument("--symbol-gap-seconds", type=float, default=240.0)
+    reconstruct.add_argument("--beam-width", type=int, default=256)
+    reconstruct.add_argument("--top-k", type=int, default=8)
+    reconstruct.add_argument("--pairwise-weight", type=float, default=1.0)
+    reconstruct.add_argument("--force", action="store_true")
 
     return parser
 
@@ -102,6 +123,35 @@ def main(argv: list[str] | None = None) -> int:
         return _doctor(cfg)
 
     pipeline = Pipeline(cfg)
+    if args.command == "reconstruct-graph":
+        lecture = next(
+            (item for item in cfg.course.lectures if item.id == args.lecture),
+            None,
+        )
+        if lecture is None:
+            available = ", ".join(item.id for item in cfg.course.lectures)
+            parser.error(f"unknown lecture {args.lecture!r}; available: {available}")
+        artifact = run_graph_reconstruction(
+            config=cfg,
+            lecture=lecture,
+            llm=pipeline.llm,
+            start_seconds=args.start_seconds,
+            end_seconds=args.end_seconds,
+            max_observations=args.max_observations,
+            candidate_count=args.candidate_count,
+            candidate_batch_size=args.candidate_batch_size,
+            edge_batch_size=args.edge_batch_size,
+            neighbor_span=args.neighbor_span,
+            max_gap_seconds=args.max_gap_seconds,
+            symbol_gap_seconds=args.symbol_gap_seconds,
+            beam_width=args.beam_width,
+            top_k=args.top_k,
+            pairwise_weight=args.pairwise_weight,
+            force=args.force,
+        )
+        print(artifact)
+        return 0
+
     if args.command == "review":
         reports = pipeline.review(args.lecture)
         for report in reports:
