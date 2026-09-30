@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class TranscriptWord(BaseModel):
@@ -347,6 +348,46 @@ class KnowledgeClaim(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     supersedes: list[str] = Field(default_factory=list)
     introduced_at: float = 0.0
+
+
+class CompactedProseClaim(BaseModel):
+    """Canonical semantic prose derived from one or more repaired claims."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["prose"]
+    kind: ObservationKind
+    content: str = Field(min_length=1)
+    source_claim_ids: list[str] = Field(min_length=1)
+
+
+class CompactedFormulaClaim(BaseModel):
+    """Select one existing repaired formula without regenerating its LaTeX."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["formula"]
+    source_claim_id: str = Field(min_length=1)
+
+
+CompactedClaimItem = Annotated[
+    CompactedProseClaim | CompactedFormulaClaim,
+    Field(discriminator="type"),
+]
+
+
+class EpisodeClaimCompaction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str = Field(min_length=1)
+    items: list[CompactedClaimItem] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class ClaimCompactionBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episodes: list[EpisodeClaimCompaction] = Field(default_factory=list)
 
 
 class SymbolRecord(BaseModel):
