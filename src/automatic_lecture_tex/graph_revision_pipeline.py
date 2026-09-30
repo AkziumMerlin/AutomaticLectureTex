@@ -20,6 +20,7 @@ from .graph_revision import (
     seed_observation_graph,
 )
 from .knowledge import KnowledgeOrchestrator
+from .llm import StructuredTaskTooLargeError
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
@@ -393,6 +394,16 @@ def _load_cached(path: Path, fingerprint: str) -> GraphRevisionProposal | None:
         return None
 
 
+def _load_cached_split(path: Path, fingerprint: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload.get("fingerprint") == fingerprint and bool(payload.get("split"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def _diagnosis_patch(proposal: GraphRevisionProposal) -> GraphPatch | None:
     if not proposal.diagnosed_violations:
         return None
@@ -530,6 +541,229 @@ def _expand_frontier(
     return _prune_frontier(expanded, width)
 
 
+def _process_focus_resilient(
+    orchestrator: KnowledgeOrchestrator,
+    *,
+    frontier: list[GraphState],
+    evidence_ids: list[str],
+    focus_id: str,
+    raw_windows: list[dict[str, Any]],
+    proposal_root: Path,
+    llm_config: dict[str, Any],
+    frontier_width: int,
+    catalog_chars: int,
+    raw_context_chars: int,
+    max_images: int,
+    max_tokens: int,
+    force: bool,
+    stats: dict[str, Any],
+    split_depth: int = 0,
+) -> tuple[list[GraphState], bool]:
+    """Process one focus, recursively splitting only when the structured input cannot fit.
+
+    Child focuses are applied sequentially. The second child is therefore proposed against the
+    frontier already revised by the first child rather than against a stale pre-split graph.
+    """
+
+    representative = graph_consensus(frontier)
+    focus = _focus_evidence(representative, evidence_ids)
+    raw_context = _focus_raw_windows(
+        focus,
+        raw_windows,
+        max_chars=raw_context_chars,
+    )
+    catalog = _compact_catalog(representative, catalog_chars)
+    frontier_summary = _frontier_summary(
+        frontier,
+        representative,
+    )
+    fingerprint = _proposal_fingerprint(
+        state=representative,
+        focus_id=focus_id,
+        focus_evidence=focus,
+        raw_windows=raw_context,
+        catalog=catalog,
+        frontier_summary=frontier_summary,
+        llm_config=llm_config,
+    )
+    path = proposal_root / f"{focus_id}.json"
+
+    if not force and _load_cached_split(path, fingerprint):
+        stats["split_cache_hits"] += 1
+        midpoint = len(evidence_ids) // 2
+        if midpoint <= 0:
+            raise StructuredTaskTooLargeError(
+                f"{focus_id} cached split cannot divide a single-observation focus"
+            )
+        left_ids = evidence_ids[:midpoint]
+        right_ids = evidence_ids[midpoint:]
+        frontier, left_changed = _process_focus_resilient(
+            orchestrator,
+            frontier=frontier,
+            evidence_ids=left_ids,
+            focus_id=f"{focus_id}__a",
+            raw_windows=raw_windows,
+            proposal_root=proposal_root,
+            llm_config=llm_config,
+            frontier_width=frontier_width,
+            catalog_chars=catalog_chars,
+            raw_context_chars=raw_context_chars,
+            max_images=max_images,
+            max_tokens=max_tokens,
+            force=force,
+            stats=stats,
+            split_depth=split_depth + 1,
+        )
+        frontier, right_changed = _process_focus_resilient(
+            orchestrator,
+            frontier=frontier,
+            evidence_ids=right_ids,
+            focus_id=f"{focus_id}__b",
+            raw_windows=raw_windows,
+            proposal_root=proposal_root,
+            llm_config=llm_config,
+            frontier_width=frontier_width,
+            catalog_chars=catalog_chars,
+            raw_context_chars=raw_context_chars,
+            max_images=max_images,
+            max_tokens=max_tokens,
+            force=force,
+            stats=stats,
+            split_depth=split_depth + 1,
+        )
+        return frontier, left_changed or right_changed
+
+    proposal = None if force else _load_cached(path, fingerprint)
+    if proposal is not None:
+        proposal.focus_id = focus_id
+        stats["cache_hits"] += 1
+    else:
+        images = _focus_images(
+            focus,
+            raw_windows,
+            max_images=max_images,
+        )
+        stats["focus_calls"] += 1
+        try:
+            proposal = orchestrator._structured(
+                _proposal_prompt(
+                    focus_id=focus_id,
+                    focus_evidence=focus,
+                    raw_windows=raw_context,
+                    catalog=catalog,
+                    violations=[
+                        item.model_dump(mode="json")
+                        for item in representative.violations.values()
+                    ],
+                    graph_notes=representative.notes,
+                    frontier_summary=frontier_summary,
+                    output_language=orchestrator.output_language,
+                ),
+                GraphRevisionProposal,
+                operation="graph_revision_proposal",
+                images=images or None,
+                guided_json=not bool(images),
+                split_oversized_task=True,
+                max_tokens=max_tokens,
+                thinking=True,
+                temperature=0.6,
+                top_p=0.9,
+            )
+        except StructuredTaskTooLargeError as exc:
+            if len(evidence_ids) <= 1:
+                raise StructuredTaskTooLargeError(
+                    f"{focus_id} still cannot fit after recursive focus splitting"
+                ) from exc
+
+            midpoint = len(evidence_ids) // 2
+            left_ids = evidence_ids[:midpoint]
+            right_ids = evidence_ids[midpoint:]
+            stats["split_focuses"] += 1
+            stats["max_split_depth"] = max(
+                int(stats["max_split_depth"]),
+                split_depth + 1,
+            )
+            atomic_json_dump(
+                path,
+                {
+                    "fingerprint": fingerprint,
+                    "focus_evidence_ids": evidence_ids,
+                    "split": {
+                        "reason": str(exc),
+                        "children": [
+                            f"{focus_id}__a",
+                            f"{focus_id}__b",
+                        ],
+                    },
+                },
+            )
+
+            frontier, left_changed = _process_focus_resilient(
+                orchestrator,
+                frontier=frontier,
+                evidence_ids=left_ids,
+                focus_id=f"{focus_id}__a",
+                raw_windows=raw_windows,
+                proposal_root=proposal_root,
+                llm_config=llm_config,
+                frontier_width=frontier_width,
+                catalog_chars=catalog_chars,
+                raw_context_chars=raw_context_chars,
+                max_images=max_images,
+                max_tokens=max_tokens,
+                force=force,
+                stats=stats,
+                split_depth=split_depth + 1,
+            )
+            frontier, right_changed = _process_focus_resilient(
+                orchestrator,
+                frontier=frontier,
+                evidence_ids=right_ids,
+                focus_id=f"{focus_id}__b",
+                raw_windows=raw_windows,
+                proposal_root=proposal_root,
+                llm_config=llm_config,
+                frontier_width=frontier_width,
+                catalog_chars=catalog_chars,
+                raw_context_chars=raw_context_chars,
+                max_images=max_images,
+                max_tokens=max_tokens,
+                force=force,
+                stats=stats,
+                split_depth=split_depth + 1,
+            )
+            return frontier, left_changed or right_changed
+
+        proposal.focus_id = focus_id
+        atomic_json_dump(
+            path,
+            {
+                "fingerprint": fingerprint,
+                "focus_evidence_ids": evidence_ids,
+                "proposal": proposal.model_dump(mode="json"),
+            },
+        )
+
+    before = {_state_signature(state) for state in frontier}
+    if (
+        proposal.stable
+        and not proposal.diagnosed_violations
+        and proposal.common_patch is None
+        and not proposal.alternatives
+    ):
+        stats["stable_focuses"] += 1
+        return frontier, False
+
+    frontier = _expand_frontier(
+        frontier,
+        proposal,
+        width=frontier_width,
+    )
+    after = {_state_signature(state) for state in frontier}
+    stats["frontier_sizes"].append(len(frontier))
+    return frontier, before != after
+
+
 def run_iterative_graph_revision(
     orchestrator: KnowledgeOrchestrator,
     *,
@@ -564,6 +798,9 @@ def run_iterative_graph_revision(
         "focus_calls": 0,
         "cache_hits": 0,
         "stable_focuses": 0,
+        "split_focuses": 0,
+        "split_cache_hits": 0,
+        "max_split_depth": 0,
         "frontier_sizes": [],
     }
 
@@ -572,91 +809,24 @@ def run_iterative_graph_revision(
         ordered_batches = batches if round_index % 2 == 0 else list(reversed(batches))
 
         for batch_index, evidence_ids in enumerate(ordered_batches):
-            representative = graph_consensus(frontier)
-            focus = _focus_evidence(representative, evidence_ids)
-            raw_context = _focus_raw_windows(
-                focus,
-                raw_windows,
-                max_chars=raw_context_chars,
-            )
-            catalog = _compact_catalog(representative, catalog_chars)
             focus_id = f"round_{round_index:02d}_focus_{batch_index:03d}"
-            frontier_summary = _frontier_summary(
-                frontier,
-                representative,
-            )
-            fingerprint = _proposal_fingerprint(
-                state=representative,
+            frontier, focus_changed = _process_focus_resilient(
+                orchestrator,
+                frontier=frontier,
+                evidence_ids=evidence_ids,
                 focus_id=focus_id,
-                focus_evidence=focus,
-                raw_windows=raw_context,
-                catalog=catalog,
-                frontier_summary=frontier_summary,
+                raw_windows=raw_windows,
+                proposal_root=proposal_root,
                 llm_config=llm_config,
+                frontier_width=frontier_width,
+                catalog_chars=catalog_chars,
+                raw_context_chars=raw_context_chars,
+                max_images=max_images,
+                max_tokens=max_tokens,
+                force=force,
+                stats=stats,
             )
-            path = proposal_root / f"{focus_id}.json"
-            proposal = None if force else _load_cached(path, fingerprint)
-            if proposal is not None:
-                proposal.focus_id = focus_id
-                stats["cache_hits"] += 1
-            else:
-                images = _focus_images(
-                    focus,
-                    raw_windows,
-                    max_images=max_images,
-                )
-                proposal = orchestrator._structured(
-                    _proposal_prompt(
-                        focus_id=focus_id,
-                        focus_evidence=focus,
-                        raw_windows=raw_context,
-                        catalog=catalog,
-                        violations=[
-                            item.model_dump(mode="json")
-                            for item in representative.violations.values()
-                        ],
-                        graph_notes=representative.notes,
-                        frontier_summary=frontier_summary,
-                        output_language=orchestrator.output_language,
-                    ),
-                    GraphRevisionProposal,
-                    operation="graph_revision_proposal",
-                    images=images or None,
-                    guided_json=not bool(images),
-                    split_oversized_task=True,
-                    max_tokens=max_tokens,
-                    thinking=True,
-                    temperature=0.6,
-                    top_p=0.9,
-                )
-                proposal.focus_id = focus_id
-                stats["focus_calls"] += 1
-                atomic_json_dump(
-                    path,
-                    {
-                        "fingerprint": fingerprint,
-                        "focus_evidence_ids": evidence_ids,
-                        "proposal": proposal.model_dump(mode="json"),
-                    },
-                )
-
-            before = {_state_signature(state) for state in frontier}
-            if (
-                proposal.stable
-                and not proposal.diagnosed_violations
-                and proposal.common_patch is None
-                and not proposal.alternatives
-            ):
-                stats["stable_focuses"] += 1
-                continue
-            frontier = _expand_frontier(
-                frontier,
-                proposal,
-                width=frontier_width,
-            )
-            after = {_state_signature(state) for state in frontier}
-            changed = changed or before != after
-            stats["frontier_sizes"].append(len(frontier))
+            changed = changed or focus_changed
 
         stats["rounds_completed"] = round_index + 1
         if not changed:

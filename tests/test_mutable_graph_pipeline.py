@@ -14,6 +14,7 @@ from automatic_lecture_tex.graph_revision_pipeline import (
     run_iterative_graph_revision,
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
+from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.schemas import (
     LectureObservation,
     LectureState,
@@ -247,3 +248,107 @@ def test_renderer_dependencies_override_observation_timestamps() -> None:
         "g",
         "Complex linearity",
     ]
+
+
+class SplittingOrchestrator:
+    output_language = "ru"
+
+    def __init__(self, *, allow_calls: bool = True) -> None:
+        self.calls = 0
+        self.allow_calls = allow_calls
+
+    def _structured(self, prompt, schema, **kwargs):
+        del prompt, schema, kwargs
+        if not self.allow_calls:
+            raise AssertionError("cached split run should not call the model")
+        self.calls += 1
+        if self.calls == 1:
+            raise StructuredTaskTooLargeError("parent focus input is too large")
+        if self.calls == 2:
+            return GraphRevisionProposal(
+                focus_id="child-left",
+                common_patch=GraphPatch(
+                    id="left_adds_shared_node",
+                    description="Left child creates a canonical node.",
+                    operations=[
+                        AddNodeOp(
+                            op="add_node",
+                            node=GraphNode(
+                                id="shared",
+                                kind="claim",
+                                text="Initial interpretation.",
+                                evidence_ids=["o1"],
+                            ),
+                        ),
+                    ],
+                ),
+            )
+        return GraphRevisionProposal(
+            focus_id="child-right",
+            common_patch=GraphPatch(
+                id="right_revises_shared_node",
+                description="Right child sees and revises the node from the left child.",
+                operations=[
+                    RetypeNodeOp(
+                        op="retype_node",
+                        node_id="shared",
+                        kind="definition",
+                    ),
+                    ReplaceNodeOp(
+                        op="replace_node",
+                        node_id="shared",
+                        text="Revised using later evidence.",
+                    ),
+                ],
+            ),
+        )
+
+
+def test_oversized_graph_focus_splits_sequentially_and_caches_split(
+    tmp_path: Path,
+) -> None:
+    first = SplittingOrchestrator()
+    result = run_iterative_graph_revision(
+        first,
+        lecture_state=_lecture_state(),
+        raw_windows=[],
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        rounds=1,
+        batch_observations=3,
+        overlap_observations=0,
+        frontier_width=2,
+        catalog_chars=10000,
+        raw_context_chars=10000,
+        max_images=0,
+        max_tokens=4096,
+        force=False,
+    )
+
+    assert first.calls == 3
+    assert result.stats["split_focuses"] == 1
+    assert result.stats["max_split_depth"] == 1
+    assert result.consensus.nodes["shared"].kind == "definition"
+    assert result.consensus.nodes["shared"].text == "Revised using later evidence."
+
+    cached = SplittingOrchestrator(allow_calls=False)
+    cached_result = run_iterative_graph_revision(
+        cached,
+        lecture_state=_lecture_state(),
+        raw_windows=[],
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        rounds=1,
+        batch_observations=3,
+        overlap_observations=0,
+        frontier_width=2,
+        catalog_chars=10000,
+        raw_context_chars=10000,
+        max_images=0,
+        max_tokens=4096,
+        force=False,
+    )
+
+    assert cached.calls == 0
+    assert cached_result.stats["split_cache_hits"] == 1
+    assert cached_result.consensus.nodes["shared"].kind == "definition"
