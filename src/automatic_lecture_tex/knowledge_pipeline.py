@@ -13,6 +13,9 @@ from pydantic import ValidationError
 
 from .chunking import chunk_transcript
 from .claim_compaction import compact_repaired_claims
+from .graph_revision import metrics as graph_revision_metrics
+from .graph_revision_pipeline import run_iterative_graph_revision
+from .graph_revision_render import graph_state_to_ir
 from .generated_notes import (
     GeneratedObservationStatePatch,
     GeneratedSemanticTextCleanupBatch,
@@ -93,6 +96,14 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "episode_symbol_context_limit",
     "state_section_max_evidence_chars",
     "state_section_assembly",
+    "state_graph_revision_max_images",
+    "state_graph_revision_raw_context_chars",
+    "state_graph_revision_catalog_chars",
+    "state_graph_revision_frontier_width",
+    "state_graph_revision_overlap_observations",
+    "state_graph_revision_batch_observations",
+    "state_graph_revision_rounds",
+    "state_semantic_backend",
     "state_section_raw_context_seconds",
     "state_section_raw_evidence_chars",
     "state_section_writer_thinking",
@@ -2777,6 +2788,97 @@ def run_knowledge_pipeline(
     state_claim_compaction_unresolved: list[str] = []
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
+
+    if state_mode and pipeline.config.notes.state_semantic_backend == "mutable_graph":
+        # The mutable graph backend consumes the extraction-level observations directly. The
+        # legacy sequential repair, repaired episode graph, hierarchy and claim compaction are
+        # intentionally bypassed: graph revision is the semantic inference step.
+        source_state = make_lecture_state(kb)
+        atomic_json_dump(
+            work / "lecture_state_pre_graph_revision.json",
+            source_state.model_dump(mode="json"),
+        )
+        raw_window_index = _load_state_raw_window_index(work)
+        graph_started = time.perf_counter()
+        graph_run = run_iterative_graph_revision(
+            orchestrator,
+            lecture_state=source_state,
+            raw_windows=raw_window_index,
+            work=work,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            rounds=pipeline.config.notes.state_graph_revision_rounds,
+            batch_observations=(
+                pipeline.config.notes.state_graph_revision_batch_observations
+            ),
+            overlap_observations=(
+                pipeline.config.notes.state_graph_revision_overlap_observations
+            ),
+            frontier_width=pipeline.config.notes.state_graph_revision_frontier_width,
+            catalog_chars=pipeline.config.notes.state_graph_revision_catalog_chars,
+            raw_context_chars=(
+                pipeline.config.notes.state_graph_revision_raw_context_chars
+            ),
+            max_images=pipeline.config.notes.state_graph_revision_max_images,
+            force=force,
+        )
+        graph_seconds = time.perf_counter() - graph_started
+        consensus = graph_run.consensus
+        atomic_json_dump(
+            work / "lecture_graph.json",
+            consensus.model_dump(mode="json"),
+        )
+        ir = graph_state_to_ir(
+            consensus,
+            lecture_id=lecture.id,
+            title=lecture.title or lecture.id,
+        )
+
+        pipeline._save_notation_registry(notation)
+        atomic_json_dump(ir_path, ir.model_dump(mode="json"))
+        manifest["ir_fingerprint"] = pipeline._ir_fingerprint(transcript, notation)
+        atomic_json_dump(manifest_path, manifest)
+
+        unique_unresolved = {
+            item
+            for notes in ir.chunks
+            for item in notes.unresolved
+        }
+        usage = pipeline.llm.usage_snapshot()
+        graph_metric = graph_revision_metrics(consensus)
+        atomic_json_dump(
+            work / "run_metrics.json",
+            {
+                "lecture_id": lecture.id,
+                "architecture": "state_mutable_graph",
+                "media_seconds": round(media_seconds, 3),
+                "asr_seconds": round(asr_seconds, 3),
+                "notes_seconds": round(time.perf_counter() - notes_started, 3),
+                "vision_seconds": round(vision_seconds, 3),
+                "knowledge_extract_seconds": round(extract_seconds, 3),
+                "episode_track_seconds": round(episode_track_seconds, 3),
+                "graph_revision_seconds": round(graph_seconds, 3),
+                "graph_revision": {
+                    **graph_run.stats,
+                    "frontier_states": len(graph_run.frontier),
+                    "consensus_metrics": graph_metric.model_dump(mode="json"),
+                },
+                "total_seconds": round(time.perf_counter() - run_started, 3),
+                "windows_total": len(chunks),
+                "windows_processed": processed_windows,
+                "window_cache_hits": cache_hits,
+                "observations_total": len(kb.observations),
+                "graph_nodes_total": len(consensus.nodes),
+                "graph_active_nodes": len(consensus.active_nodes()),
+                "graph_edges_total": len(consensus.edges),
+                "topic_sections_total": len(ir.chunks),
+                "sections_total": len(ir.chunks),
+                "visual_requests_processed": visual_requests_processed,
+                "visual_evidence_successful": visual_evidence_successful,
+                "unresolved_total": len(unique_unresolved),
+                "llm_usage": LectureModelClient.combine_usage([usage]),
+            },
+        )
+        return ir
 
     if state_mode:
         # Preserve the extraction/episode-tracking state for audit, then repair it exactly once.

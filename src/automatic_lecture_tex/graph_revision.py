@@ -263,10 +263,184 @@ def graph_state_from_lecture_state(state: LectureState) -> GraphState:
             confidence=observation.confidence,
             source_status=str(observation.source_status),
             evidence_refs=list(observation.evidence_refs),
+            window_id=observation.window_id,
+            window_ids=list(observation.window_ids),
+            episode_id=observation.episode_id,
         )
         for observation in state.observations
     }
     return GraphState(evidence=evidence)
+
+
+def seed_observation_graph(state: LectureState) -> GraphState:
+    """Create a deliberately weak graph used only as a search starting point.
+
+    One provisional node per observation is an initialization convenience, never an invariant:
+    later patches may merge, split, suppress, retype or replace these nodes freely.
+    """
+
+    graph = graph_state_from_lecture_state(state)
+    for observation in state.observations:
+        graph.nodes[f"obs::{observation.id}"] = GraphNode(
+            id=f"obs::{observation.id}",
+            kind=f"provisional_{observation.kind}",
+            text=observation.text,
+            latex=observation.latex,
+            evidence_ids=[observation.id],
+            metadata={
+                "provisional": True,
+                "start": observation.start,
+                "end": observation.end,
+            },
+        )
+    return graph
+
+
+def graph_consensus(states: list[GraphState]) -> GraphState:
+    """Keep the semantic intersection of equally viable frontier states.
+
+    Divergent nodes are not arbitrarily selected for final notes. Their evidence is marked as
+    frontier-ambiguous and a compact note records the competing readings.
+    """
+
+    if not states:
+        raise ValueError("graph_consensus requires at least one state")
+    if len(states) == 1:
+        return states[0].clone()
+
+    result = GraphState(evidence=states[0].evidence)
+    node_ids = set.intersection(*(set(state.nodes) for state in states))
+
+    def semantic_node(node: GraphNode) -> tuple:
+        return (
+            node.kind,
+            node.title,
+            node.text,
+            node.latex,
+            tuple(sorted(node.derived_from)),
+            tuple(sorted(node.aliases)),
+            node.status,
+            node.alternative_group,
+        )
+
+    ambiguous_evidence: set[str] = set()
+    for node_id in sorted(node_ids):
+        nodes = [state.nodes[node_id] for state in states]
+        if len({semantic_node(node) for node in nodes}) != 1:
+            variants = [
+                {
+                    "kind": node.kind,
+                    "title": node.title,
+                    "text": node.text,
+                    "latex": node.latex,
+                }
+                for node in nodes
+            ]
+            result.notes.append(
+                f"Frontier ambiguity for {node_id}: {variants}"
+            )
+            for node in nodes:
+                ambiguous_evidence.update(node.evidence_ids)
+            continue
+
+        node = nodes[0].model_copy(deep=True)
+        node.evidence_ids = _dedupe(
+            [evidence_id for item in nodes for evidence_id in item.evidence_ids]
+        )
+
+        metadata_keys = set.intersection(
+            *(set(item.metadata) for item in nodes)
+        ) if nodes else set()
+        common_metadata = {
+            key: nodes[0].metadata[key]
+            for key in metadata_keys
+            if all(item.metadata[key] == nodes[0].metadata[key] for item in nodes[1:])
+        }
+        metadata_variants = [
+            item.metadata
+            for item in nodes
+            if item.metadata != common_metadata
+        ]
+        node.metadata = dict(common_metadata)
+        if metadata_variants:
+            node.metadata["frontier_metadata_alternatives"] = metadata_variants
+            result.notes.append(
+                f"Frontier metadata ambiguity for {node_id}: {metadata_variants}"
+            )
+        result.nodes[node_id] = node
+
+    common_edges = None
+    edge_payload: dict[tuple[str, str, str], GraphEdge] = {}
+    for state in states:
+        keys = {
+            (edge.source, edge.target, edge.relation)
+            for edge in state.edges
+            if edge.source in result.nodes and edge.target in result.nodes
+        }
+        common_edges = keys if common_edges is None else common_edges.intersection(keys)
+        for edge in state.edges:
+            edge_payload[(edge.source, edge.target, edge.relation)] = edge
+    for key in sorted(common_edges or set()):
+        result.edges.append(edge_payload[key].model_copy(deep=True))
+
+    for evidence_id in result.evidence:
+        dispositions = {
+            state.evidence_disposition.get(evidence_id)
+            for state in states
+        }
+        if len(dispositions) == 1:
+            value = next(iter(dispositions))
+            if value is not None:
+                result.evidence_disposition[evidence_id] = value
+    for evidence_id in ambiguous_evidence:
+        result.evidence_disposition[evidence_id] = "frontier_ambiguous"
+
+    # A node can be semantically identical across branches while depending on a node that is
+    # branch-specific and therefore absent from the consensus. Remove such dangling conclusions
+    # instead of selecting one hidden premise.
+    removed = True
+    while removed:
+        removed = False
+        for node_id, node in list(result.nodes.items()):
+            missing = [
+                dependency
+                for dependency in node.derived_from
+                if dependency not in result.nodes
+            ]
+            if not missing:
+                continue
+            ambiguous_evidence.update(node.evidence_ids)
+            result.notes.append(
+                f"Consensus omitted {node_id} because dependencies are frontier-specific: "
+                + ", ".join(missing)
+            )
+            del result.nodes[node_id]
+            removed = True
+
+    result.edges = [
+        edge
+        for edge in result.edges
+        if edge.source in result.nodes and edge.target in result.nodes
+    ]
+
+    common_violations = set.intersection(
+        *(set(state.violations) for state in states)
+    )
+    for violation_id in common_violations:
+        values = [state.violations[violation_id] for state in states]
+        if len({item.model_dump_json() for item in values}) == 1:
+            result.violations[violation_id] = values[0].model_copy(deep=True)
+
+    result.applied_patches = _dedupe(
+        [
+            patch_id
+            for state in states
+            for patch_id in state.applied_patches
+            if all(patch_id in other.applied_patches for other in states)
+        ]
+    )
+    _validate_state(result)
+    return result
 
 
 def _dedupe(seq: list[str]) -> list[str]:
@@ -292,7 +466,9 @@ def metrics(state: GraphState) -> StateMetrics:
     signatures: dict[tuple[str, str, str], int] = {}
     active = state.active_nodes()
     for node in active:
-        if not node.evidence_ids and not node.derived_from:
+        if node.kind.startswith("provisional_"):
+            unsupported += 1
+        elif not node.evidence_ids and not node.derived_from:
             unsupported += 1
         signature = _node_signature(node)
         if signature[1] or signature[2]:
