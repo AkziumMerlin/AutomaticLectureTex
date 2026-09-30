@@ -618,8 +618,6 @@ def build_sparse_edges(
                 continue
             pair = (left.observation_id, right.observation_id)
             edges[pair].add("temporal")
-            if left.episode_id and left.episode_id == right.episode_id:
-                edges[pair].add("same_initial_episode")
 
         # Add at most two non-local symbol links per node. Prefer rare symbols, then short gaps.
         nonlocal_candidates: list[tuple[float, float, int]] = []
