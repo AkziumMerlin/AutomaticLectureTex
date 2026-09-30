@@ -438,7 +438,9 @@ def metrics(state: GraphState) -> StateMetrics:
     signatures: dict[tuple[str, str, str], int] = {}
     active = state.active_nodes()
     for node in active:
-        if not node.evidence_ids and not node.derived_from:
+        if node.kind.startswith("provisional_"):
+            unsupported += 1
+        elif not node.evidence_ids and not node.derived_from:
             unsupported += 1
         signature = _node_signature(node)
         if signature[1] or signature[2]:
