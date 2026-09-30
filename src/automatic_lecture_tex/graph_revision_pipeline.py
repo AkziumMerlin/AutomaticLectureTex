@@ -360,6 +360,7 @@ def _proposal_fingerprint(
     focus_evidence: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
     catalog: list[dict[str, Any]],
+    frontier_summary: list[dict[str, Any]],
     llm_config: dict[str, Any],
 ) -> str:
     return stable_hash(
@@ -370,6 +371,7 @@ def _proposal_fingerprint(
             "focus_evidence": focus_evidence,
             "raw_windows": raw_windows,
             "catalog": catalog,
+            "frontier_summary": frontier_summary,
             "violations": [
                 item.model_dump(mode="json")
                 for item in state.violations.values()
@@ -578,12 +580,17 @@ def run_iterative_graph_revision(
             )
             catalog = _compact_catalog(representative, catalog_chars)
             focus_id = f"round_{round_index:02d}_focus_{batch_index:03d}"
+            frontier_summary = _frontier_summary(
+                frontier,
+                representative,
+            )
             fingerprint = _proposal_fingerprint(
                 state=representative,
                 focus_id=focus_id,
                 focus_evidence=focus,
                 raw_windows=raw_context,
                 catalog=catalog,
+                frontier_summary=frontier_summary,
                 llm_config=llm_config,
             )
             path = proposal_root / f"{focus_id}.json"
@@ -608,10 +615,7 @@ def run_iterative_graph_revision(
                             for item in representative.violations.values()
                         ],
                         graph_notes=representative.notes,
-                        frontier_summary=_frontier_summary(
-                            frontier,
-                            representative,
-                        ),
+                        frontier_summary=frontier_summary,
                         output_language=orchestrator.output_language,
                     ),
                     GraphRevisionProposal,
