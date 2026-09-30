@@ -395,6 +395,34 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
     for evidence_id in ambiguous_evidence:
         result.evidence_disposition[evidence_id] = "frontier_ambiguous"
 
+    # A node can be semantically identical across branches while depending on a node that is
+    # branch-specific and therefore absent from the consensus. Remove such dangling conclusions
+    # instead of selecting one hidden premise.
+    removed = True
+    while removed:
+        removed = False
+        for node_id, node in list(result.nodes.items()):
+            missing = [
+                dependency
+                for dependency in node.derived_from
+                if dependency not in result.nodes
+            ]
+            if not missing:
+                continue
+            ambiguous_evidence.update(node.evidence_ids)
+            result.notes.append(
+                f"Consensus omitted {node_id} because dependencies are frontier-specific: "
+                + ", ".join(missing)
+            )
+            del result.nodes[node_id]
+            removed = True
+
+    result.edges = [
+        edge
+        for edge in result.edges
+        if edge.source in result.nodes and edge.target in result.nodes
+    ]
+
     common_violations = set.intersection(
         *(set(state.violations) for state in states)
     )
