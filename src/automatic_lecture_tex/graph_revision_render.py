@@ -157,6 +157,78 @@ def _section_assignment(
     return topics, grouped
 
 
+def _order_nodes(state: GraphState, nodes: list[GraphNode]) -> list[GraphNode]:
+    """Topologically order canonical mathematics; timestamps only break unrelated ties."""
+
+    by_id = {node.id: node for node in nodes}
+    precedence: set[tuple[str, str]] = set()
+
+    for node in nodes:
+        for dependency in node.derived_from:
+            if dependency in by_id and dependency != node.id:
+                precedence.add((dependency, node.id))
+
+    nonordering_relations = {
+        "contains",
+        "contains_node",
+        "part_of",
+        "in_section",
+        "in_topic",
+        "has_part",
+        "alias",
+        "same_object",
+        "equivalent",
+    }
+    for edge in state.edges:
+        if edge.source not in by_id or edge.target not in by_id:
+            continue
+        if _kind(edge.relation) in nonordering_relations:
+            continue
+        if edge.source != edge.target:
+            precedence.add((edge.source, edge.target))
+
+    outgoing: dict[str, set[str]] = defaultdict(set)
+    indegree = {node.id: 0 for node in nodes}
+    for source, target in precedence:
+        if target in outgoing[source]:
+            continue
+        outgoing[source].add(target)
+        indegree[target] += 1
+
+    def key(node_id: str) -> tuple[float, float, str]:
+        node = by_id[node_id]
+        raw_order = node.metadata.get("order", 0.0)
+        try:
+            order = float(raw_order)
+        except (TypeError, ValueError):
+            order = 0.0
+        return (_node_times(state, node)[0], order, node_id)
+
+    ready = sorted(
+        [node_id for node_id, value in indegree.items() if value == 0],
+        key=key,
+    )
+    ordered: list[str] = []
+    while ready:
+        node_id = ready.pop(0)
+        ordered.append(node_id)
+        for target in sorted(outgoing.get(node_id, set()), key=key):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+                ready.sort(key=key)
+
+    if len(ordered) != len(nodes):
+        # A relation cycle should not make the document disappear. Preserve the acyclic prefix and
+        # append the cyclic remainder in evidence order; the graph violation remains visible.
+        remainder = sorted(
+            [node_id for node_id in by_id if node_id not in ordered],
+            key=key,
+        )
+        ordered.extend(remainder)
+    return [by_id[node_id] for node_id in ordered]
+
+
 def graph_state_to_ir(
     state: GraphState,
     *,
@@ -167,13 +239,7 @@ def graph_state_to_ir(
         node for node in state.nodes.values()
         if _is_renderable(node)
     ]
-    renderable.sort(
-        key=lambda node: (
-            float(node.metadata.get("order", 0.0)),
-            _node_times(state, node)[0],
-            node.id,
-        )
-    )
+    renderable = _order_nodes(state, renderable)
     topics, grouped = _section_assignment(state, renderable)
     chunks: list[ChunkNotes] = []
 
@@ -220,14 +286,7 @@ def graph_state_to_ir(
         if topic is not None and not nodes and not topic.text.strip() and not (topic.latex or ""):
             continue
 
-        nodes = sorted(
-            nodes,
-            key=lambda node: (
-                float(node.metadata.get("order", 0.0)),
-                _node_times(state, node)[0],
-                node.id,
-            ),
-        )
+        nodes = _order_nodes(state, nodes)
         ranges = [
             _node_times(state, node)
             for node in nodes
