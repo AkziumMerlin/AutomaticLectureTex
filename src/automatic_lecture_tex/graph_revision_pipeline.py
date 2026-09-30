@@ -227,6 +227,52 @@ def _focus_images(
     return [path for _, path in candidates[:max_images]]
 
 
+def _frontier_summary(
+    frontier: list[GraphState],
+    consensus: GraphState,
+    *,
+    max_chars: int = 8000,
+) -> list[dict[str, Any]]:
+    consensus_ids = set(consensus.nodes)
+    result: list[dict[str, Any]] = []
+    used = 2
+    for index, state in enumerate(frontier):
+        branch_only = [
+            {
+                "id": node.id,
+                "kind": node.kind,
+                "title": node.title,
+                "text": node.text[:220],
+                "latex": (node.latex or "")[:350] or None,
+                "status": node.status,
+            }
+            for node in state.nodes.values()
+            if node.id not in consensus_ids and node.status != "suppressed"
+        ]
+        differing_metadata = [
+            {
+                "id": node_id,
+                "metadata": state.nodes[node_id].metadata,
+            }
+            for node_id in consensus_ids.intersection(state.nodes)
+            if state.nodes[node_id].metadata
+            != consensus.nodes[node_id].metadata
+        ]
+        row = {
+            "branch": index,
+            "applied_patches": state.applied_patches[-12:],
+            "metrics": metrics(state).model_dump(mode="json"),
+            "branch_only_nodes": branch_only[:12],
+            "differing_metadata": differing_metadata[:12],
+        }
+        encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+        if result and used + len(encoded) + 1 > max_chars:
+            break
+        result.append(row)
+        used += len(encoded) + 1
+    return result
+
+
 def _proposal_prompt(
     *,
     focus_id: str,
@@ -235,6 +281,7 @@ def _proposal_prompt(
     catalog: list[dict[str, Any]],
     violations: list[dict[str, Any]],
     graph_notes: list[str],
+    frontier_summary: list[dict[str, Any]],
     output_language: str,
 ) -> str:
     return f"""Revise a mutable latent mathematical graph reconstructed from one complete lecture.
@@ -256,6 +303,9 @@ CURRENT UNRESOLVED GRAPH VIOLATIONS:
 
 FRONTIER NOTES:
 {json.dumps(graph_notes[-12:], ensure_ascii=False, separators=(",", ":"))}
+
+CURRENT FRONTIER VARIANTS OUTSIDE THE CONSENSUS:
+{json.dumps(frontier_summary, ensure_ascii=False, separators=(",", ":"))}
 
 Goal: recover the globally mathematically correct state conveyed by the lecture, not a literal
 transcript. Raw observations are noisy measurements. Later evidence may revise an earlier node.
@@ -539,6 +589,7 @@ def run_iterative_graph_revision(
             path = proposal_root / f"{focus_id}.json"
             proposal = None if force else _load_cached(path, fingerprint)
             if proposal is not None:
+                proposal.focus_id = focus_id
                 stats["cache_hits"] += 1
             else:
                 images = _focus_images(
@@ -557,6 +608,10 @@ def run_iterative_graph_revision(
                             for item in representative.violations.values()
                         ],
                         graph_notes=representative.notes,
+                        frontier_summary=_frontier_summary(
+                            frontier,
+                            representative,
+                        ),
                         output_language=orchestrator.output_language,
                     ),
                     GraphRevisionProposal,
@@ -580,7 +635,12 @@ def run_iterative_graph_revision(
                 )
 
             before = {_state_signature(state) for state in frontier}
-            if proposal.stable and proposal.common_patch is None and not proposal.alternatives:
+            if (
+                proposal.stable
+                and not proposal.diagnosed_violations
+                and proposal.common_patch is None
+                and not proposal.alternatives
+            ):
                 stats["stable_focuses"] += 1
                 continue
             frontier = _expand_frontier(
