@@ -89,7 +89,7 @@ class PairwiseScoreDraft(BaseModel):
 
     left_candidate_id: str
     right_candidate_id: str
-    score: float = Field(ge=-3.0, le=3.0)
+    score: int = Field(ge=-3, le=3)
     relation: RelationKind
     reason: str = ""
 
@@ -702,7 +702,8 @@ Edges:
 
 For EVERY non-null candidate pair on every edge, emit one PairwiseScoreDraft.
 
-The score is a RELATIONAL potential on [-3, 3], not another estimate of local sensor confidence:
+The score is an INTEGER RELATIONAL potential in {-3,-2,-1,0,1,2,3}, not another estimate of local
+sensor confidence:
 +3  strongly mutually consistent / one clearly continues or supports the other
 +1  weakly useful compatibility
  0  independent / no information
