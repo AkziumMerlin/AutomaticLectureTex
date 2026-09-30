@@ -144,6 +144,14 @@ class NotesConfig(BaseModel):
             raise ValueError(
                 "notes.chunk_overlap_seconds must be smaller than chunk_target_seconds"
             )
+        if (
+            self.state_graph_revision_overlap_observations
+            >= self.state_graph_revision_batch_observations
+        ):
+            raise ValueError(
+                "notes.state_graph_revision_overlap_observations must be smaller than "
+                "notes.state_graph_revision_batch_observations"
+            )
         return self
 
 
