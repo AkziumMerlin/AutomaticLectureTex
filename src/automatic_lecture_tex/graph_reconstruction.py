@@ -322,7 +322,11 @@ def _null_candidate(observation: LectureObservation) -> CandidateHypothesis:
     )
 
 
-def _candidate_key(kind: ObservationKind | Literal["null"], text: str, latex: str | None) -> tuple[str, str, str]:
+def _candidate_key(
+    kind: ObservationKind | Literal["null"],
+    text: str,
+    latex: str | None,
+) -> tuple[str, str, str]:
     return (
         str(kind),
         re.sub(r"\s+", " ", text).strip().casefold(),
