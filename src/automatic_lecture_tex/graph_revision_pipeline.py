@@ -435,7 +435,9 @@ Important invariants:
   mark that evidence as context/repetition; do not leave a second canonical copy.
 - Maintain a small coherent set of topic/section nodes with contains/part_of relations when the
   lecture has clear thematic structure. These nodes are for organization only and must follow the
-  mathematics rather than imposing arbitrary fixed-duration sections.
+  mathematics rather than imposing arbitrary fixed-duration sections. If an existing topic already
+  covers the same mathematical block, attach/revise/merge it instead of creating another overlapping
+  topic under a new id.
 - A patch may resolve violations diagnosed in this same response by their exact ids.
 - The global index lists every existing canonical node id. Never add a node under an id already
   present there; revise/retype/attach/merge the existing node instead.
