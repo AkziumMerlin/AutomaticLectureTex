@@ -675,7 +675,11 @@ def _process_focus_resilient(
         raw_windows,
         max_chars=raw_context_chars,
     )
-    catalog = _compact_catalog(representative, catalog_chars)
+    catalog = _compact_catalog(
+        representative,
+        catalog_chars,
+        focus_evidence_ids=evidence_ids,
+    )
     frontier_summary = _frontier_summary(
         frontier,
         representative,
