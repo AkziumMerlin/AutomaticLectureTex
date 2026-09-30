@@ -1,3 +1,4 @@
+from automatic_lecture_tex import knowledge_pipeline as knowledge_pipeline_module
 from automatic_lecture_tex.claim_compaction import compact_repaired_claims
 from automatic_lecture_tex.schemas import (
     ClaimCompactionBatch,
@@ -186,3 +187,45 @@ def test_invalid_episode_plan_keeps_original_claims_active(tmp_path):
     assert unresolved
     assert compacted.episodes[0].claim_ids == ["claim_1", "claim_2", "claim_3"]
     assert all(item.status == ClaimStatus.ACTIVE for item in compacted.claims)
+
+
+def test_episode_realization_preserves_claim_id_order():
+    kb = LectureKnowledgeBase(
+        lecture_id="lecture",
+        title="Lecture",
+        claims=[
+            KnowledgeClaim(
+                id="late",
+                content="Сначала в логическом порядке.",
+                episode_id="episode_1",
+                scope="episode_1",
+                introduced_at=10.0,
+            ),
+            KnowledgeClaim(
+                id="early",
+                content="Затем в логическом порядке.",
+                episode_id="episode_1",
+                scope="episode_1",
+                introduced_at=1.0,
+            ),
+        ],
+        episodes=[
+            SemanticEpisode(
+                id="episode_1",
+                title="Proof",
+                kind=EpisodeKind.PROOF,
+                start=0.0,
+                end=11.0,
+                status=EpisodeStatus.CLOSED,
+                claim_ids=["late", "early"],
+            )
+        ],
+    )
+
+    body, unresolved = knowledge_pipeline_module._episode_body_from_repaired_state(
+        kb,
+        kb.episodes[0],
+    )
+
+    assert unresolved == []
+    assert body.index("Сначала") < body.index("Затем")
