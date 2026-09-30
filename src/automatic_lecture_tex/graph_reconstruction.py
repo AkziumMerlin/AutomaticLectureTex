@@ -47,7 +47,8 @@ class ObservationCandidateProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     observation_id: str
-    source_evidence_score: float | None = Field(default=None, ge=-3.0, le=3.0)
+    source_evidence_score: float = Field(ge=-3.0, le=3.0)
+    null_evidence_score: float = Field(ge=-3.0, le=3.0)
     candidates: list[CandidateDraft] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
 
@@ -295,8 +296,11 @@ interpretation. For every observation_id score the supplied source hypothesis an
 explicit candidate; do not repeat it among candidates.
 
 Rules:
-- source_evidence_score and candidate evidence_score measure LOCAL support from the supplied sensor
-  evidence only, on [-3, 3], and must be directly comparable within that observation;
+- source_evidence_score, null_evidence_score and candidate evidence_score measure LOCAL support
+  from the supplied sensor evidence only, on [-3, 3], and must be directly comparable within that
+  observation;
+- null_evidence_score scores the hypothesis that the local evidence is insufficient to commit to
+  any specific mathematical reading; it is not a generic penalty;
 - do not use later textbook knowledge or global mathematical consistency to repair the source;
 - preserve lecturer mistakes if they are a locally plausible reading;
 - if several glyphs, formulas, referents or statements remain plausible, keep alternatives separate;
@@ -315,15 +319,9 @@ is only to propose alternatives that should remain alive for later global infere
 def _source_candidate(
     observation: LectureObservation,
     *,
-    evidence_score: float | None,
+    evidence_score: float,
 ) -> CandidateHypothesis:
-    # If candidate generation is unavailable, fall back to the extractor confidence. Normal runs
-    # score source and alternatives jointly so their relative unary potentials share one scale.
-    score = (
-        float(evidence_score)
-        if evidence_score is not None
-        else 2.0 * float(observation.confidence) - 1.0
-    )
+    score = float(evidence_score)
     return CandidateHypothesis(
         id=f"{observation.id}:source",
         observation_id=observation.id,
@@ -337,15 +335,16 @@ def _source_candidate(
     )
 
 
-def _null_candidate(observation: LectureObservation) -> CandidateHypothesis:
-    # Unknown is a real hypothesis. It is mildly disfavoured for clear observations and almost free
-    # for low-confidence ones, rather than being represented by an inert unresolved string.
-    score = -0.15 - 0.7 * float(observation.confidence)
+def _null_candidate(
+    observation: LectureObservation,
+    *,
+    evidence_score: float,
+) -> CandidateHypothesis:
     return CandidateHypothesis(
         id=f"{observation.id}:null",
         observation_id=observation.id,
         kind="null",
-        unary_score=score,
+        unary_score=float(evidence_score),
         source="null",
         note="Observation left unresolved by global reconstruction.",
     )
@@ -373,7 +372,11 @@ def _materialize_candidate_set(
     candidates: list[CandidateHypothesis] = [
         _source_candidate(
             observation,
-            evidence_score=proposal.source_evidence_score if proposal is not None else None,
+            evidence_score=(
+                proposal.source_evidence_score
+                if proposal is not None
+                else 2.0 * float(observation.confidence) - 1.0
+            ),
         )
     ]
     seen = {
@@ -417,7 +420,16 @@ def _materialize_candidate_set(
                 )
             )
 
-    candidates.append(_null_candidate(observation))
+    candidates.append(
+        _null_candidate(
+            observation,
+            evidence_score=(
+                proposal.null_evidence_score
+                if proposal is not None
+                else -0.15 - 0.7 * float(observation.confidence)
+            ),
+        )
+    )
     return CandidateSet(
         observation_id=observation.id,
         start=observation.start,
@@ -499,6 +511,12 @@ def generate_candidate_sets(
                 observation_id,
                 ObservationCandidateProposal(
                     observation_id=observation_id,
+                    source_evidence_score=(
+                        2.0 * float(payload["observation"]["confidence"]) - 1.0
+                    ),
+                    null_evidence_score=(
+                        -0.15 - 0.7 * float(payload["observation"]["confidence"])
+                    ),
                     unresolved=["Candidate generator omitted this observation; source/null kept."],
                 ),
             )
