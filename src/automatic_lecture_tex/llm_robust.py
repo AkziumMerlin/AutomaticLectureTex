@@ -238,30 +238,29 @@ class LectureModelClient(BaseLectureModelClient):
                     if not _is_context_overflow_error(exc):
                         raise
                     input_overflow = _is_input_context_overflow_error(exc)
-                    if split_oversized_task:
-                        logger.warning(
-                            "[%s] structured task exceeded backend context/output budget at "
-                            "max_tokens=%d; delegating split to caller",
-                            operation,
-                            current_max_tokens,
-                        )
-                        raise StructuredTaskTooLargeError(
-                            f"{operation} cannot fit in one backend request at "
-                            f"max_tokens={current_max_tokens}: {exc}"
-                        ) from exc
 
-                    # Reducing completion max_tokens cannot repair an input that already exceeds
-                    # the model context. Callers that can split semantically should opt into
-                    # split_oversized_task; legacy callers get the original backend failure.
+                    # If the prompt itself does not fit, reducing completion tokens cannot help.
+                    # Callers that opted into semantic splitting should get an explicit signal.
                     if input_overflow:
+                        if split_oversized_task:
+                            logger.warning(
+                                "[%s] structured input itself exceeded backend context; "
+                                "delegating split to caller",
+                                operation,
+                            )
+                            raise StructuredTaskTooLargeError(
+                                f"{operation} input cannot fit in one backend request: {exc}"
+                            ) from exc
                         raise
 
-                    # Preserve the historical fallback for legacy context-overflow messages.
-                    # Explicit vLLM max_total_tokens errors are only special for callers that opted
-                    # into semantics-preserving upstream splitting above.
-                    if _explicit_max_tokens_ceiling(exc) is not None:
-                        raise
-                    if (
+                    # A request can exceed total context solely because max_tokens is too generous.
+                    # This is safe to repair locally even for split-aware callers: shrink the output
+                    # budget first and delegate splitting only if the accepted smaller response is
+                    # actually truncated.
+                    explicit_ceiling = _explicit_max_tokens_ceiling(exc)
+                    if explicit_ceiling is not None:
+                        next_max_tokens = min(current_max_tokens - 1, explicit_ceiling)
+                    elif (
                         last_accepted_max_tokens is not None
                         and last_accepted_max_tokens < current_max_tokens
                     ):
@@ -270,6 +269,10 @@ class LectureModelClient(BaseLectureModelClient):
                         next_max_tokens = current_max_tokens // 2
 
                     if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
+                        if split_oversized_task:
+                            raise StructuredTaskTooLargeError(
+                                f"{operation} cannot reserve a usable completion budget: {exc}"
+                            ) from exc
                         raise
                     context_output_ceiling = (
                         next_max_tokens
