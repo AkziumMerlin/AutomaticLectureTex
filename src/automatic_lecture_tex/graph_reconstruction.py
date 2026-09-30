@@ -79,6 +79,7 @@ class CandidateSet(BaseModel):
     end: float
     episode_id: str = ""
     candidates: list[CandidateHypothesis]
+    unresolved: list[str] = Field(default_factory=list)
 
 
 class PairwiseScoreDraft(BaseModel):
@@ -186,7 +187,7 @@ def _load_raw_context_index(work: Path) -> dict[str, dict[str, Any]]:
             "current_sensor_hypothesis": current,
             "raw_windows": payload.get("raw_windows") or [],
             "evidence_catalog": payload.get("evidence_catalog") or [],
-            "visual_metadata": payload.get("visual_metadata") or [],
+            "images": payload.get("images") or [],
         }
     return result
 
@@ -338,6 +339,7 @@ def _materialize_candidate_set(
     observation: LectureObservation,
     proposal: ObservationCandidateProposal | None,
     *,
+    raw_context: dict[str, Any],
     candidate_count: int,
 ) -> CandidateSet:
     candidates: list[CandidateHypothesis] = [_source_candidate(observation)]
@@ -351,6 +353,11 @@ def _materialize_candidate_set(
 
     if proposal is not None:
         allowed_refs = set(observation.evidence_refs)
+        allowed_refs.update(
+            str(item["ref"])
+            for item in raw_context.get("evidence_catalog", [])
+            if isinstance(item, dict) and item.get("ref")
+        )
         for index, draft in enumerate(proposal.candidates):
             if len(candidates) >= candidate_count - 1:
                 break
@@ -384,6 +391,7 @@ def _materialize_candidate_set(
         end=observation.end,
         episode_id=observation.episode_id,
         candidates=candidates,
+        unresolved=list(proposal.unresolved) if proposal is not None else [],
     )
 
 
@@ -474,6 +482,7 @@ def generate_candidate_sets(
         _materialize_candidate_set(
             observation,
             proposals.get(observation.id),
+            raw_context=raw_context.get(observation.id, {}),
             candidate_count=candidate_count,
         )
         for observation in observations
@@ -510,25 +519,91 @@ def build_sparse_edges(
     max_gap_seconds: float,
     symbol_gap_seconds: float,
 ) -> list[EdgeSpec]:
+    """Build a deliberately sparse graph.
+
+    Temporal edges carry local continuity. Non-local edges are reserved for a small number of
+    distinctive shared symbols; ubiquitous glyphs such as x/y/f and structural LaTeX commands do
+    not create graph-wide cliques.
+    """
+
     edges: dict[tuple[str, str], set[str]] = defaultdict(set)
     symbols = [_set_symbols(item) for item in candidate_sets]
+    structural = {
+        "\\in",
+        "\\quad",
+        "\\qquad",
+        "\\text",
+        "\\forall",
+        "\\exists",
+        "\\bigl",
+        "\\bigr",
+        "\\lVert",
+        "\\rVert",
+        "\\lvert",
+        "\\rvert",
+        "\\to",
+        "\\neq",
+        "\\le",
+        "\\ge",
+        "\\Longrightarrow",
+        "\\mathbb",
+        "\\left",
+        "\\right",
+        "\\frac",
+        "\\begin",
+        "\\end",
+        "\\cdot",
+    }
+    for index, item_symbols in enumerate(symbols):
+        symbols[index] = {
+            symbol
+            for symbol in item_symbols
+            if symbol not in structural
+            and not (len(symbol) == 1 and symbol.isalpha())
+        }
+
+    frequency: dict[str, int] = defaultdict(int)
+    for item_symbols in symbols:
+        for symbol in item_symbols:
+            frequency[symbol] += 1
+    max_document_frequency = max(4, len(candidate_sets) // 3)
+    symbols = [
+        {
+            symbol
+            for symbol in item_symbols
+            if frequency[symbol] <= max_document_frequency
+        }
+        for item_symbols in symbols
+    ]
 
     for i, left in enumerate(candidate_sets):
+        # Always retain a narrow temporal backbone.
         for j in range(i + 1, min(len(candidate_sets), i + 1 + neighbor_span)):
             right = candidate_sets[j]
             gap = max(0.0, right.start - left.end)
-            if gap <= max_gap_seconds:
-                edges[(left.observation_id, right.observation_id)].add("temporal")
+            if gap > max_gap_seconds:
+                continue
+            pair = (left.observation_id, right.observation_id)
+            edges[pair].add("temporal")
+            if left.episode_id and left.episode_id == right.episode_id:
+                edges[pair].add("same_initial_episode")
 
+        # Add at most two non-local symbol links per node. Prefer rare symbols, then short gaps.
+        nonlocal_candidates: list[tuple[float, float, int]] = []
         for j in range(i + 1, len(candidate_sets)):
             right = candidate_sets[j]
             gap = max(0.0, right.start - left.end)
             if gap > symbol_gap_seconds:
                 break
-            if left.episode_id and left.episode_id == right.episode_id:
-                edges[(left.observation_id, right.observation_id)].add("same_initial_episode")
-            if symbols[i] and symbols[j] and symbols[i].intersection(symbols[j]):
-                edges[(left.observation_id, right.observation_id)].add("shared_symbol")
+            shared = symbols[i].intersection(symbols[j])
+            if not shared:
+                continue
+            rarity = sum(1.0 / max(1, frequency[symbol]) for symbol in shared)
+            nonlocal_candidates.append((-rarity, gap, j))
+
+        for _rarity, _gap, j in sorted(nonlocal_candidates)[:2]:
+            right = candidate_sets[j]
+            edges[(left.observation_id, right.observation_id)].add("shared_symbol")
 
     return [
         EdgeSpec(left, right, tuple(sorted(reasons)))
@@ -549,7 +624,6 @@ def _edge_payload(
             "kind": str(candidate.kind),
             "text": candidate.text,
             "latex": candidate.latex,
-            "unary_evidence_score": candidate.unary_score,
         }
 
     return {
