@@ -342,10 +342,31 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
             for node in nodes:
                 ambiguous_evidence.update(node.evidence_ids)
             continue
+
         node = nodes[0].model_copy(deep=True)
         node.evidence_ids = _dedupe(
             [evidence_id for item in nodes for evidence_id in item.evidence_ids]
         )
+
+        metadata_keys = set.intersection(
+            *(set(item.metadata) for item in nodes)
+        ) if nodes else set()
+        common_metadata = {
+            key: nodes[0].metadata[key]
+            for key in metadata_keys
+            if all(item.metadata[key] == nodes[0].metadata[key] for item in nodes[1:])
+        }
+        metadata_variants = [
+            item.metadata
+            for item in nodes
+            if item.metadata != common_metadata
+        ]
+        node.metadata = dict(common_metadata)
+        if metadata_variants:
+            node.metadata["frontier_metadata_alternatives"] = metadata_variants
+            result.notes.append(
+                f"Frontier metadata ambiguity for {node_id}: {metadata_variants}"
+            )
         result.nodes[node_id] = node
 
     common_edges = None
