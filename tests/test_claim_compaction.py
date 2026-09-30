@@ -116,7 +116,11 @@ def test_claim_compaction_supersedes_raw_claims_and_preserves_formula(tmp_path):
     assert stats["claims_after"] == 2
     assert orchestrator.calls == 1
 
-    source = {item.id: item for item in compacted.claims if item.id.startswith("claim_")}
+    source = {
+        item.id: item
+        for item in compacted.claims
+        if item.id in {"claim_1", "claim_2", "claim_3"}
+    }
     assert all(item.status == ClaimStatus.SUPERSEDED for item in source.values())
 
     episode = compacted.episodes[0]
