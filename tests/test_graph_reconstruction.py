@@ -16,6 +16,7 @@ def _candidate(
     score: float,
     text: str,
     latex: str | None = None,
+    source: str = "model",
 ) -> CandidateHypothesis:
     return CandidateHypothesis(
         id=candidate_id,
@@ -24,7 +25,7 @@ def _candidate(
         text=text,
         latex=latex,
         unary_score=score,
-        source="model",
+        source=source,
     )
 
 
@@ -144,6 +145,7 @@ def test_sparse_edges_include_shared_symbol_nonlocal_link() -> None:
                     score=0.5,
                     text="",
                     latex=r"f(x)=\\varphi(x)",
+                    source="source",
                 )
             ],
         ),
@@ -166,6 +168,7 @@ def test_sparse_edges_include_shared_symbol_nonlocal_link() -> None:
                     score=0.5,
                     text="",
                     latex=r"\\varphi(y)=0",
+                    source="source",
                 )
             ],
         ),

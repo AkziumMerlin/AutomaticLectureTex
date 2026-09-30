@@ -13,6 +13,7 @@ from automatic_lecture_tex.graph_revision import (
     SplitNodeOp,
     Violation,
     apply_patch,
+    graph_consensus,
     metrics,
     search_alternatives,
 )
@@ -232,3 +233,23 @@ def test_unresolved_global_alternatives_can_survive_frontier() -> None:
         "real",
         "complex",
     }
+
+
+def test_consensus_preserves_invariant_node_and_marks_metadata_ambiguity() -> None:
+    base = _state()
+    base.nodes["riesz"] = GraphNode(
+        id="riesz",
+        kind="theorem",
+        text="f(x)=(x,y_f)",
+        evidence_ids=["e1", "e2"],
+        metadata={"field": "real"},
+    )
+    other = base.clone()
+    other.nodes["riesz"].metadata = {"field": "complex", "conjugation": True}
+
+    consensus = graph_consensus([base, other])
+
+    assert "riesz" in consensus.nodes
+    assert consensus.nodes["riesz"].text == "f(x)=(x,y_f)"
+    assert "frontier_metadata_alternatives" in consensus.nodes["riesz"].metadata
+    assert any("riesz" in note for note in consensus.notes)

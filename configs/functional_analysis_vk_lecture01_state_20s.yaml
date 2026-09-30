@@ -90,6 +90,15 @@ notes:
   # Repaired observations are retracked into semantic episodes; final TeX is then realized
   # deterministically one mathematical episode at a time.
   state_section_assembly: deterministic
+  # Whole-lecture mutable graph revision replaces sequential observation repair / claim compaction.
+  state_semantic_backend: mutable_graph
+  state_graph_revision_rounds: 3
+  state_graph_revision_batch_observations: 24
+  state_graph_revision_overlap_observations: 4
+  state_graph_revision_frontier_width: 3
+  state_graph_revision_catalog_chars: 36000
+  state_graph_revision_raw_context_chars: 16000
+  state_graph_revision_max_images: 3
   state_repaired_episode_batch_observations: 24
   # Qwen3.8 official instruct/non-thinking sampling preset for final section synthesis.
   state_section_writer_thinking: false

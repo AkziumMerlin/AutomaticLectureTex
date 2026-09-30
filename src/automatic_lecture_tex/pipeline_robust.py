@@ -7,6 +7,7 @@ from .asr import make_asr_backend
 from .claim_compaction import STATE_CLAIM_COMPACTION_VERSION
 from .episode_synthesis_resilient import EPISODE_SYNTHESIS_CACHE_VERSION
 from .gigaam_vad import VadGigaAMBackend
+from .graph_revision_pipeline import GRAPH_REVISION_PROPOSAL_VERSION
 from .knowledge_pipeline import (
     STATE_PIPELINE_VERSION,
     STATE_SECTION_WRITER_CACHE_VERSION,
@@ -97,6 +98,10 @@ class Pipeline(_base_pipeline.Pipeline):
                 payload["state_claim_compaction_version"] = (
                     STATE_CLAIM_COMPACTION_VERSION
                 )
+                if self.config.notes.state_semantic_backend == "mutable_graph":
+                    payload["mutable_graph_revision_version"] = (
+                        GRAPH_REVISION_PROPOSAL_VERSION
+                    )
             return stable_hash(payload)
         return base
 
