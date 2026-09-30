@@ -315,6 +315,7 @@ def _proposal_fingerprint(
     return stable_hash(
         {
             "version": GRAPH_REVISION_PROPOSAL_VERSION,
+            "state_signature": _state_signature(state),
             "focus_id": focus_id,
             "focus_evidence": focus_evidence,
             "raw_windows": raw_windows,
@@ -567,6 +568,7 @@ def run_iterative_graph_revision(
                     temperature=0.6,
                     top_p=0.9,
                 )
+                proposal.focus_id = focus_id
                 stats["focus_calls"] += 1
                 atomic_json_dump(
                     path,
