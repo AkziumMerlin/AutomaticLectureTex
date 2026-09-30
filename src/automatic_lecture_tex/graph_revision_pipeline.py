@@ -24,7 +24,7 @@ from .llm import StructuredTaskTooLargeError
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 1
+GRAPH_REVISION_PROPOSAL_VERSION = 2
 
 
 class GraphRevisionProposal(BaseModel):
@@ -64,39 +64,133 @@ def _node_time(state: GraphState, node_id: str) -> float:
     return min(dependency_times) if dependency_times else float("inf")
 
 
-def _compact_catalog(state: GraphState, max_chars: int) -> list[dict[str, Any]]:
-    rows = []
-    for node in sorted(
-        state.nodes.values(),
-        key=lambda item: (_node_time(state, item.id), item.id),
-    ):
-        if node.status == "suppressed":
-            continue
-        rows.append(
-            {
-                "id": node.id,
-                "kind": node.kind,
-                "title": node.title,
-                "text": node.text[:280],
-                "latex": (node.latex or "")[:500] or None,
-                "aliases": node.aliases[:8],
-                "status": node.status,
-                "alternative_group": node.alternative_group,
-                "evidence_ids": node.evidence_ids[:16],
-                "derived_from": node.derived_from[:12],
-            }
+def _compact_catalog(
+    state: GraphState,
+    max_chars: int,
+    *,
+    focus_evidence_ids: list[str],
+) -> dict[str, list[Any]]:
+    """Represent the whole graph without truncating it to an early chronological prefix.
+
+    Every canonical node id appears in a compact global index. Rich text/LaTeX is reserved for the
+    current focus and its temporal/relational neighbourhood, so a late focus can always discover
+    that a Riesz/weak-topology node already exists without paying to serialize the whole lecture in
+    full detail.
+    """
+
+    focus_ids = set(focus_evidence_ids)
+    focus_times = [
+        state.evidence[evidence_id].start
+        for evidence_id in focus_ids
+        if evidence_id in state.evidence
+    ]
+    focus_start = min(focus_times, default=float("-inf"))
+    focus_end = max(
+        (
+            state.evidence[evidence_id].end
+            for evidence_id in focus_ids
+            if evidence_id in state.evidence
+        ),
+        default=float("inf"),
+    )
+
+    active = [
+        node
+        for node in state.nodes.values()
+        if node.status != "suppressed"
+    ]
+    active.sort(key=lambda item: (_node_time(state, item.id), item.id))
+
+    # Provisional nodes outside the focus are raw initialization noise. Canonical nodes, topics,
+    # and current-focus provisionals form the global identity index.
+    indexed = [
+        node
+        for node in active
+        if not node.kind.startswith("provisional_")
+        or bool(focus_ids.intersection(node.evidence_ids))
+    ]
+    index: list[list[Any]] = []
+    for node in indexed:
+        start = _node_time(state, node.id)
+        index.append(
+            [
+                node.id,
+                node.kind,
+                node.status,
+                node.title[:96] or None,
+                None if start == float("inf") else round(start, 1),
+            ]
         )
 
-    selected: list[dict[str, Any]] = []
-    used = 2
-    for row in rows:
-        encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
-        if selected and used + len(encoded) + 1 > max_chars:
-            break
-        selected.append(row)
-        used += len(encoded) + 1
-    return selected
+    focus_node_ids = {
+        node.id
+        for node in active
+        if focus_ids.intersection(node.evidence_ids)
+    }
+    related_ids: set[str] = set()
+    for edge in state.edges:
+        if edge.source in focus_node_ids:
+            related_ids.add(edge.target)
+        if edge.target in focus_node_ids:
+            related_ids.add(edge.source)
 
+    def detail_priority(node: Any) -> tuple[int, float, str]:
+        direct = bool(focus_ids.intersection(node.evidence_ids))
+        start = _node_time(state, node.id)
+        near = (
+            start != float("inf")
+            and focus_start != float("-inf")
+            and focus_start - 300.0 <= start <= focus_end + 300.0
+        )
+        topic = node.kind.strip().lower() in {"topic", "section", "subsection"}
+        if direct:
+            bucket = 0
+        elif node.id in related_ids:
+            bucket = 1
+        elif near:
+            bucket = 2
+        elif topic:
+            bucket = 3
+        else:
+            bucket = 4
+        distance = (
+            abs(start - 0.5 * (focus_start + focus_end))
+            if start != float("inf")
+            and focus_start != float("-inf")
+            and focus_end != float("inf")
+            else float("inf")
+        )
+        return bucket, distance, node.id
+
+    detail_candidates = sorted(active, key=detail_priority)
+    payload: dict[str, list[Any]] = {
+        "index": index,
+        "detail": [],
+    }
+    used = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+    for node in detail_candidates:
+        if detail_priority(node)[0] >= 4:
+            break
+        row = {
+            "id": node.id,
+            "kind": node.kind,
+            "title": node.title,
+            "text": node.text[:320],
+            "latex": (node.latex or "")[:600] or None,
+            "aliases": node.aliases[:8],
+            "status": node.status,
+            "alternative_group": node.alternative_group,
+            "evidence_ids": node.evidence_ids[:20],
+            "derived_from": node.derived_from[:12],
+        }
+        encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+        if payload["detail"] and used + len(encoded) + 1 > max_chars:
+            break
+        payload["detail"].append(row)
+        used += len(encoded) + 1
+
+    return payload
 
 def _focus_batches(
     state: GraphState,
@@ -279,7 +373,7 @@ def _proposal_prompt(
     focus_id: str,
     focus_evidence: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
-    catalog: list[dict[str, Any]],
+    catalog: dict[str, list[Any]],
     violations: list[dict[str, Any]],
     graph_notes: list[str],
     frontier_summary: list[dict[str, Any]],
@@ -296,7 +390,7 @@ FOCUS OBSERVATIONS:
 LITERAL ASR/OCR CONTEXT:
 {json.dumps(raw_windows, ensure_ascii=False, separators=(",", ":"))}
 
-CURRENT WHOLE-LECTURE GRAPH CATALOG:
+CURRENT WHOLE-LECTURE GRAPH INDEX + FOCUS-RELEVANT DETAIL:
 {json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))}
 
 CURRENT UNRESOLVED GRAPH VIOLATIONS:
@@ -330,7 +424,8 @@ Important invariants:
 - Do not import unrelated textbook material merely because it would be true.
 - Distinguish a real mathematical contradiction from harmless notation/wording variation.
 - If two globally coherent interpretations remain possible, return them as alternatives rather
-  than forcing one.
+  than forcing one. In particular, do not silently choose a scalar-field, inner-product convention,
+  symbol identity, or conjugation convention when the lecture evidence does not determine it.
 - Topic/section nodes and contains/part_of relations may be added when they clarify final lecture
   organization, but do not invent a rigid outline just to satisfy formatting.
 - Do not create duplicate nodes for repeated/overlapping measurements of the same mathematical
@@ -340,8 +435,16 @@ Important invariants:
   mark that evidence as context/repetition; do not leave a second canonical copy.
 - Maintain a small coherent set of topic/section nodes with contains/part_of relations when the
   lecture has clear thematic structure. These nodes are for organization only and must follow the
-  mathematics rather than imposing arbitrary fixed-duration sections.
+  mathematics rather than imposing arbitrary fixed-duration sections. If an existing topic already
+  covers the same mathematical block, attach/revise/merge it instead of creating another overlapping
+  topic under a new id.
 - A patch may resolve violations diagnosed in this same response by their exact ids.
+- The global index lists every existing canonical node id. Never add a node under an id already
+  present there; revise/retype/attach/merge the existing node instead.
+- Use standard mathematical names when the mathematical identity is globally unambiguous; noisy
+  ASR spellings are aliases, not canonical theorem names.
+- common_patch may contain only edits valid under every surviving interpretation. Put
+  convention-dependent formulas or identities in alternatives.
 - Patch ids and new node ids must be globally descriptive and stable; reuse existing ids when
   revising existing mathematics.
 - Write graph prose in language code {output_language}.
@@ -360,7 +463,7 @@ def _proposal_fingerprint(
     focus_id: str,
     focus_evidence: list[dict[str, Any]],
     raw_windows: list[dict[str, Any]],
-    catalog: list[dict[str, Any]],
+    catalog: dict[str, list[Any]],
     frontier_summary: list[dict[str, Any]],
     llm_config: dict[str, Any],
 ) -> str:
@@ -572,7 +675,11 @@ def _process_focus_resilient(
         raw_windows,
         max_chars=raw_context_chars,
     )
-    catalog = _compact_catalog(representative, catalog_chars)
+    catalog = _compact_catalog(
+        representative,
+        catalog_chars,
+        focus_evidence_ids=evidence_ids,
+    )
     frontier_summary = _frontier_summary(
         frontier,
         representative,

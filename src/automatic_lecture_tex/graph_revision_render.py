@@ -139,16 +139,57 @@ def _topic_time(state: GraphState, topic: GraphNode) -> float:
     return min(finite) if finite else float("inf")
 
 
+def _topic_parents(state: GraphState, topic_ids: set[str]) -> dict[str, str]:
+    parents: dict[str, str] = {}
+    for edge in state.edges:
+        relation = _kind(edge.relation)
+        if (
+            relation in {"part_of", "in_section", "in_topic"}
+            and edge.source in topic_ids
+            and edge.target in topic_ids
+        ):
+            parents.setdefault(edge.source, edge.target)
+        elif (
+            relation in {"contains", "contains_node", "has_part"}
+            and edge.source in topic_ids
+            and edge.target in topic_ids
+        ):
+            parents.setdefault(edge.target, edge.source)
+    return parents
+
+
+def _root_topic(topic_id: str, parents: dict[str, str]) -> str:
+    seen: set[str] = set()
+    current = topic_id
+    while current in parents and current not in seen:
+        seen.add(current)
+        current = parents[current]
+    return current
+
+
 def _section_assignment(
     state: GraphState,
     renderable: list[GraphNode],
 ) -> tuple[list[GraphNode], dict[str, list[GraphNode]]]:
-    topics = [
+    all_topics = [
         node
         for node in state.nodes.values()
         if node.status == "active" and _kind(node.kind) in _TOPIC_KINDS
     ]
+    topic_by_id = {node.id: node for node in all_topics}
+    topic_ids = set(topic_by_id)
+    parents = _topic_parents(state, topic_ids)
+    root_ids = {
+        _root_topic(topic_id, parents)
+        for topic_id in topic_ids
+    }
+    topics = [
+        topic_by_id[topic_id]
+        for topic_id in root_ids
+        if topic_id in topic_by_id
+    ]
     topics.sort(key=lambda node: (_topic_time(state, node), node.id))
+
     membership = _topic_membership(state)
     grouped: dict[str, list[GraphNode]] = defaultdict(list)
 
@@ -160,12 +201,19 @@ def _section_assignment(
         (_topic_time(state, topic), topic.id)
         for topic in topics
     ]
+    first_topic_time = min((item[0] for item in topic_times), default=float("inf"))
+
     for node in renderable:
         explicit = membership.get(node.id)
-        if explicit is not None:
-            grouped[explicit].append(node)
+        if explicit is not None and explicit in topic_ids:
+            grouped[_root_topic(explicit, parents)].append(node)
             continue
+
         start, _ = _node_times(state, node)
+        if start < first_topic_time:
+            grouped["__prelude__"].append(node)
+            continue
+
         preceding = [
             (topic_start, topic_id)
             for topic_start, topic_id in topic_times
@@ -173,8 +221,8 @@ def _section_assignment(
         ]
         target = preceding[-1][1] if preceding else topics[0].id
         grouped[target].append(node)
-    return topics, grouped
 
+    return topics, grouped
 
 def _order_nodes(state: GraphState, nodes: list[GraphNode]) -> list[GraphNode]:
     """Topologically order canonical mathematics; timestamps only break unrelated ties."""
@@ -294,10 +342,13 @@ def graph_state_to_ir(
     if not topics:
         section_nodes = [(None, grouped.get("__lecture__", []))]
     else:
-        section_nodes = [
+        section_nodes = []
+        if grouped.get("__prelude__"):
+            section_nodes.append((None, grouped["__prelude__"]))
+        section_nodes.extend(
             (topic, grouped.get(topic.id, []))
             for topic in topics
-        ]
+        )
 
     for index, (topic, nodes) in enumerate(section_nodes):
         if not nodes and topic is None:
@@ -347,7 +398,7 @@ def graph_state_to_ir(
         section_title = (
             (topic.title or topic.text).strip()
             if topic is not None
-            else title
+            else ("Начало лекции" if topics else title)
         )
         if not section_title:
             section_title = f"Раздел {index + 1}"

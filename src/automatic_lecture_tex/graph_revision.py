@@ -626,9 +626,47 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
         else:
             raise TypeError(operation)
 
+    _suppress_absorbed_provisionals(out)
     out.applied_patches.append(patch.id)
     _validate_state(out)
     return out
+
+
+def _suppress_absorbed_provisionals(state: GraphState) -> None:
+    """Drop weak one-observation placeholders once canonical mathematics owns their evidence.
+
+    Provisional nodes are only an initialization device. Keeping them active after a canonical
+    non-topic node cites the same evidence double-counts the observation and makes the search spend
+    model calls on mechanical cleanup rather than mathematical reconstruction.
+    """
+
+    topic_kinds = {"topic", "section", "subsection"}
+    canonical_evidence: set[str] = set()
+    for node in state.nodes.values():
+        if node.status != "active":
+            continue
+        if node.kind.startswith("provisional_"):
+            continue
+        if node.kind.strip().lower() in topic_kinds:
+            continue
+        canonical_evidence.update(node.evidence_ids)
+
+    for node in state.nodes.values():
+        if node.status != "active" or not node.kind.startswith("provisional_"):
+            continue
+        if not node.evidence_ids:
+            continue
+        covered = all(
+            evidence_id in canonical_evidence
+            or (
+                evidence_id in state.evidence_disposition
+                and state.evidence_disposition[evidence_id] != "frontier_ambiguous"
+            )
+            for evidence_id in node.evidence_ids
+        )
+        if covered:
+            node.status = "suppressed"
+            node.metadata["suppressed_reason"] = "absorbed_by_canonical_graph"
 
 
 def _validate_state(state: GraphState) -> None:
