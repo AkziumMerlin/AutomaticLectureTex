@@ -2153,8 +2153,8 @@ def _episode_body_from_repaired_state(
         for claim_id in episode.claim_ids
         if claim_id in claim_by_id and claim_by_id[claim_id].status == ClaimStatus.ACTIVE
     ]
-    claims.sort(key=lambda item: (item.introduced_at, item.id))
-
+    # episode.claim_ids is the canonical semantic order. Before compaction it is chronological;
+    # after compaction it is the explicit logical order returned for the fixed episode.
     pieces: list[str] = []
     unresolved: list[str] = []
     seen_text: set[str] = set()
