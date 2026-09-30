@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from .chunking import chunk_transcript
+from .claim_compaction import compact_repaired_claims
 from .generated_notes import (
     GeneratedObservationStatePatch,
     GeneratedSemanticTextCleanupBatch,
@@ -2771,6 +2772,9 @@ def run_knowledge_pipeline(
     state_resolution_seconds = 0.0
     state_semantic_graph_seconds = 0.0
     state_semantic_graph_stats: dict[str, Any] = {}
+    state_claim_compaction_seconds = 0.0
+    state_claim_compaction_stats: dict[str, Any] = {}
+    state_claim_compaction_unresolved: list[str] = []
     state_synthesis_seconds = 0.0
     state_repair_unresolved: list[str] = []
 
@@ -2884,6 +2888,29 @@ def run_knowledge_pipeline(
         )
     hierarchy_seconds = time.perf_counter() - hierarchy_started
 
+    if state_mode:
+        # Hierarchy depends only on repaired semantic leaves. Canonical claim compaction happens
+        # afterwards, so changing the semantic wording/content density does not require replanning
+        # episode boundaries or section grouping.
+        atomic_json_dump(
+            work / "lecture_state_pre_claim_compaction.json",
+            make_lecture_state(kb).model_dump(mode="json"),
+        )
+        claim_compaction_started = time.perf_counter()
+        (
+            kb,
+            state_claim_compaction_stats,
+            state_claim_compaction_unresolved,
+        ) = compact_repaired_claims(
+            orchestrator,
+            kb=kb,
+            work=work,
+            llm_config=pipeline.config.llm.model_dump(mode="json"),
+            force=force,
+        )
+        state_claim_compaction_seconds = time.perf_counter() - claim_compaction_started
+        atomic_json_dump(work / "lecture_kb.json", kb.model_dump(mode="json"))
+
     # This is a deterministic projection of the episode graph. The hierarchy LLM only chooses
     # boundaries/titles; it cannot create, drop, reorder, resize, or populate a section independently.
     outline = LectureOutline(
@@ -2983,7 +3010,12 @@ def run_knowledge_pipeline(
 
                 note_sections.append(_merge_state_section_batches(section, generated_batches))
 
-        state_pipeline_unresolved = list(state_repair_unresolved)
+        state_pipeline_unresolved = list(
+            dict.fromkeys([
+                *state_repair_unresolved,
+                *state_claim_compaction_unresolved,
+            ])
+        )
         if state_pipeline_unresolved and note_sections:
             note_sections[-1].unresolved = list(
                 dict.fromkeys([*note_sections[-1].unresolved, *state_pipeline_unresolved])
@@ -3145,6 +3177,8 @@ def run_knowledge_pipeline(
             "state_resolution_seconds": round(state_resolution_seconds, 3),
             "state_semantic_graph_seconds": round(state_semantic_graph_seconds, 3),
             "state_semantic_graph": state_semantic_graph_stats,
+            "state_claim_compaction_seconds": round(state_claim_compaction_seconds, 3),
+            "state_claim_compaction": state_claim_compaction_stats,
             "state_synthesis_seconds": round(state_synthesis_seconds, 3),
             "state_section_assembly": (
                 pipeline.config.notes.state_section_assembly if state_mode else None
