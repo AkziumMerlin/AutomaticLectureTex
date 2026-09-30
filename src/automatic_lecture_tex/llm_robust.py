@@ -258,6 +258,15 @@ class LectureModelClient(BaseLectureModelClient):
                     # budget first and delegate splitting only if the accepted smaller response is
                     # actually truncated.
                     explicit_ceiling = _explicit_max_tokens_ceiling(exc)
+                    if explicit_ceiling is not None and split_oversized_task:
+                        logger.warning(
+                            "[%s] backend reported an explicit output ceiling; "
+                            "delegating semantic split to caller",
+                            operation,
+                        )
+                        raise StructuredTaskTooLargeError(
+                            f"{operation} exceeds backend output ceiling: {exc}"
+                        ) from exc
                     if explicit_ceiling is not None:
                         next_max_tokens = min(current_max_tokens - 1, explicit_ceiling)
                     elif (
