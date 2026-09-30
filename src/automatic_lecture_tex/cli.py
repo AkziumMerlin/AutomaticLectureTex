@@ -116,7 +116,8 @@ def _doctor(cfg) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     cfg = load_config(args.config)
 
     if args.command == "doctor":
