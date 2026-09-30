@@ -97,6 +97,7 @@ _DOWNSTREAM_NOTE_FIELDS = {
     "state_section_max_evidence_chars",
     "state_section_assembly",
     "state_graph_revision_max_images",
+    "state_graph_revision_max_tokens",
     "state_graph_revision_raw_context_chars",
     "state_graph_revision_catalog_chars",
     "state_graph_revision_frontier_width",
@@ -2819,6 +2820,7 @@ def run_knowledge_pipeline(
                 pipeline.config.notes.state_graph_revision_raw_context_chars
             ),
             max_images=pipeline.config.notes.state_graph_revision_max_images,
+            max_tokens=pipeline.config.notes.state_graph_revision_max_tokens,
             force=force,
         )
         graph_seconds = time.perf_counter() - graph_started

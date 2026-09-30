@@ -26,9 +26,11 @@ class FakeOrchestrator:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.kwargs = []
 
     def _structured(self, prompt, schema, **kwargs):
-        del prompt, schema, kwargs
+        del prompt, schema
+        self.kwargs.append(dict(kwargs))
         self.calls += 1
         if self.calls == 1:
             return GraphRevisionProposal(
@@ -120,10 +122,12 @@ def test_late_focus_can_revise_an_earlier_canonical_node(tmp_path: Path) -> None
         catalog_chars=10000,
         raw_context_chars=10000,
         max_images=0,
+        max_tokens=4096,
         force=True,
     )
 
     assert orchestrator.calls == 2
+    assert all(item["max_tokens"] == 4096 for item in orchestrator.kwargs)
     node = result.consensus.nodes["weak_neighborhood"]
     assert node.kind == "subbasic_neighborhood"
     assert "elementary/subbasic" in node.text
