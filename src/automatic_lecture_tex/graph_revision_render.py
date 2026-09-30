@@ -120,6 +120,25 @@ def _topic_membership(state: GraphState) -> dict[str, str]:
     return membership
 
 
+def _topic_time(state: GraphState, topic: GraphNode) -> float:
+    start, _ = _node_times(state, topic)
+    if start != float("inf"):
+        return start
+    child_ids = {
+        edge.target
+        for edge in state.edges
+        if edge.source == topic.id
+        and _kind(edge.relation) in {"contains", "contains_node", "has_part"}
+    }
+    starts = [
+        _node_times(state, state.nodes[child_id])[0]
+        for child_id in child_ids
+        if child_id in state.nodes
+    ]
+    finite = [value for value in starts if value != float("inf")]
+    return min(finite) if finite else float("inf")
+
+
 def _section_assignment(
     state: GraphState,
     renderable: list[GraphNode],
@@ -129,7 +148,7 @@ def _section_assignment(
         for node in state.nodes.values()
         if node.status == "active" and _kind(node.kind) in _TOPIC_KINDS
     ]
-    topics.sort(key=lambda node: (_node_times(state, node)[0], node.id))
+    topics.sort(key=lambda node: (_topic_time(state, node), node.id))
     membership = _topic_membership(state)
     grouped: dict[str, list[GraphNode]] = defaultdict(list)
 
@@ -138,7 +157,7 @@ def _section_assignment(
         return [], grouped
 
     topic_times = [
-        (_node_times(state, topic)[0], topic.id)
+        (_topic_time(state, topic), topic.id)
         for topic in topics
     ]
     for node in renderable:
