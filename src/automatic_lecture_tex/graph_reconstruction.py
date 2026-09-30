@@ -940,6 +940,70 @@ def _local_assignment(candidate_sets: list[CandidateSet]) -> dict[str, str]:
     }
 
 
+def _assignment_score(
+    assignment: dict[str, str],
+    candidate_sets: list[CandidateSet],
+    edges: list[GraphEdge],
+    *,
+    pairwise_weight: float,
+) -> tuple[float, float, float]:
+    candidate_by_id = {
+        candidate.id: candidate
+        for item in candidate_sets
+        for candidate in item.candidates
+    }
+    unary = sum(
+        candidate_by_id[candidate_id].unary_score
+        for candidate_id in assignment.values()
+    )
+    pairwise = 0.0
+    for edge in edges:
+        left = assignment.get(edge.left_observation_id)
+        right = assignment.get(edge.right_observation_id)
+        if left is None or right is None:
+            continue
+        potential = next(
+            (
+                item
+                for item in edge.potentials
+                if item.left_candidate_id == left and item.right_candidate_id == right
+            ),
+            None,
+        )
+        if potential is not None:
+            pairwise += pairwise_weight * potential.score
+    return unary + pairwise, unary, pairwise
+
+
+def _include_local_baseline(
+    hypotheses: list[GlobalHypothesis],
+    local_assignment: dict[str, str],
+    candidate_sets: list[CandidateSet],
+    edges: list[GraphEdge],
+    *,
+    pairwise_weight: float,
+    top_k: int,
+) -> list[GlobalHypothesis]:
+    local_score, _, _ = _assignment_score(
+        local_assignment,
+        candidate_sets,
+        edges,
+        pairwise_weight=pairwise_weight,
+    )
+    by_assignment = {
+        tuple(sorted(item.assignments.items())): item
+        for item in hypotheses
+    }
+    key = tuple(sorted(local_assignment.items()))
+    previous = by_assignment.get(key)
+    if previous is None or local_score > previous.score:
+        by_assignment[key] = GlobalHypothesis(
+            score=local_score,
+            assignments=dict(local_assignment),
+        )
+    return sorted(by_assignment.values(), key=lambda item: item.score, reverse=True)[:top_k]
+
+
 def _top_k_marginals(
     hypotheses: list[GlobalHypothesis],
     candidate_sets: list[CandidateSet],
@@ -979,6 +1043,11 @@ def _selected_edges(
             None,
         )
         if potential is None:
+            continue
+        if (
+            potential.relation in {"independent", "uncertain", "null"}
+            and abs(potential.score) < 0.5
+        ):
             continue
         selected.append(
             {
@@ -1075,8 +1144,16 @@ def run_graph_reconstruction(
     if not hypotheses:
         raise RuntimeError("Graph inference returned no hypotheses")
 
-    best = hypotheses[0]
     local = _local_assignment(candidate_sets)
+    hypotheses = _include_local_baseline(
+        hypotheses,
+        local,
+        candidate_sets,
+        edges,
+        pairwise_weight=pairwise_weight,
+        top_k=top_k,
+    )
+    best = hypotheses[0]
     changed = [
         observation_id
         for observation_id, candidate_id in best.assignments.items()
@@ -1093,6 +1170,25 @@ def run_graph_reconstruction(
         if len(hypotheses) > 1
         else None
     )
+    global_score, global_unary, global_pairwise = _assignment_score(
+        best.assignments,
+        candidate_sets,
+        edges,
+        pairwise_weight=pairwise_weight,
+    )
+    local_score, local_unary, local_pairwise = _assignment_score(
+        local,
+        candidate_sets,
+        edges,
+        pairwise_weight=pairwise_weight,
+    )
+    selected_sources = {
+        source: sum(
+            candidate_by_id[candidate_id].source == source
+            for candidate_id in best.assignments.values()
+        )
+        for source in ("source", "model", "null")
+    }
 
     artifact = {
         "version": GRAPH_RECONSTRUCTION_VERSION,
@@ -1120,6 +1216,13 @@ def run_graph_reconstruction(
             "changed_observation_ids": changed,
             "top1_score": best.score,
             "top1_top2_margin": score_margin,
+            "global_unary_score": global_unary,
+            "global_pairwise_score": global_pairwise,
+            "local_joint_score": local_score,
+            "local_unary_score": local_unary,
+            "local_pairwise_score": local_pairwise,
+            "joint_score_gain": global_score - local_score,
+            "selected_sources": selected_sources,
         },
         "candidate_sets": [item.model_dump(mode="json") for item in candidate_sets],
         "edges": [item.model_dump(mode="json") for item in edges],
