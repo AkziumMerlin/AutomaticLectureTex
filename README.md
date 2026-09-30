@@ -285,6 +285,35 @@ hypotheses, approximate top-K marginal mass, and the observation IDs whose selec
 changes under global inference. This is intentionally an experimental inference backend, not a new
 repair/writer stage.
 
+## Experimental mutable graph revision
+
+The pairwise `reconstruct-graph` experiment is retained as a baseline. A second experimental path
+models reconstruction as revision of one latent mathematical graph instead of one latent state per
+observation.
+
+The graph keeps raw observations immutable and applies generic patches such as `MERGE`, `SPLIT`,
+`RETYPE`, `REPLACE`, `ADD_DERIVED`, `ADD_ALIAS`, relation changes, and explicit alternative
+hypotheses. There is no required order such as event association -> symbol tracking -> proof repair.
+
+A revision plan can be produced by an external model or authored for an ablation and then searched
+deterministically:
+
+```bash
+automatic-lecture-tex revise-graph \
+  --config configs/functional_analysis_vk_lecture01_state_20s.yaml \
+  --lecture lecture_01 \
+  --plan /path/to/revision_plan.json
+```
+
+The search treats evidence, mathematical, and structural contradictions as hard priorities before
+comparing softer quantities such as unexplained evidence, unsupported nodes, duplicate nodes, and
+graph complexity. This prevents a smaller but mathematically inconsistent graph from surviving the
+frontier merely because it has fewer nodes.
+
+Outputs are written to `work/<lecture>/graph_revision/`: one JSON graph per frontier state plus a
+summary of all searched states. Competing globally consistent interpretations can therefore remain
+on the frontier instead of being collapsed prematurely.
+
 ## What is deliberately not in the MVP
 
 The current MVP does not yet implement global board-state indexing, automatic crop detection, TikZ
