@@ -47,6 +47,7 @@ class ObservationCandidateProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     observation_id: str
+    source_evidence_score: float | None = Field(default=None, ge=-3.0, le=3.0)
     candidates: list[CandidateDraft] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
 
@@ -162,11 +163,11 @@ def _load_source_state(work: Path) -> tuple[LectureState, Path]:
 
 
 def _load_raw_context_index(work: Path) -> dict[str, dict[str, Any]]:
-    """Index sensor-level context retained by the old/local repair stage.
+    """Merge sensor-level context retained by local repair artifacts.
 
-    The reconstruction prototype does not consume the repair decision itself. It reuses only raw
-    windows, evidence catalogs and current sensor metadata so the experiment can run without
-    repeating ASR/OCR/video extraction.
+    The reconstruction prototype ignores every repair decision. Duplicate resolution artifacts are
+    common because the same observation can appear in topic-level and repaired-episode passes, so
+    their raw evidence is merged rather than whichever path happens to be visited last winning.
     """
 
     result: dict[str, dict[str, Any]] = {}
@@ -183,12 +184,29 @@ def _load_raw_context_index(work: Path) -> dict[str, dict[str, Any]]:
         observation_id = str(current.get("id") or path.stem)
         if not observation_id:
             continue
-        result[observation_id] = {
-            "current_sensor_hypothesis": current,
-            "raw_windows": payload.get("raw_windows") or [],
-            "evidence_catalog": payload.get("evidence_catalog") or [],
-            "images": payload.get("images") or [],
-        }
+        entry = result.setdefault(
+            observation_id,
+            {
+                "current_sensor_hypothesis": current,
+                "raw_windows": [],
+                "evidence_catalog": [],
+                "images": [],
+            },
+        )
+        if current and not entry.get("current_sensor_hypothesis"):
+            entry["current_sensor_hypothesis"] = current
+
+        for key in ("raw_windows", "evidence_catalog", "images"):
+            seen = {
+                json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                for item in entry[key]
+            }
+            for item in payload.get(key) or []:
+                signature = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                if signature in seen:
+                    continue
+                entry[key].append(item)
+                seen.add(signature)
     return result
 
 
@@ -272,11 +290,13 @@ Inputs:
 {json.dumps(payloads, ensure_ascii=False, separators=(",", ":"))}
 
 This is candidate generation, not reconstruction and not note writing. Do NOT select a final
-interpretation. For every observation_id return up to {candidate_count - 2} materially distinct
-non-null alternatives in addition to the source hypothesis that the host keeps separately.
+interpretation. For every observation_id score the supplied source hypothesis and return up to
+{candidate_count - 2} materially distinct non-null alternatives. The host keeps the source as an
+explicit candidate; do not repeat it among candidates.
 
 Rules:
-- evidence_score measures LOCAL support from the supplied sensor evidence only, on [-3, 3];
+- source_evidence_score and candidate evidence_score measure LOCAL support from the supplied sensor
+  evidence only, on [-3, 3], and must be directly comparable within that observation;
 - do not use later textbook knowledge or global mathematical consistency to repair the source;
 - preserve lecturer mistakes if they are a locally plausible reading;
 - if several glyphs, formulas, referents or statements remain plausible, keep alternatives separate;
@@ -292,10 +312,18 @@ is only to propose alternatives that should remain alive for later global infere
 """
 
 
-def _source_candidate(observation: LectureObservation) -> CandidateHypothesis:
-    # Center confidence around zero. This score is deliberately modest: pairwise/global evidence is
-    # allowed to overturn a locally plausible source interpretation.
-    score = 2.0 * float(observation.confidence) - 1.0
+def _source_candidate(
+    observation: LectureObservation,
+    *,
+    evidence_score: float | None,
+) -> CandidateHypothesis:
+    # If candidate generation is unavailable, fall back to the extractor confidence. Normal runs
+    # score source and alternatives jointly so their relative unary potentials share one scale.
+    score = (
+        float(evidence_score)
+        if evidence_score is not None
+        else 2.0 * float(observation.confidence) - 1.0
+    )
     return CandidateHypothesis(
         id=f"{observation.id}:source",
         observation_id=observation.id,
@@ -342,7 +370,12 @@ def _materialize_candidate_set(
     raw_context: dict[str, Any],
     candidate_count: int,
 ) -> CandidateSet:
-    candidates: list[CandidateHypothesis] = [_source_candidate(observation)]
+    candidates: list[CandidateHypothesis] = [
+        _source_candidate(
+            observation,
+            evidence_score=proposal.source_evidence_score if proposal is not None else None,
+        )
+    ]
     seen = {
         _candidate_key(
             candidates[0].kind,
