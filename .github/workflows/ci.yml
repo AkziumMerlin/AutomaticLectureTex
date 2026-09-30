@@ -20,6 +20,7 @@ jobs:
         run: |
           ruff check --ignore E501,I001 \
             src/automatic_lecture_tex/asr.py \
+            src/automatic_lecture_tex/claim_compaction.py \
             src/automatic_lecture_tex/board.py \
             src/automatic_lecture_tex/cli.py \
             src/automatic_lecture_tex/config.py \
@@ -45,6 +46,7 @@ jobs:
             src/automatic_lecture_tex/unimumer_worker.py \
             src/automatic_lecture_tex/visual_formula_gate.py \
             tests/test_adaptive_board_sampling.py \
+            tests/test_claim_compaction.py \
             tests/test_evidence_preservation.py \
             tests/test_formula_detection.py \
             tests/test_generated_notes.py \
