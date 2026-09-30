@@ -98,6 +98,14 @@ class NotesConfig(BaseModel):
     episode_synthesis_max_evidence_chars: int = Field(default=24000, ge=4000, le=200000)
     state_section_max_evidence_chars: int = Field(default=100000, ge=8000, le=200000)
     state_section_assembly: Literal["llm", "deterministic"] = "llm"
+    state_semantic_backend: Literal["legacy", "mutable_graph"] = "legacy"
+    state_graph_revision_rounds: int = Field(default=3, ge=1, le=8)
+    state_graph_revision_batch_observations: int = Field(default=24, ge=6, le=80)
+    state_graph_revision_overlap_observations: int = Field(default=4, ge=0, le=20)
+    state_graph_revision_frontier_width: int = Field(default=3, ge=1, le=12)
+    state_graph_revision_catalog_chars: int = Field(default=36000, ge=8000, le=120000)
+    state_graph_revision_raw_context_chars: int = Field(default=16000, ge=2000, le=60000)
+    state_graph_revision_max_images: int = Field(default=3, ge=0, le=5)
     state_section_raw_context_seconds: float = Field(default=90.0, ge=0.0, le=300.0)
     state_section_raw_evidence_chars: int = Field(default=16000, ge=2000, le=60000)
     state_section_writer_thinking: bool = False
