@@ -214,3 +214,32 @@ def test_renderer_preserves_explicit_topic_membership() -> None:
     assert len(ir.chunks) == 1
     assert ir.chunks[0].section_title == "A"
     assert "Late clarification" in ir.chunks[0].blocks[0].latex
+
+
+def test_renderer_dependencies_override_observation_timestamps() -> None:
+    state = _lecture_state()
+    from automatic_lecture_tex.graph_revision import graph_state_from_lecture_state
+
+    graph = graph_state_from_lecture_state(state)
+    graph.nodes["definition"] = GraphNode(
+        id="definition",
+        kind="definition",
+        title="g",
+        text="Define g.",
+        evidence_ids=["o3"],
+    )
+    graph.nodes["proof"] = GraphNode(
+        id="proof",
+        kind="proof",
+        title="Complex linearity",
+        text="Then prove g is complex-linear.",
+        evidence_ids=["o1"],
+        derived_from=["definition"],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+
+    assert [block.title for block in ir.chunks[0].blocks] == [
+        "g",
+        "Complex linearity",
+    ]
