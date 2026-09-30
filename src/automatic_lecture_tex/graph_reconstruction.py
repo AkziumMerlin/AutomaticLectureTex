@@ -555,12 +555,13 @@ def _candidate_symbols(candidate: CandidateHypothesis) -> set[str]:
 
 
 def _set_symbols(candidate_set: CandidateSet) -> set[str]:
-    result: set[str] = set()
-    for candidate in candidate_set.candidates:
-        if candidate.kind == "null":
-            continue
-        result.update(_candidate_symbols(candidate))
-    return result
+    # Graph topology is evidence-derived. A model-proposed alternative must not create a non-local
+    # edge that can then feed back and make that same alternative easier to select.
+    source = next(
+        (candidate for candidate in candidate_set.candidates if candidate.source == "source"),
+        None,
+    )
+    return _candidate_symbols(source) if source is not None else set()
 
 
 def build_sparse_edges(
