@@ -432,7 +432,7 @@ suppress_node, add_violation, and resolve_violation.
 
 Every entry in operations must be an operation object with an explicit "op" discriminator. Never
 place a GraphNode directly in operations. For a new node, emit exactly the wrapper
-{"op":"add_node","node":{...}} (or {"op":"add_derived","node":{...}} when appropriate).
+{{"op":"add_node","node":{{...}}}} (or {{"op":"add_derived","node":{{...}}}} when appropriate).
 
 merge_nodes semantics:
 - node_ids are source nodes to absorb;
