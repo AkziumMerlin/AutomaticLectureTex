@@ -531,3 +531,70 @@ def test_merge_nodes_repairs_metadata_alias_and_updates_target_metadata() -> Non
         "lecture evidence does not fix convention"
     )
     assert target.metadata["merged_from"] == ["obs::e2"]
+
+
+def test_suppress_node_marks_evidence_as_handled() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="degenerate ASR")},
+        nodes={
+            "obs::e1": GraphNode(
+                id="obs::e1",
+                kind="provisional_remark",
+                text="degenerate ASR",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="suppress-noise",
+            description="Discard non-formal repeated/noisy evidence.",
+            operations=[
+                SuppressNodeOp(
+                    op="suppress_node",
+                    node_id="obs::e1",
+                    reason="degenerate ASR without independent mathematical content",
+                )
+            ],
+        ),
+    )
+
+    assert revised.nodes["obs::e1"].status == "suppressed"
+    assert revised.evidence_disposition["e1"].startswith("suppressed:")
+    assert metrics(revised).unexplained_evidence == 0
+
+
+def test_resolving_violation_clears_tagged_failure_note() -> None:
+    state = GraphState(
+        evidence={},
+        violations={
+            "focus::common_failed::0": Violation(
+                id="focus::common_failed::0",
+                category="structure",
+                severity=1,
+                message="failed patch",
+            )
+        },
+        notes=[
+            "[focus::common_failed::0] Unapplied patch patch_x: ValueError: stale source"
+        ],
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="resolve",
+            description="Resolve a previously failed patch marker.",
+            operations=[
+                ResolveViolationOp(
+                    op="resolve_violation",
+                    violation_id="focus::common_failed::0",
+                )
+            ],
+        ),
+    )
+
+    assert "focus::common_failed::0" not in revised.violations
+    assert revised.notes == []

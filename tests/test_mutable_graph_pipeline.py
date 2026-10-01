@@ -9,6 +9,7 @@ from automatic_lecture_tex.graph_revision import (
     ReplaceNodeOp,
     RetypeNodeOp,
     AddRelationOp,
+    Violation,
 )
 from automatic_lecture_tex.graph_revision_pipeline import (
     GraphRevisionProposal,
@@ -626,3 +627,120 @@ def test_graph_revision_emits_high_level_progress_logs(
     assert any("proposal ready: common_ops=" in message for message in messages)
     assert any("focus round_00_focus_000 done" in message for message in messages)
     assert any("[graph_revision] complete:" in message for message in messages)
+
+
+def test_same_turn_diagnosis_does_not_survive_successful_common_patch() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    base = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="old")},
+        nodes={
+            "n": GraphNode(
+                id="n",
+                kind="claim",
+                text="old",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+    proposal = GraphRevisionProposal(
+        focus_id="focus",
+        diagnosed_violations=[
+            Violation(
+                id="pre_edit_problem",
+                category="structure",
+                severity=2,
+                message="The current node text is incomplete.",
+                related_nodes=["n"],
+            )
+        ],
+        common_patch=GraphPatch(
+            id="fix",
+            description="Complete the node.",
+            operations=[
+                ReplaceNodeOp(
+                    op="replace_node",
+                    node_id="n",
+                    text="complete",
+                )
+            ],
+        ),
+    )
+
+    frontier = _expand_frontier([base], proposal, width=2)
+
+    assert len(frontier) == 1
+    assert frontier[0].nodes["n"].text == "complete"
+    assert "pre_edit_problem" not in frontier[0].violations
+
+
+def test_renderer_refinement_anchor_pulls_late_premises_into_refined_topic() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "weak": EvidenceRecord(id="weak", start=100.0, end=101.0, text="weak"),
+            "l2": EvidenceRecord(id="l2", start=3000.0, end=3001.0, text="l2"),
+            "beta": EvidenceRecord(id="beta", start=4300.0, end=4301.0, text="beta"),
+            "claim": EvidenceRecord(id="claim", start=4310.0, end=4311.0, text="claim"),
+        },
+        nodes={
+            "weak_topic": GraphNode(
+                id="weak_topic",
+                kind="topic",
+                title="Weak topology",
+                evidence_ids=["weak"],
+            ),
+            "l2_topic": GraphNode(
+                id="l2_topic",
+                kind="topic",
+                title="l2 example",
+                evidence_ids=["l2"],
+            ),
+            "sigma": GraphNode(
+                id="sigma",
+                kind="definition",
+                title="Early generating family",
+                text="sigma",
+                evidence_ids=["weak"],
+            ),
+            "beta": GraphNode(
+                id="beta",
+                kind="definition",
+                title="Finite-intersection family",
+                text="beta",
+                evidence_ids=["beta"],
+            ),
+            "beta_tilde": GraphNode(
+                id="beta_tilde",
+                kind="definition",
+                title="Common-center finite-intersection family",
+                text="beta tilde",
+                evidence_ids=["beta"],
+            ),
+            "equivalence": GraphNode(
+                id="equivalence",
+                kind="claim",
+                title="Equivalent basis refinement",
+                text="refines sigma",
+                evidence_ids=["claim"],
+                derived_from=["beta", "beta_tilde"],
+            ),
+        },
+        edges=[
+            GraphEdge(source="weak_topic", target="sigma", relation="contains"),
+            GraphEdge(source="equivalence", target="sigma", relation="refines"),
+        ],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    chunks = {chunk.section_title: chunk for chunk in ir.chunks}
+
+    weak_titles = {block.title for block in chunks["Weak topology"].blocks}
+    assert "Equivalent basis refinement" in weak_titles
+    assert "Finite-intersection family" in weak_titles
+    assert "Common-center finite-intersection family" in weak_titles
+    if "l2 example" in chunks:
+        l2_titles = {block.title for block in chunks["l2 example"].blocks}
+        assert "Equivalent basis refinement" not in l2_titles
+        assert "Finite-intersection family" not in l2_titles
