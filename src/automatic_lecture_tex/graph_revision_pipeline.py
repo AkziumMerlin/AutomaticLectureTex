@@ -27,6 +27,7 @@ from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
 GRAPH_REVISION_PROPOSAL_VERSION = 4
+GRAPH_REVISION_RUNTIME_VERSION = 1
 
 logger = logging.getLogger(__name__)
 
