@@ -476,3 +476,58 @@ def test_graph_patch_does_not_guess_ambiguous_missing_operation_tag() -> None:
                 ],
             }
         )
+
+
+def test_merge_nodes_repairs_metadata_alias_and_updates_target_metadata() -> None:
+    state = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", text="canonical"),
+            "e2": EvidenceRecord(id="e2", text="support"),
+        },
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="theorem",
+                text="core",
+                evidence_ids=["e1"],
+                metadata={"field": "complex"},
+            ),
+            "obs::e2": GraphNode(
+                id="obs::e2",
+                kind="provisional_claim",
+                text="support",
+                evidence_ids=["e2"],
+            ),
+        },
+    )
+
+    patch = GraphPatch.model_validate(
+        {
+            "id": "merge-with-metadata",
+            "description": "Absorb support and record ambiguity metadata.",
+            "operations": [
+                {
+                    "op": "merge_nodes",
+                    "node_ids": ["obs::e2"],
+                    "into_id": "canonical",
+                    "metadata": {
+                        "conjugation_ambiguity": "lecture evidence does not fix convention"
+                    },
+                }
+            ],
+        }
+    )
+
+    operation = patch.operations[0]
+    assert isinstance(operation, MergeNodesOp)
+    assert operation.metadata_update == {
+        "conjugation_ambiguity": "lecture evidence does not fix convention"
+    }
+
+    revised = apply_patch(state, patch)
+    target = revised.nodes["canonical"]
+    assert target.metadata["field"] == "complex"
+    assert target.metadata["conjugation_ambiguity"] == (
+        "lecture evidence does not fix convention"
+    )
+    assert target.metadata["merged_from"] == ["obs::e2"]

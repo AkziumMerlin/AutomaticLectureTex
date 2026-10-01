@@ -93,6 +93,18 @@ class AddNodeOp(BaseModel):
 
 class MergeNodesOp(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_metadata_alias(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if "metadata" not in value or "metadata_update" in value:
+            return value
+        repaired = dict(value)
+        repaired["metadata_update"] = repaired.pop("metadata")
+        return repaired
+
     op: Literal["merge_nodes"]
     node_ids: list[str] = Field(min_length=1)
     into_id: str
@@ -100,6 +112,7 @@ class MergeNodesOp(BaseModel):
     title: str | None = None
     text: str | None = None
     latex: str | None = None
+    metadata_update: dict[str, Any] = Field(default_factory=dict)
 
 
 class SplitNodeOp(BaseModel):
@@ -614,6 +627,7 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
             aliases = _dedupe([item for node in members for item in node.aliases])
 
             metadata = dict(base.metadata)
+            metadata.update(operation.metadata_update)
             previous_merged = metadata.get("merged_from", [])
             if not isinstance(previous_merged, list):
                 previous_merged = [str(previous_merged)]

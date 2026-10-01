@@ -462,6 +462,7 @@ merge_nodes semantics:
 - into_id may be a new id when merging 2+ source nodes;
 - if into_id already exists and is not listed in node_ids, even a single source node is valid:
   its provenance/dependencies/aliases are absorbed into that existing canonical target;
+- use metadata_update for metadata that should be added to the merged canonical target;
 - never emit merge_nodes with node_ids=[into_id] only; that is a meaningless self-merge.
 
 Important invariants:
