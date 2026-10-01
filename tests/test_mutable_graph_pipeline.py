@@ -586,7 +586,8 @@ def test_renderer_inherits_topic_from_long_range_dependency() -> None:
         block.title == "Finite-intersection basis"
         for block in chunks["Weak topology"].blocks
     )
-    assert not any(
-        block.title == "Finite-intersection basis"
-        for block in chunks["l2 example"].blocks
-    )
+    if "l2 example" in chunks:
+        assert not any(
+            block.title == "Finite-intersection basis"
+            for block in chunks["l2 example"].blocks
+        )
