@@ -205,15 +205,18 @@ def _section_assignment(
 
     explicit_nodes = set(membership)
     assignment: dict[str, str] = {}
+    assignment_origin: dict[str, str] = {}
     for node in renderable:
         explicit = membership.get(node.id)
         if explicit is not None and explicit in topic_ids:
             assignment[node.id] = _root_topic(explicit, parents)
+            assignment_origin[node.id] = "explicit"
             continue
 
         start, _ = _node_times(state, node)
         if start < first_topic_time:
             assignment[node.id] = "__prelude__"
+            assignment_origin[node.id] = "prelude"
             continue
 
         preceding = [
@@ -222,20 +225,74 @@ def _section_assignment(
             if topic_start <= start
         ]
         assignment[node.id] = preceding[-1][1] if preceding else topics[0].id
+        assignment_origin[node.id] = "chronological"
 
-    # Chronology is only a fallback. A late clarification/derived construction belongs with the
-    # mathematical object it refines when its dependencies consistently live in another section.
-    # Explicit topic membership always wins.
+    # Chronology is only a fallback. Typed semantic relations such as "refines" provide stronger
+    # ownership: a late clarification belongs with the mathematical object it refines. Once such a
+    # refinement is anchored, its otherwise-unassigned premises follow it, which models a small
+    # directed hypergraph rather than treating every dependency as an undirected proximity edge.
+    strong_topic_relations = {
+        "refines",
+        "equivalent_to",
+        "equivalent",
+        "proves",
+        "supports",
+    }
+    by_id = {node.id: node for node in renderable}
+    derived_dependencies = {
+        node.id: set(node.derived_from)
+        for node in renderable
+    }
+
+    for _ in range(max(1, len(renderable))):
+        changed = False
+
+        for edge in state.edges:
+            if _kind(edge.relation) not in strong_topic_relations:
+                continue
+            if edge.source not in by_id or edge.target not in assignment:
+                continue
+            if assignment_origin.get(edge.source) in {"explicit", "prelude"}:
+                continue
+            target_topic = assignment.get(edge.target)
+            if target_topic in {None, "__prelude__"}:
+                continue
+            if assignment.get(edge.source) != target_topic:
+                assignment[edge.source] = target_topic
+                assignment_origin[edge.source] = "semantic"
+                changed = True
+
+        # A semantically anchored refinement/proof may have premises introduced much later in time.
+        # Pull only chronology-assigned premises into that same topic; never override explicit
+        # membership or another already-semantic assignment.
+        for node_id, dependencies in derived_dependencies.items():
+            if assignment_origin.get(node_id) != "semantic":
+                continue
+            owner = assignment[node_id]
+            for dependency in dependencies:
+                if dependency not in by_id:
+                    continue
+                if assignment_origin.get(dependency) != "chronological":
+                    continue
+                if assignment.get(dependency) != owner:
+                    assignment[dependency] = owner
+                    assignment_origin[dependency] = "semantic"
+                    changed = True
+
+        if not changed:
+            break
+
+    # Ordinary derivation remains a weaker fallback: move a chronology-assigned node only when all
+    # of its relevant premises already agree on one topic.
     edge_dependencies: dict[str, set[str]] = defaultdict(set)
     for edge in state.edges:
         if _kind(edge.relation) in {"derived_from", "depends_on"}:
             edge_dependencies[edge.source].add(edge.target)
 
-    by_id = {node.id: node for node in renderable}
     for _ in range(max(1, len(renderable))):
         changed = False
         for node in renderable:
-            if node.id in explicit_nodes or assignment.get(node.id) == "__prelude__":
+            if assignment_origin.get(node.id) != "chronological":
                 continue
             dependencies = set(node.derived_from)
             dependencies.update(edge_dependencies.get(node.id, set()))
