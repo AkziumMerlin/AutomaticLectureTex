@@ -745,12 +745,26 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 raise KeyError(operation.node_id)
             node.status = "suppressed"
             node.metadata["suppressed_reason"] = operation.reason
+            # Suppression is an explicit semantic disposition of the underlying evidence, not
+            # evidence loss. Keep the raw evidence immutable while recording that it was handled as
+            # repetition/context/noise rather than promoted to canonical mathematics.
+            for evidence_id in node.evidence_ids:
+                out.evidence_disposition.setdefault(
+                    evidence_id,
+                    f"suppressed:{operation.reason}",
+                )
 
         elif isinstance(operation, AddViolationOp):
             out.violations[operation.violation.id] = operation.violation
 
         elif isinstance(operation, ResolveViolationOp):
             out.violations.pop(operation.violation_id, None)
+            prefix = f"[{operation.violation_id}] "
+            out.notes = [
+                note
+                for note in out.notes
+                if not note.startswith(prefix)
+            ]
 
         else:
             raise TypeError(operation)
