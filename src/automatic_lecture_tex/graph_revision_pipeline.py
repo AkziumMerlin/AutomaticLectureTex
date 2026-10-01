@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,8 @@ from .util import atomic_json_dump, stable_hash
 
 GRAPH_REVISION_PROPOSAL_VERSION = 4
 
+logger = logging.getLogger(__name__)
+
 
 class GraphRevisionProposal(BaseModel):
     """One model review of a focus region against the current whole-lecture graph."""
@@ -45,6 +49,25 @@ class GraphRevisionRun:
     frontier: list[GraphState]
     consensus: GraphState
     stats: dict[str, Any]
+
+
+def _metrics_log_line(state: GraphState) -> str:
+    value = metrics(state)
+    return (
+        f"active={value.active_nodes} "
+        f"unexplained={value.unexplained_evidence} "
+        f"unsupported={value.unsupported_nodes} "
+        f"dup={value.duplicate_nodes} "
+        f"violations=e{value.evidence_violations}/m{value.math_violations}/"
+        f"s{value.structure_violations}"
+    )
+
+
+def _frontier_log_line(frontier: list[GraphState]) -> str:
+    if not frontier:
+        return "frontier=0"
+    representative = graph_consensus(frontier)
+    return f"frontier={len(frontier)} {_metrics_log_line(representative)}"
 
 
 def _node_time(state: GraphState, node_id: str) -> float:
@@ -701,6 +724,15 @@ def _process_focus_resilient(
     frontier already revised by the first child rather than against a stale pre-split graph.
     """
 
+    focus_started = time.perf_counter()
+    logger.info(
+        "[graph_revision] focus %s start: observations=%d depth=%d %s",
+        focus_id,
+        len(evidence_ids),
+        split_depth,
+        _frontier_log_line(frontier),
+    )
+
     representative = graph_consensus(frontier)
     focus = _focus_evidence(representative, evidence_ids)
     raw_context = _focus_raw_windows(
@@ -730,6 +762,11 @@ def _process_focus_resilient(
 
     if not force and _load_cached_split(path, fingerprint):
         stats["split_cache_hits"] += 1
+        logger.info(
+            "[graph_revision] focus %s cached split: observations=%d",
+            focus_id,
+            len(evidence_ids),
+        )
         midpoint = len(evidence_ids) // 2
         if midpoint <= 0:
             raise StructuredTaskTooLargeError(
@@ -777,6 +814,7 @@ def _process_focus_resilient(
     if proposal is not None:
         proposal.focus_id = focus_id
         stats["cache_hits"] += 1
+        logger.info("[graph_revision] focus %s proposal cache hit", focus_id)
     else:
         images = _focus_images(
             focus,
@@ -784,6 +822,15 @@ def _process_focus_resilient(
             max_images=max_images,
         )
         stats["focus_calls"] += 1
+        logger.info(
+            "[graph_revision] focus %s requesting proposal: observations=%d "
+            "catalog_index=%d catalog_detail=%d images=%d",
+            focus_id,
+            len(evidence_ids),
+            len(catalog.get("index", [])),
+            len(catalog.get("detail", [])),
+            len(images),
+        )
         try:
             proposal = orchestrator._structured(
                 _proposal_prompt(
@@ -819,6 +866,13 @@ def _process_focus_resilient(
             left_ids = evidence_ids[:midpoint]
             right_ids = evidence_ids[midpoint:]
             stats["split_focuses"] += 1
+            logger.warning(
+                "[graph_revision] focus %s too large; split %d observations -> %d + %d",
+                focus_id,
+                len(evidence_ids),
+                len(left_ids),
+                len(right_ids),
+            )
             stats["max_split_depth"] = max(
                 int(stats["max_split_depth"]),
                 split_depth + 1,
@@ -875,6 +929,15 @@ def _process_focus_resilient(
             return frontier, left_changed or right_changed
 
         proposal.focus_id = focus_id
+        logger.info(
+            "[graph_revision] focus %s proposal ready: common_ops=%d alternatives=%d "
+            "diagnosed_violations=%d stable=%s",
+            focus_id,
+            len(proposal.common_patch.operations) if proposal.common_patch is not None else 0,
+            len(proposal.alternatives),
+            len(proposal.diagnosed_violations),
+            proposal.stable,
+        )
         atomic_json_dump(
             path,
             {
@@ -892,6 +955,12 @@ def _process_focus_resilient(
         and not proposal.alternatives
     ):
         stats["stable_focuses"] += 1
+        logger.info(
+            "[graph_revision] focus %s stable: %.1fs %s",
+            focus_id,
+            time.perf_counter() - focus_started,
+            _frontier_log_line(frontier),
+        )
         return frontier, False
 
     frontier = _expand_frontier(
@@ -901,7 +970,16 @@ def _process_focus_resilient(
     )
     after = {_state_signature(state) for state in frontier}
     stats["frontier_sizes"].append(len(frontier))
-    return frontier, before != after
+    changed = before != after
+    logger.info(
+        "[graph_revision] focus %s done: changed=%s alternatives=%d %.1fs %s",
+        focus_id,
+        changed,
+        len(proposal.alternatives),
+        time.perf_counter() - focus_started,
+        _frontier_log_line(frontier),
+    )
+    return frontier, changed
 
 
 def run_iterative_graph_revision(
@@ -944,9 +1022,27 @@ def run_iterative_graph_revision(
         "frontier_sizes": [],
     }
 
+    logger.info(
+        "[graph_revision] start: observations=%d batches=%d rounds=%d frontier_width=%d",
+        len(lecture_state.observations),
+        len(batches),
+        rounds,
+        frontier_width,
+    )
+
     for round_index in range(rounds):
+        round_started = time.perf_counter()
         changed = False
+        direction = "forward" if round_index % 2 == 0 else "reverse"
         ordered_batches = batches if round_index % 2 == 0 else list(reversed(batches))
+        logger.info(
+            "[graph_revision] round %d/%d start: direction=%s focuses=%d %s",
+            round_index + 1,
+            rounds,
+            direction,
+            len(ordered_batches),
+            _frontier_log_line(frontier),
+        )
 
         for batch_index, evidence_ids in enumerate(ordered_batches):
             focus_id = f"round_{round_index:02d}_focus_{batch_index:03d}"
@@ -969,10 +1065,26 @@ def run_iterative_graph_revision(
             changed = changed or focus_changed
 
         stats["rounds_completed"] = round_index + 1
+        logger.info(
+            "[graph_revision] round %d/%d done: changed=%s %.1fs %s",
+            round_index + 1,
+            rounds,
+            changed,
+            time.perf_counter() - round_started,
+            _frontier_log_line(frontier),
+        )
         if not changed:
+            logger.info(
+                "[graph_revision] converged after round %d; stopping early",
+                round_index + 1,
+            )
             break
 
     consensus = graph_consensus(frontier)
+    logger.info(
+        "[graph_revision] consensus ready: %s",
+        _frontier_log_line(frontier),
+    )
     root.mkdir(parents=True, exist_ok=True)
     for index, state in enumerate(frontier):
         atomic_json_dump(
@@ -997,6 +1109,16 @@ def run_iterative_graph_revision(
             ],
             "consensus_metrics": metrics(consensus).model_dump(mode="json"),
         },
+    )
+    logger.info(
+        "[graph_revision] complete: rounds=%d llm_calls=%d cache_hits=%d "
+        "splits=%d split_cache_hits=%d consensus=%s",
+        stats["rounds_completed"],
+        stats["focus_calls"],
+        stats["cache_hits"],
+        stats["split_focuses"],
+        stats["split_cache_hits"],
+        _metrics_log_line(consensus),
     )
     return GraphRevisionRun(
         frontier=frontier,

@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from automatic_lecture_tex.graph_revision import (
@@ -591,3 +592,37 @@ def test_renderer_inherits_topic_from_long_range_dependency() -> None:
             block.title == "Finite-intersection basis"
             for block in chunks["l2 example"].blocks
         )
+
+
+def test_graph_revision_emits_high_level_progress_logs(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(
+        logging.INFO,
+        logger="automatic_lecture_tex.graph_revision_pipeline",
+    )
+    run_iterative_graph_revision(
+        FakeOrchestrator(),
+        lecture_state=_lecture_state(),
+        raw_windows=[],
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        rounds=1,
+        batch_observations=3,
+        overlap_observations=0,
+        frontier_width=2,
+        catalog_chars=10000,
+        raw_context_chars=10000,
+        max_images=0,
+        max_tokens=4096,
+        force=True,
+    )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("[graph_revision] start:" in message for message in messages)
+    assert any("round 1/1 start" in message for message in messages)
+    assert any("focus round_00_focus_000 start" in message for message in messages)
+    assert any("proposal ready: common_ops=" in message for message in messages)
+    assert any("focus round_00_focus_000 done" in message for message in messages)
+    assert any("[graph_revision] complete:" in message for message in messages)
