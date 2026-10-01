@@ -203,15 +203,17 @@ def _section_assignment(
     ]
     first_topic_time = min((item[0] for item in topic_times), default=float("inf"))
 
+    explicit_nodes = set(membership)
+    assignment: dict[str, str] = {}
     for node in renderable:
         explicit = membership.get(node.id)
         if explicit is not None and explicit in topic_ids:
-            grouped[_root_topic(explicit, parents)].append(node)
+            assignment[node.id] = _root_topic(explicit, parents)
             continue
 
         start, _ = _node_times(state, node)
         if start < first_topic_time:
-            grouped["__prelude__"].append(node)
+            assignment[node.id] = "__prelude__"
             continue
 
         preceding = [
@@ -219,8 +221,41 @@ def _section_assignment(
             for topic_start, topic_id in topic_times
             if topic_start <= start
         ]
-        target = preceding[-1][1] if preceding else topics[0].id
-        grouped[target].append(node)
+        assignment[node.id] = preceding[-1][1] if preceding else topics[0].id
+
+    # Chronology is only a fallback. A late clarification/derived construction belongs with the
+    # mathematical object it refines when its dependencies consistently live in another section.
+    # Explicit topic membership always wins.
+    edge_dependencies: dict[str, set[str]] = defaultdict(set)
+    for edge in state.edges:
+        if _kind(edge.relation) in {"derived_from", "depends_on"}:
+            edge_dependencies[edge.source].add(edge.target)
+
+    by_id = {node.id: node for node in renderable}
+    for _ in range(max(1, len(renderable))):
+        changed = False
+        for node in renderable:
+            if node.id in explicit_nodes or assignment.get(node.id) == "__prelude__":
+                continue
+            dependencies = set(node.derived_from)
+            dependencies.update(edge_dependencies.get(node.id, set()))
+            dependency_topics = {
+                assignment[dependency]
+                for dependency in dependencies
+                if dependency in assignment
+                and assignment[dependency] != "__prelude__"
+            }
+            if len(dependency_topics) != 1:
+                continue
+            inherited = next(iter(dependency_topics))
+            if assignment.get(node.id) != inherited:
+                assignment[node.id] = inherited
+                changed = True
+        if not changed:
+            break
+
+    for node in renderable:
+        grouped[assignment[node.id]].append(node)
 
     return topics, grouped
 

@@ -10,7 +10,9 @@ from automatic_lecture_tex.graph_revision import (
     MergeNodesOp,
     ResolveViolationOp,
     RetypeNodeOp,
+    ReplaceNodeOp,
     SplitNodeOp,
+    SuppressNodeOp,
     Violation,
     apply_patch,
     graph_consensus,
@@ -372,3 +374,57 @@ def test_singleton_self_merge_is_rejected() -> None:
                 ],
             ),
         )
+
+
+def test_stale_provisional_cleanup_does_not_rollback_useful_patch() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="x")},
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="claim",
+                text="old text",
+                evidence_ids=["e1"],
+            )
+        },
+        violations={
+            "stale": Violation(
+                id="stale",
+                category="structure",
+                severity=1,
+                message="stale cleanup",
+            )
+        },
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="cleanup",
+            description="Useful edit plus stale provisional cleanup.",
+            operations=[
+                ReplaceNodeOp(
+                    op="replace_node",
+                    node_id="canonical",
+                    text="new text",
+                ),
+                MergeNodesOp(
+                    op="merge_nodes",
+                    node_ids=["obs::already_absorbed"],
+                    into_id="canonical",
+                ),
+                SuppressNodeOp(
+                    op="suppress_node",
+                    node_id="obs::already_absorbed",
+                    reason="already absorbed",
+                ),
+                ResolveViolationOp(
+                    op="resolve_violation",
+                    violation_id="stale",
+                ),
+            ],
+        ),
+    )
+
+    assert revised.nodes["canonical"].text == "new text"
+    assert "stale" not in revised.violations
