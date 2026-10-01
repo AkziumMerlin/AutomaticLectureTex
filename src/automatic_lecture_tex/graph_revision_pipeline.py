@@ -66,15 +66,6 @@ def _metrics_log_line(state: GraphState) -> str:
 def _frontier_log_line(frontier: list[GraphState]) -> str:
     if not frontier:
         return "frontier=0"
-    focus_started = time.perf_counter()
-    logger.info(
-        "[graph_revision] focus %s start: observations=%d depth=%d %s",
-        focus_id,
-        len(evidence_ids),
-        split_depth,
-        _frontier_log_line(frontier),
-    )
-
     representative = graph_consensus(frontier)
     return f"frontier={len(frontier)} {_metrics_log_line(representative)}"
 
@@ -732,6 +723,15 @@ def _process_focus_resilient(
     Child focuses are applied sequentially. The second child is therefore proposed against the
     frontier already revised by the first child rather than against a stale pre-split graph.
     """
+
+    focus_started = time.perf_counter()
+    logger.info(
+        "[graph_revision] focus %s start: observations=%d depth=%d %s",
+        focus_id,
+        len(evidence_ids),
+        split_depth,
+        _frontier_log_line(frontier),
+    )
 
     representative = graph_consensus(frontier)
     focus = _focus_evidence(representative, evidence_ids)
