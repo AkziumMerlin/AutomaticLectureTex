@@ -290,3 +290,85 @@ def test_canonical_node_automatically_suppresses_absorbed_provisional() -> None:
     assert revised.nodes["obs::e1"].status == "suppressed"
     assert revised.nodes["canonical"].status == "active"
     assert metrics(revised).unsupported_nodes == 0
+
+
+def test_singleton_merge_absorbs_into_existing_canonical_target() -> None:
+    state = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", text="canonical"),
+            "e2": EvidenceRecord(id="e2", text="repeat measurement"),
+        },
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="theorem",
+                title="Canonical theorem",
+                text="Keep this canonical content.",
+                evidence_ids=["e1"],
+                aliases=["old alias"],
+                metadata={"scope": "global"},
+            ),
+            "obs::e2": GraphNode(
+                id="obs::e2",
+                kind="provisional_claim",
+                text="repeat measurement",
+                evidence_ids=["e2"],
+                aliases=["surface alias"],
+            ),
+        },
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="absorb",
+            description="Absorb one provisional measurement into an existing theorem.",
+            operations=[
+                MergeNodesOp(
+                    op="merge_nodes",
+                    node_ids=["obs::e2"],
+                    into_id="canonical",
+                )
+            ],
+        ),
+    )
+
+    assert "obs::e2" not in revised.nodes
+    target = revised.nodes["canonical"]
+    assert target.kind == "theorem"
+    assert target.title == "Canonical theorem"
+    assert target.text == "Keep this canonical content."
+    assert set(target.evidence_ids) == {"e1", "e2"}
+    assert set(target.aliases) == {"old alias", "surface alias"}
+    assert target.metadata["scope"] == "global"
+    assert target.metadata["merged_from"] == ["obs::e2"]
+
+
+def test_singleton_self_merge_is_rejected() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="x")},
+        nodes={
+            "n": GraphNode(
+                id="n",
+                kind="claim",
+                text="x",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="at least two distinct nodes"):
+        apply_patch(
+            state,
+            GraphPatch(
+                id="bad-self-merge",
+                description="Meaningless self merge.",
+                operations=[
+                    MergeNodesOp(
+                        op="merge_nodes",
+                        node_ids=["n"],
+                        into_id="n",
+                    )
+                ],
+            ),
+        )
