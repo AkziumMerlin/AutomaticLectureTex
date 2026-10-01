@@ -2800,6 +2800,12 @@ def run_knowledge_pipeline(
             source_state.model_dump(mode="json"),
         )
         raw_window_index = _load_state_raw_window_index(work)
+        logger.info(
+            "[graph_revision] semantic backend start: lecture=%s observations=%d raw_windows=%d",
+            lecture.id,
+            len(source_state.observations),
+            len(raw_window_index),
+        )
         graph_started = time.perf_counter()
         graph_run = run_iterative_graph_revision(
             orchestrator,
@@ -2825,14 +2831,32 @@ def run_knowledge_pipeline(
         )
         graph_seconds = time.perf_counter() - graph_started
         consensus = graph_run.consensus
+        logger.info(
+            "[graph_revision] semantic search finished: lecture=%s seconds=%.1f frontier=%d",
+            lecture.id,
+            graph_seconds,
+            len(graph_run.frontier),
+        )
         atomic_json_dump(
             work / "lecture_graph.json",
             consensus.model_dump(mode="json"),
+        )
+        logger.info(
+            "[graph_revision] rendering consensus graph to LectureIR: lecture=%s active_nodes=%d",
+            lecture.id,
+            len(consensus.active_nodes()),
         )
         ir = graph_state_to_ir(
             consensus,
             lecture_id=lecture.id,
             title=lecture.title or lecture.id,
+        )
+        logger.info(
+            "[graph_revision] LectureIR ready: lecture=%s sections=%d blocks=%d unresolved=%d",
+            lecture.id,
+            len(ir.chunks),
+            sum(len(chunk.blocks) for chunk in ir.chunks),
+            len({item for chunk in ir.chunks for item in chunk.unresolved}),
         )
 
         pipeline._save_notation_registry(notation)
