@@ -24,7 +24,7 @@ from .llm import StructuredTaskTooLargeError
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 2
+GRAPH_REVISION_PROPOSAL_VERSION = 3
 
 
 class GraphRevisionProposal(BaseModel):
@@ -415,6 +415,13 @@ only nodes local to the focus interval.
 Useful operations include add_node, merge_nodes, split_node, retype_node, replace_node,
 add_derived, add_alias, add_relation, attach_evidence, mark_evidence, mark_alternative,
 suppress_node, add_violation, and resolve_violation.
+
+merge_nodes semantics:
+- node_ids are source nodes to absorb;
+- into_id may be a new id when merging 2+ source nodes;
+- if into_id already exists and is not listed in node_ids, even a single source node is valid:
+  its provenance/dependencies/aliases are absorbed into that existing canonical target;
+- never emit merge_nodes with node_ids=[into_id] only; that is a meaningless self-merge.
 
 Important invariants:
 - Never delete or rewrite raw evidence.
