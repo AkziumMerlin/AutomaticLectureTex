@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from automatic_lecture_tex.graph_revision import (
     AddNodeOp,
@@ -428,3 +429,50 @@ def test_stale_provisional_cleanup_does_not_rollback_useful_patch() -> None:
 
     assert revised.nodes["canonical"].text == "new text"
     assert "stale" not in revised.violations
+
+
+def test_graph_patch_repairs_bare_graph_node_operation() -> None:
+    patch = GraphPatch.model_validate(
+        {
+            "id": "repair-bare-node",
+            "description": "Model forgot the add_node wrapper.",
+            "operations": [
+                {
+                    "id": "section_g_complex",
+                    "kind": "topic",
+                    "title": "Complex functionals",
+                    "text": "",
+                    "latex": None,
+                    "evidence_ids": ["e1"],
+                    "derived_from": [],
+                    "aliases": [],
+                    "status": "active",
+                    "alternative_group": None,
+                    "metadata": {},
+                }
+            ],
+        }
+    )
+
+    assert len(patch.operations) == 1
+    operation = patch.operations[0]
+    assert isinstance(operation, AddNodeOp)
+    assert operation.op == "add_node"
+    assert operation.node.id == "section_g_complex"
+    assert operation.node.evidence_ids == ["e1"]
+
+
+def test_graph_patch_does_not_guess_ambiguous_missing_operation_tag() -> None:
+    with pytest.raises(ValidationError, match="Unable to extract tag"):
+        GraphPatch.model_validate(
+            {
+                "id": "ambiguous",
+                "description": "Missing discriminator but not a valid GraphNode.",
+                "operations": [
+                    {
+                        "node_id": "x",
+                        "text": "new text",
+                    }
+                ],
+            }
+        )

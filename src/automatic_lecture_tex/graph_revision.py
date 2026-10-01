@@ -5,7 +5,7 @@ from itertools import product
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .schemas import LectureState
 from .util import atomic_json_dump
@@ -206,6 +206,48 @@ PatchOp = Annotated[
 
 class GraphPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_bare_graph_node_operations(cls, value: Any) -> Any:
+        """Repair a narrow model-output mistake without weakening the operation schema.
+
+        Vision/non-guided JSON calls occasionally emit a GraphNode directly inside operations[]
+        instead of wrapping it as {"op": "add_node", "node": {...}}. A bare object is repaired
+        only when it validates unambiguously as GraphNode. All other missing-discriminator shapes
+        are left untouched so Pydantic still reports the real schema error.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        operations = value.get("operations")
+        if not isinstance(operations, list):
+            return value
+
+        repaired: list[Any] = []
+        changed = False
+        for operation in operations:
+            if not isinstance(operation, dict) or "op" in operation:
+                repaired.append(operation)
+                continue
+            try:
+                node = GraphNode.model_validate(operation)
+            except ValidationError:
+                repaired.append(operation)
+                continue
+            repaired.append(
+                {
+                    "op": "add_node",
+                    "node": node.model_dump(mode="json"),
+                }
+            )
+            changed = True
+
+        if not changed:
+            return value
+        result = dict(value)
+        result["operations"] = repaired
+        return result
 
     id: str
     description: str
