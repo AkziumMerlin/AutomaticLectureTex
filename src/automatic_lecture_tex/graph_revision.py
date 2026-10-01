@@ -514,10 +514,26 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
             missing = [
                 node_id for node_id in source_ids if node_id not in out.nodes
             ]
-            if missing:
-                raise ValueError(f"merge missing nodes: {missing}")
-
             target_exists = operation.into_id in out.nodes
+            if missing:
+                # Replayed/late cleanup patches may mention provisional observations that were
+                # already absorbed by an earlier canonical merge. Treat those sources as
+                # idempotently consumed when the canonical target still exists; missing canonical
+                # sources remain a real structural error.
+                stale_provisionals = [
+                    node_id for node_id in missing if node_id.startswith("obs::")
+                ]
+                hard_missing = [
+                    node_id for node_id in missing if node_id not in stale_provisionals
+                ]
+                if hard_missing or not target_exists:
+                    raise ValueError(f"merge missing nodes: {missing}")
+                source_ids = [
+                    node_id for node_id in source_ids if node_id in out.nodes
+                ]
+                if not source_ids:
+                    continue
+
             if target_exists and operation.into_id not in source_ids:
                 # Absorb one or more source nodes into an already-existing canonical target.
                 member_ids = [operation.into_id, *source_ids]
@@ -664,7 +680,13 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
             node.alternative_group = operation.group
 
         elif isinstance(operation, SuppressNodeOp):
-            node = out.nodes[operation.node_id]
+            node = out.nodes.get(operation.node_id)
+            if node is None:
+                if operation.node_id.startswith("obs::"):
+                    # Idempotent cleanup: a provisional node can already have been deleted by a
+                    # merge earlier in this or a previous patch.
+                    continue
+                raise KeyError(operation.node_id)
             node.status = "suppressed"
             node.metadata["suppressed_reason"] = operation.reason
 
