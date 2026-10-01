@@ -94,7 +94,7 @@ class AddNodeOp(BaseModel):
 class MergeNodesOp(BaseModel):
     model_config = ConfigDict(extra="forbid")
     op: Literal["merge_nodes"]
-    node_ids: list[str] = Field(min_length=2)
+    node_ids: list[str] = Field(min_length=1)
     into_id: str
     kind: str | None = None
     title: str | None = None
@@ -510,20 +510,66 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
             out.nodes[node.id] = node
 
         elif isinstance(operation, MergeNodesOp):
+            source_ids = _dedupe(operation.node_ids)
             missing = [
-                node_id for node_id in operation.node_ids if node_id not in out.nodes
+                node_id for node_id in source_ids if node_id not in out.nodes
             ]
             if missing:
                 raise ValueError(f"merge missing nodes: {missing}")
-            members = [out.nodes[node_id] for node_id in operation.node_ids]
+
+            target_exists = operation.into_id in out.nodes
+            if target_exists and operation.into_id not in source_ids:
+                # Absorb one or more source nodes into an already-existing canonical target.
+                member_ids = [operation.into_id, *source_ids]
+            else:
+                member_ids = source_ids
+
+            member_ids = _dedupe(member_ids)
+            if len(member_ids) < 2:
+                raise ValueError(
+                    "merge requires at least two distinct nodes unless into_id is an "
+                    "existing distinct target"
+                )
+
+            members = [out.nodes[node_id] for node_id in member_ids]
+            base = (
+                out.nodes[operation.into_id]
+                if target_exists
+                else members[0]
+            )
+
             evidence_ids = _dedupe(
                 [item for node in members for item in node.evidence_ids]
             )
+            absorbed_ids = {
+                node_id for node_id in member_ids if node_id != operation.into_id
+            }
             derived_from = _dedupe(
-                [item for node in members for item in node.derived_from]
+                [
+                    dependency
+                    for node in members
+                    for dependency in node.derived_from
+                    if dependency not in absorbed_ids
+                    and dependency != operation.into_id
+                ]
             )
             aliases = _dedupe([item for node in members for item in node.aliases])
-            base = members[0]
+
+            metadata = dict(base.metadata)
+            previous_merged = metadata.get("merged_from", [])
+            if not isinstance(previous_merged, list):
+                previous_merged = [str(previous_merged)]
+            metadata["merged_from"] = _dedupe(
+                [
+                    *[str(item) for item in previous_merged],
+                    *[
+                        node_id
+                        for node_id in member_ids
+                        if node_id != operation.into_id
+                    ],
+                ]
+            )
+
             merged = GraphNode(
                 id=operation.into_id,
                 kind=operation.kind or base.kind,
@@ -533,15 +579,20 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 evidence_ids=evidence_ids,
                 derived_from=derived_from,
                 aliases=aliases,
-                metadata={"merged_from": list(operation.node_ids)},
+                status=base.status,
+                alternative_group=base.alternative_group,
+                metadata=metadata,
             )
-            for node_id in operation.node_ids:
-                del out.nodes[node_id]
+
+            for node_id in member_ids:
+                if node_id != operation.into_id:
+                    del out.nodes[node_id]
             out.nodes[operation.into_id] = merged
+
             for edge in out.edges:
-                if edge.source in operation.node_ids:
+                if edge.source in absorbed_ids:
                     edge.source = operation.into_id
-                if edge.target in operation.node_ids:
+                if edge.target in absorbed_ids:
                     edge.target = operation.into_id
             out.edges = [edge for edge in out.edges if edge.source != edge.target]
 
