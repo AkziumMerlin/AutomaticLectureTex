@@ -12,6 +12,7 @@ from automatic_lecture_tex.graph_revision import (
 from automatic_lecture_tex.graph_revision_pipeline import (
     GraphRevisionProposal,
     _compact_catalog,
+    _expand_frontier,
     run_iterative_graph_revision,
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
@@ -453,3 +454,139 @@ def test_renderer_collapses_child_topics_and_preserves_pretopic_material() -> No
     ]
     assert [block.title for block in ir.chunks[0].blocks] == ["Initial definition"]
     assert any(block.title == "Child theorem" for block in ir.chunks[1].blocks)
+
+
+def test_catalog_includes_distant_derived_node_in_focus_detail() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "early": EvidenceRecord(id="early", start=10.0, end=11.0, text="early"),
+            "late": EvidenceRecord(id="late", start=4000.0, end=4001.0, text="late"),
+        },
+        nodes={
+            "elementary": GraphNode(
+                id="elementary",
+                kind="equation",
+                title="Elementary neighbourhood",
+                text="V(x, phi, eps)",
+                evidence_ids=["early"],
+            ),
+            "finite_basis": GraphNode(
+                id="finite_basis",
+                kind="definition",
+                title="Finite-intersection basis",
+                text="Finite intersections of elementary neighbourhoods.",
+                evidence_ids=["late"],
+                derived_from=["elementary"],
+            ),
+        },
+    )
+
+    catalog = _compact_catalog(
+        graph,
+        10000,
+        focus_evidence_ids=["early"],
+    )
+
+    assert "finite_basis" in {row["id"] for row in catalog["detail"]}
+
+
+def test_single_alternative_keeps_common_state_as_competing_frontier() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    base = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="x")},
+        nodes={
+            "n": GraphNode(
+                id="n",
+                kind="equation",
+                text="literal reading",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+    proposal = GraphRevisionProposal(
+        focus_id="focus",
+        alternatives=[
+            GraphPatch(
+                id="alternative",
+                description="Competing reading.",
+                operations=[
+                    ReplaceNodeOp(
+                        op="replace_node",
+                        node_id="n",
+                        text="alternative reading",
+                    )
+                ],
+            )
+        ],
+    )
+
+    frontier = _expand_frontier([base], proposal, width=3)
+
+    assert len(frontier) == 2
+    assert {state.nodes["n"].text for state in frontier} == {
+        "literal reading",
+        "alternative reading",
+    }
+
+
+def test_renderer_inherits_topic_from_long_range_dependency() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "weak": EvidenceRecord(id="weak", start=100.0, end=101.0, text="weak"),
+            "l2": EvidenceRecord(id="l2", start=3000.0, end=3001.0, text="l2"),
+            "late": EvidenceRecord(id="late", start=4000.0, end=4001.0, text="late"),
+        },
+        nodes={
+            "weak_topic": GraphNode(
+                id="weak_topic",
+                kind="topic",
+                title="Weak topology",
+                evidence_ids=["weak"],
+            ),
+            "l2_topic": GraphNode(
+                id="l2_topic",
+                kind="topic",
+                title="l2 example",
+                evidence_ids=["l2"],
+            ),
+            "elementary": GraphNode(
+                id="elementary",
+                kind="equation",
+                title="Elementary neighbourhood",
+                text="V",
+                evidence_ids=["weak"],
+            ),
+            "late_basis": GraphNode(
+                id="late_basis",
+                kind="definition",
+                title="Finite-intersection basis",
+                text="beta",
+                evidence_ids=["late"],
+                derived_from=["elementary"],
+            ),
+        },
+        edges=[
+            GraphEdge(
+                source="weak_topic",
+                target="elementary",
+                relation="contains",
+            )
+        ],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    chunks = {chunk.section_title: chunk for chunk in ir.chunks}
+
+    assert any(
+        block.title == "Finite-intersection basis"
+        for block in chunks["Weak topology"].blocks
+    )
+    assert not any(
+        block.title == "Finite-intersection basis"
+        for block in chunks["l2 example"].blocks
+    )
