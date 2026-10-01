@@ -929,6 +929,15 @@ def _process_focus_resilient(
             return frontier, left_changed or right_changed
 
         proposal.focus_id = focus_id
+        logger.info(
+            "[graph_revision] focus %s proposal ready: common_ops=%d alternatives=%d "
+            "diagnosed_violations=%d stable=%s",
+            focus_id,
+            len(proposal.common_patch.operations) if proposal.common_patch is not None else 0,
+            len(proposal.alternatives),
+            len(proposal.diagnosed_violations),
+            proposal.stable,
+        )
         atomic_json_dump(
             path,
             {
