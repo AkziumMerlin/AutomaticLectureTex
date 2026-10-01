@@ -24,7 +24,7 @@ from .llm import StructuredTaskTooLargeError
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 3
+GRAPH_REVISION_PROPOSAL_VERSION = 4
 
 
 class GraphRevisionProposal(BaseModel):
@@ -133,6 +133,20 @@ def _compact_catalog(
             related_ids.add(edge.target)
         if edge.target in focus_node_ids:
             related_ids.add(edge.source)
+
+    # Node-level derivation dependencies are first-class graph relations too. They are not always
+    # duplicated into state.edges, and omitting them hid late mathematical refinements from reverse
+    # passes (for example a late finite-intersection basis derived from an early elementary weak
+    # neighbourhood).
+    for node in active:
+        if node.id in focus_node_ids:
+            related_ids.update(
+                dependency
+                for dependency in node.derived_from
+                if dependency in state.nodes
+            )
+        if any(dependency in focus_node_ids for dependency in node.derived_from):
+            related_ids.add(node.id)
 
     def detail_priority(node: Any) -> tuple[int, float, str]:
         direct = bool(focus_ids.intersection(node.evidence_ids))
@@ -448,6 +462,10 @@ Important invariants:
 - A patch may resolve violations diagnosed in this same response by their exact ids.
 - The global index lists every existing canonical node id. Never add a node under an id already
   present there; revise/retype/attach/merge the existing node instead.
+- Later evidence may refine the structural role of an earlier object. If a later construction
+  introduces finite intersections, completion, closure, normalization, or another refinement of an
+  earlier generating family, revise the earlier canonical role rather than keeping two globally
+  inconsistent labels merely because both appeared literally during the lecture.
 - Use standard mathematical names when the mathematical identity is globally unambiguous; noisy
   ASR spellings are aliases, not canonical theorem names.
 - common_patch may contain only edits valid under every surviving interpretation. Put
@@ -638,15 +656,15 @@ def _expand_frontier(
             expanded.append(current)
             continue
 
-        successful = False
+        # The common state remains a viable unresolved hypothesis. Alternatives are refinements of
+        # that state, not a command to silently discard the baseline. This also makes a single
+        # model-supplied alternative meaningful: baseline + alternative form a two-branch frontier.
+        expanded.append(current)
         for alt_index, alternative in enumerate(proposal.alternatives):
             try:
                 expanded.append(apply_patch(current, alternative))
-                successful = True
             except (KeyError, ValueError):
                 continue
-        if not successful:
-            expanded.append(current)
 
     return _prune_frontier(expanded, width)
 
