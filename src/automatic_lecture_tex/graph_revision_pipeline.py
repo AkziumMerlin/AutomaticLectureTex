@@ -30,8 +30,8 @@ from .llm import StructuredTaskTooLargeError
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 4
-GRAPH_REVISION_RUNTIME_VERSION = 2
+GRAPH_REVISION_PROPOSAL_VERSION = 5
+GRAPH_REVISION_RUNTIME_VERSION = 3
 
 logger = logging.getLogger(__name__)
 
@@ -546,6 +546,7 @@ def _proposal_fingerprint(
     catalog: dict[str, list[Any]],
     frontier_summary: list[dict[str, Any]],
     llm_config: dict[str, Any],
+    proposal_prompt: str,
 ) -> str:
     return stable_hash(
         {
@@ -561,6 +562,9 @@ def _proposal_fingerprint(
                 for item in state.violations.values()
             ],
             "llm": llm_config,
+            # Cache validity follows the actual model instruction, not only a manually bumped
+            # version constant. Any semantic prompt edit therefore invalidates stale proposals.
+            "proposal_prompt_hash": stable_hash(proposal_prompt),
         }
     )
 
@@ -611,16 +615,13 @@ def _apply_or_mark_failure(
     try:
         return apply_patch(state, patch)
     except (KeyError, ValueError) as exc:
+        # A rejected proposal is a controller/audit event, not a defect in the graph that remains
+        # after the edit was rejected. Keeping it as a hard structure violation biases frontier
+        # pruning by model serialization mistakes rather than mathematical state quality.
         failed = state.clone()
-        failed.violations[failure_id] = Violation(
-            id=failure_id,
-            category="structure",
-            severity=1,
-            message=f"Graph patch could not be applied: {type(exc).__name__}: {exc}",
-        )
-        failed.notes.append(
-            f"[{failure_id}] Unapplied patch {patch.id}: {type(exc).__name__}: {exc}"
-        )
+        message = f"[{failure_id}] Unapplied patch {patch.id}: {type(exc).__name__}: {exc}"
+        failed.notes.append(message)
+        logger.warning("[graph_revision] %s", message)
         return failed
 
 
@@ -882,6 +883,19 @@ def _process_focus_resilient(
         frontier,
         representative,
     )
+    proposal_prompt = _proposal_prompt(
+        focus_id=focus_id,
+        focus_evidence=focus,
+        raw_windows=raw_context,
+        catalog=catalog,
+        violations=[
+            item.model_dump(mode="json")
+            for item in representative.violations.values()
+        ],
+        graph_notes=representative.notes,
+        frontier_summary=frontier_summary,
+        output_language=orchestrator.output_language,
+    )
     fingerprint = _proposal_fingerprint(
         state=representative,
         focus_id=focus_id,
@@ -890,6 +904,7 @@ def _process_focus_resilient(
         catalog=catalog,
         frontier_summary=frontier_summary,
         llm_config=llm_config,
+        proposal_prompt=proposal_prompt,
     )
     path = proposal_root / f"{focus_id}.json"
 
@@ -966,19 +981,7 @@ def _process_focus_resilient(
         )
         try:
             proposal = orchestrator._structured(
-                _proposal_prompt(
-                    focus_id=focus_id,
-                    focus_evidence=focus,
-                    raw_windows=raw_context,
-                    catalog=catalog,
-                    violations=[
-                        item.model_dump(mode="json")
-                        for item in representative.violations.values()
-                    ],
-                    graph_notes=representative.notes,
-                    frontier_summary=frontier_summary,
-                    output_language=orchestrator.output_language,
-                ),
+                proposal_prompt,
                 GraphRevisionProposal,
                 operation="graph_revision_proposal",
                 images=images or None,

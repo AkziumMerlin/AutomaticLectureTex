@@ -17,6 +17,8 @@ from automatic_lecture_tex.graph_revision_pipeline import (
     _compact_catalog,
     _expand_frontier,
     _normalize_alternative_patch,
+    _proposal_fingerprint,
+    _apply_or_mark_failure,
     run_iterative_graph_revision,
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
@@ -848,3 +850,83 @@ def test_nested_substantive_topic_renders_as_own_flat_section() -> None:
     assert "Weak topology" in chunks
     assert {block.title for block in chunks["Part 2"].blocks} == {"Intro definition"}
     assert {block.title for block in chunks["Weak topology"].blocks} == {"Weak definition"}
+
+
+def test_proposal_fingerprint_changes_when_prompt_changes() -> None:
+    from automatic_lecture_tex.graph_revision import GraphState
+
+    state = GraphState(evidence={})
+    kwargs = dict(
+        state=state,
+        focus_id="focus",
+        focus_evidence=[],
+        raw_windows=[],
+        catalog={"index": [], "detail": []},
+        frontier_summary=[],
+        llm_config={"model": "fake"},
+    )
+
+    first = _proposal_fingerprint(
+        **kwargs,
+        proposal_prompt="instruction version A",
+    )
+    second = _proposal_fingerprint(
+        **kwargs,
+        proposal_prompt="instruction version B",
+    )
+
+    assert first != second
+
+
+def test_rejected_patch_is_audit_note_not_graph_violation() -> None:
+    from automatic_lecture_tex.graph_revision import GraphState
+
+    state = GraphState(evidence={})
+    failed = _apply_or_mark_failure(
+        state,
+        GraphPatch(
+            id="bad",
+            description="References a missing node.",
+            operations=[
+                ReplaceNodeOp(
+                    op="replace_node",
+                    node_id="missing",
+                    text="x",
+                )
+            ],
+        ),
+        failure_id="focus::common_failed::0",
+    )
+
+    assert failed.violations == {}
+    assert len(failed.notes) == 1
+    assert "Unapplied patch bad" in failed.notes[0]
+
+
+def test_renderer_keeps_audit_notes_out_of_unresolved() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", start=0.0, end=1.0, text="x")},
+        nodes={
+            "topic": GraphNode(
+                id="topic",
+                kind="topic",
+                title="Section",
+                evidence_ids=["e1"],
+            ),
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                title="Claim",
+                text="x",
+                evidence_ids=["e1"],
+            ),
+        },
+        edges=[GraphEdge(source="topic", target="claim", relation="contains")],
+        notes=["Frontier ambiguity for internal_node: audit details"],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+
+    assert sum(len(chunk.unresolved) for chunk in ir.chunks) == 0
