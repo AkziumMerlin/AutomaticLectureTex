@@ -723,6 +723,12 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
                 break
 
         start = float(chunk.get("start", 0.0))
+        extraction = payload.get("observations") or {}
+        extraction_unresolved = [
+            _clip_state_raw_text(str(item), 500)
+            for item in extraction.get("unresolved", [])[:6]
+            if str(item).strip()
+        ]
         windows.append(
             {
                 "window_id": str(chunk.get("id") or path.stem),
@@ -734,6 +740,7 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
                 ),
                 "visual_latex": visual_latex[:3],
                 "math_ocr_candidates": ocr_candidates,
+                "extraction_unresolved": extraction_unresolved,
                 "formula_crops": formula_crops,
                 "board_frames": board_frames,
             }

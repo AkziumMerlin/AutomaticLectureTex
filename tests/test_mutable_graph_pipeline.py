@@ -16,6 +16,7 @@ from automatic_lecture_tex.graph_revision_pipeline import (
     GraphRevisionProposal,
     _compact_catalog,
     _expand_frontier,
+    _focus_raw_windows,
     _normalize_alternative_patch,
     _proposal_fingerprint,
     _apply_or_mark_failure,
@@ -23,6 +24,7 @@ from automatic_lecture_tex.graph_revision_pipeline import (
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
+from automatic_lecture_tex.knowledge_pipeline import _load_state_raw_window_index
 from automatic_lecture_tex.schemas import (
     LectureObservation,
     LectureState,
@@ -930,3 +932,141 @@ def test_renderer_keeps_audit_notes_out_of_unresolved() -> None:
     ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
 
     assert sum(len(chunk.unresolved) for chunk in ir.chunks) == 0
+
+
+def test_raw_window_index_preserves_extraction_unresolved(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge_windows"
+    root.mkdir()
+    (root / "window_0001.json").write_text(
+        """{
+          "chunk": {
+            "id": "window_0001",
+            "start": 10.0,
+            "end": 20.0,
+            "timestamped_text": "[00:10-00:20] ambiguous"
+          },
+          "observations": {
+            "window_id": "window_0001",
+            "start": 10.0,
+            "end": 20.0,
+            "observations": [],
+            "unresolved": [
+              "Two formula readings remain compatible with the board."
+            ]
+          },
+          "visual_evidence": []
+        }""",
+        encoding="utf-8",
+    )
+
+    raw = _load_state_raw_window_index(tmp_path)
+
+    assert raw[0]["extraction_unresolved"] == [
+        "Two formula readings remain compatible with the board."
+    ]
+
+
+def test_focus_raw_windows_exposes_only_nonempty_extraction_uncertainty() -> None:
+    evidence = [
+        {
+            "id": "o1",
+            "start": 10.0,
+            "end": 20.0,
+            "window_id": "window_0001",
+            "window_ids": ["window_0001"],
+        }
+    ]
+    raw = [
+        {
+            "window_id": "window_0001",
+            "start": 10.0,
+            "end": 20.0,
+            "asr": "ambiguous",
+            "visual_latex": [],
+            "math_ocr_candidates": [],
+            "extraction_unresolved": [
+                "Two formula readings remain compatible with the board."
+            ],
+        },
+        {
+            "window_id": "window_0002",
+            "start": 21.0,
+            "end": 25.0,
+            "asr": "clear",
+            "visual_latex": [],
+            "math_ocr_candidates": [],
+            "extraction_unresolved": [],
+        },
+    ]
+
+    selected = _focus_raw_windows(evidence, raw, max_chars=10000)
+
+    by_id = {item["window_id"]: item for item in selected}
+    assert by_id["window_0001"]["extraction_unresolved"] == [
+        "Two formula readings remain compatible with the board."
+    ]
+    assert "extraction_unresolved" not in by_id["window_0002"]
+
+
+def test_renderer_concerns_relation_inherits_topic_from_all_targets() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "weak": EvidenceRecord(id="weak", start=100.0, end=101.0, text="weak"),
+            "l2": EvidenceRecord(id="l2", start=3000.0, end=3001.0, text="l2"),
+            "late": EvidenceRecord(id="late", start=4000.0, end=4001.0, text="late"),
+        },
+        nodes={
+            "weak_topic": GraphNode(
+                id="weak_topic",
+                kind="topic",
+                title="Weak topology",
+                evidence_ids=["weak"],
+            ),
+            "l2_topic": GraphNode(
+                id="l2_topic",
+                kind="topic",
+                title="l2",
+                evidence_ids=["l2"],
+            ),
+            "beta": GraphNode(
+                id="beta",
+                kind="definition",
+                title="beta",
+                text="beta",
+                evidence_ids=["late"],
+            ),
+            "beta_tilde": GraphNode(
+                id="beta_tilde",
+                kind="definition",
+                title="beta tilde",
+                text="beta tilde",
+                evidence_ids=["late"],
+            ),
+            "equivalence": GraphNode(
+                id="equivalence",
+                kind="claim",
+                title="equivalence",
+                text="same topology",
+                evidence_ids=["late"],
+            ),
+        },
+        edges=[
+            GraphEdge(source="weak_topic", target="beta", relation="contains"),
+            GraphEdge(source="weak_topic", target="beta_tilde", relation="contains"),
+            GraphEdge(source="equivalence", target="beta", relation="concerns"),
+            GraphEdge(source="equivalence", target="beta_tilde", relation="concerns"),
+        ],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    chunks = {chunk.section_title: chunk for chunk in ir.chunks}
+
+    assert "equivalence" in {
+        block.title for block in chunks["Weak topology"].blocks
+    }
+    if "l2" in chunks:
+        assert "equivalence" not in {
+            block.title for block in chunks["l2"].blocks
+        }

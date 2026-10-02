@@ -236,6 +236,7 @@ def _section_assignment(
         "equivalent",
         "proves",
         "supports",
+        "concerns",
     }
     by_id = {node.id: node for node in renderable}
     derived_dependencies = {
