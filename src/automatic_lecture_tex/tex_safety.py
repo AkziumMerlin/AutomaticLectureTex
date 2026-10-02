@@ -119,13 +119,129 @@ def canonicalize_math_fragment(value: str) -> str:
     return result
 
 
+
+_STRUCTURED_DISPLAY_ENVIRONMENTS = re.compile(
+    r"\\begin\{(?:aligned|alignedat|gathered|multlined|cases|array|matrix|pmatrix|bmatrix|"
+    r"Bmatrix|vmatrix|Vmatrix|split)\}"
+)
+
+
+def _split_tex_top_level(value: str, token: str) -> list[str]:
+    """Split on a token only outside TeX brace groups and nested environments."""
+
+    parts: list[str] = []
+    start = 0
+    brace_depth = 0
+    env_depth = 0
+    index = 0
+    while index < len(value):
+        if value.startswith(r"\begin{", index):
+            env_depth += 1
+        elif value.startswith(r"\end{", index):
+            env_depth = max(0, env_depth - 1)
+
+        char = value[index]
+        escaped = index > 0 and value[index - 1] == "\\"
+        if char == "{" and not escaped:
+            brace_depth += 1
+        elif char == "}" and not escaped:
+            brace_depth = max(0, brace_depth - 1)
+
+        if (
+            brace_depth == 0
+            and env_depth == 0
+            and value.startswith(token, index)
+        ):
+            parts.append(value[start:index])
+            index += len(token)
+            start = index
+            continue
+        index += 1
+
+    parts.append(value[start:])
+    return parts
+
+
+def _aligned_lines(parts: list[str], *, delimiter: str = "") -> str:
+    lines: list[str] = []
+    last = len(parts) - 1
+    for index, part in enumerate(parts):
+        suffix = delimiter if delimiter and index < last else ""
+        lines.append("&" + part.strip() + suffix)
+    return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
+
+
+def layout_display_math(value: str, *, target_chars: int = 78) -> str:
+    """Lay out long display math without shrinking it.
+
+    Only top-level separators are used, so commands nested in braces/environments are preserved.
+    Short or already-structured displays are left unchanged.
+    """
+
+    math = value.strip()
+    if not math or _STRUCTURED_DISPLAY_ENVIRONMENTS.search(math):
+        return math
+    if len(math) <= target_chars:
+        return math
+
+    # Several mathematical clauses on one display are best rendered as left-aligned lines.
+    semicolon_parts = [part.strip() for part in _split_tex_top_level(math, ";")]
+    if len(semicolon_parts) >= 2 and all(semicolon_parts):
+        return _aligned_lines(semicolon_parts, delimiter=";")
+
+    for separator in (r"\qquad", r"\quad"):
+        parts = [part.strip() for part in _split_tex_top_level(math, separator)]
+        if len(parts) >= 2 and all(parts):
+            return _aligned_lines(parts)
+
+    # Equality chains should visually align on the equality sign.
+    equality_parts = [part.strip() for part in _split_tex_top_level(math, "=")]
+    if len(equality_parts) >= 3 and all(equality_parts):
+        lines = [f"{equality_parts[0]} &={equality_parts[1]}"]
+        lines.extend(f"&={part}" for part in equality_parts[2:])
+        return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
+
+    for operator in (
+        r"\Longleftrightarrow",
+        r"\Leftrightarrow",
+        r"\Longrightarrow",
+        r"\Rightarrow",
+    ):
+        parts = [part.strip() for part in _split_tex_top_level(math, operator)]
+        if len(parts) >= 2 and all(parts):
+            lines = [parts[0]]
+            lines.extend(operator + r"\ " + part for part in parts[1:])
+            return _aligned_lines(lines)
+
+    # A long comma-separated list has no natural alignment column; multlined gives it room to wrap
+    # while preserving the mathematical order and punctuation.
+    comma_parts = [part.strip() for part in _split_tex_top_level(math, ",")]
+    if len(comma_parts) >= 3 and all(comma_parts):
+        lines: list[str] = []
+        current = ""
+        for index, part in enumerate(comma_parts):
+            piece = part + ("," if index < len(comma_parts) - 1 else "")
+            if current and len(current) + 1 + len(piece) > target_chars:
+                lines.append(current)
+                current = piece
+            else:
+                current = (current + " " + piece).strip()
+        if current:
+            lines.append(current)
+        if len(lines) >= 2:
+            return "\\begin{multlined}\n" + " \\\\\n".join(lines) + "\n\\end{multlined}"
+
+    return math
+
+
 def _normalize_delimited_math(value: str) -> str:
     if value.startswith("$") and value.endswith("$"):
         return "$" + canonicalize_math_fragment(value[1:-1]).strip() + "$"
     if value.startswith(r"\(") and value.endswith(r"\)"):
         return r"\(" + canonicalize_math_fragment(value[2:-2]).strip() + r"\)"
     if value.startswith(r"\[") and value.endswith(r"\]"):
-        return r"\[" + canonicalize_math_fragment(value[2:-2]).strip() + r"\]"
+        math = canonicalize_math_fragment(value[2:-2]).strip()
+        return r"\[" + layout_display_math(math) + r"\]"
     return canonicalize_math_fragment(value)
 
 
@@ -217,7 +333,13 @@ def normalize_math_spans(value: str) -> str:
         clean,
     )
     clean = _DOUBLE_DOLLAR_MATH.sub(
-        lambda match: r"\[" + canonicalize_math_fragment(match.group(1)).strip() + r"\]",
+        lambda match: (
+            r"\["
+            + layout_display_math(
+                canonicalize_math_fragment(match.group(1)).strip()
+            )
+            + r"\]"
+        ),
         clean,
     )
     parts = _INLINE_MATH.split(clean)
