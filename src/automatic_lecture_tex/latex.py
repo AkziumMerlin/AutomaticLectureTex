@@ -8,6 +8,7 @@ from .schemas import BlockType, LectureIR, NoteBlock
 from .tex_safety import (
     canonicalize_math_fragment,
     looks_like_math_fragment,
+    layout_display_math,
     normalize_heading_math,
     normalize_math_spans,
     strip_control_chars,
@@ -78,7 +79,7 @@ def render_block(block: NoteBlock) -> str:
             else ""
         )
         if looks_like_math_fragment(math):
-            return prefix + "\\[\n" + math + "\n\\]\n"
+            return prefix + "\\[\n" + layout_display_math(math) + "\n\\]\n"
         # Defensive compatibility path for stale/bad IR. Never wrap prose or already-delimited math
         # in another display environment; normalize delimiters and render it as ordinary TeX.
         return normalize_math_spans(strip_control_chars(block.latex)).strip() + "\n"
