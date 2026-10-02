@@ -87,9 +87,9 @@ notes:
   # semantic episodes, notation and the global outline have been assembled.
   global_validation: false
   state_section_max_evidence_chars: 100000
-  # Repaired observations are retracked into semantic episodes; final TeX is then realized
-  # deterministically one mathematical episode at a time.
-  state_section_assembly: deterministic
+  # The mutable graph remains the semantic source of truth; final sections are rewritten from
+  # canonical graph nodes only (no ASR/OCR/raw frames) by the constrained mathematical writer.
+  state_section_assembly: llm
   # Whole-lecture mutable graph revision replaces sequential observation repair / claim compaction.
   state_semantic_backend: mutable_graph
   state_graph_revision_rounds: 3
