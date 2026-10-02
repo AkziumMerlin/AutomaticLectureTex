@@ -65,13 +65,20 @@ def _is_board_snapshot(block: NoteBlock) -> bool:
 def render_block(block: NoteBlock) -> str:
     body = _body(block)
     if block.type == BlockType.PARAGRAPH:
+        if block.title:
+            return f"\\paragraph{{{escape_tex_mixed(block.title)}}}\n{body}\n"
         return body + "\n"
     if block.type == BlockType.SUBSECTION:
         return f"\\subsection{{{escape_tex_mixed(block.latex)}}}\n"
     if block.type == BlockType.EQUATION:
         math = canonicalize_math_fragment(strip_control_chars(block.latex)).strip()
+        prefix = (
+            f"\\paragraph{{{escape_tex_mixed(block.title)}}}\n"
+            if block.title
+            else ""
+        )
         if looks_like_math_fragment(math):
-            return "\\[\n" + math + "\n\\]\n"
+            return prefix + "\\[\n" + math + "\n\\]\n"
         # Defensive compatibility path for stale/bad IR. Never wrap prose or already-delimited math
         # in another display environment; normalize delimiters and render it as ordinary TeX.
         return normalize_math_spans(strip_control_chars(block.latex)).strip() + "\n"
