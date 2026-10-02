@@ -396,7 +396,7 @@ def test_global_catalog_index_keeps_late_canonical_node_under_tight_budget() -> 
     assert "riesz_late" in detail_ids
 
 
-def test_renderer_collapses_child_topics_and_preserves_pretopic_material() -> None:
+def test_renderer_flattens_child_topic_and_preserves_pretopic_material() -> None:
     from automatic_lecture_tex.graph_revision import (
         EvidenceRecord,
         GraphState,
@@ -454,10 +454,10 @@ def test_renderer_collapses_child_topics_and_preserves_pretopic_material() -> No
 
     assert [chunk.section_title for chunk in ir.chunks] == [
         "Начало лекции",
-        "Root topic",
+        "Child topic",
     ]
     assert [block.title for block in ir.chunks[0].blocks] == ["Initial definition"]
-    assert any(block.title == "Child theorem" for block in ir.chunks[1].blocks)
+    assert [block.title for block in ir.chunks[1].blocks] == ["Child theorem"]
 
 
 def test_catalog_includes_distant_derived_node_in_focus_detail() -> None:
