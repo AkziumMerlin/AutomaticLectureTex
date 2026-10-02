@@ -178,7 +178,6 @@ def _section_assignment(
     ]
     topic_by_id = {node.id: node for node in all_topics}
     topic_ids = set(topic_by_id)
-    parents = _topic_parents(state, topic_ids)
 
     # LectureIR is flat: it has sections but no subsection hierarchy. Collapsing every child topic
     # into its root therefore destroys semantic boundaries (e.g. a late weak-topology topic can be
