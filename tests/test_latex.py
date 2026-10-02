@@ -175,3 +175,88 @@ def test_heading_math_wraps_decorated_latin_identifiers_without_touching_words()
     assert r"\section{Топология на $X^*$ и пространство $H$}" in text
     assert r"\paragraph{Сходимость $f_n$ к $f$}" in text
     assert r"\chapter{Lecture}" in text
+
+
+def test_long_semicolon_display_is_broken_into_aligned_lines():
+    ir = LectureIR(
+        lecture_id="l1",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(
+                section_title="Section",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.PARAGRAPH,
+                        latex=(
+                            r"\["
+                            r"u=\operatorname{Re}h,\ u:L\to\mathbb{R},\ \|u\|=\|h\|;"
+                            r"\ \exists w:X\to\mathbb{R},\ w|_L=u,\ \|w\|=\|u\|;"
+                            r"\ f:X\to\mathbb{C},\ f(x)=w(x)-iw(ix)"
+                            r"\]"
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+
+    text = render_lecture(ir)
+
+    assert r"\begin{aligned}" in text
+    assert r"u=\operatorname{Re}h" in text
+    assert r"\exists w:X\to\mathbb{R}" in text
+    assert r"f:X\to\mathbb{C}" in text
+    assert text.count(r"\\") >= 2
+
+
+def test_long_comma_display_without_alignment_uses_multlined():
+    ir = LectureIR(
+        lecture_id="l1",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(
+                section_title="Section",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.EQUATION,
+                        latex=(
+                            r"A_1,A_2,A_3,A_4,A_5,A_6,A_7,A_8,A_9,A_{10},"
+                            r"A_{11},A_{12},A_{13},A_{14},A_{15},A_{16}"
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+
+    text = render_lecture(ir)
+
+    assert r"\begin{multlined}" in text
+    assert r"\end{multlined}" in text
+
+
+def test_display_layout_does_not_split_inside_fraction_or_existing_aligned():
+    ir = LectureIR(
+        lecture_id="l1",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(
+                section_title="Section",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.PARAGRAPH,
+                        latex=(
+                            r"\[\frac{a;b}{c;d}+\frac{e;f}{g;h}\]"
+                            "\n"
+                            r"\[\begin{aligned}x&=y\\&=z\end{aligned}\]"
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+
+    text = render_lecture(ir)
+
+    assert r"\frac{a;b}{c;d}+\frac{e;f}{g;h}" in text
+    assert text.count(r"\begin{aligned}") == 1
