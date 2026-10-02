@@ -31,7 +31,7 @@ from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
 GRAPH_REVISION_PROPOSAL_VERSION = 5
-GRAPH_REVISION_RUNTIME_VERSION = 3
+GRAPH_REVISION_RUNTIME_VERSION = 4
 
 logger = logging.getLogger(__name__)
 
@@ -294,26 +294,32 @@ def _focus_raw_windows(
         ) <= end + 30.0
         if raw_id not in window_ids and not overlaps:
             continue
-        selected.append(
-            {
-                "window_id": raw_id,
-                "start": raw.get("start"),
-                "end": raw.get("end"),
-                "asr": str(raw.get("asr") or "")[:1200],
-                "visual_latex": [
-                    str(value)[:500]
-                    for value in raw.get("visual_latex", [])[:3]
-                ],
-                "math_ocr_candidates": [
-                    {
-                        "timestamp": item.get("timestamp"),
-                        "text": str(item.get("text") or "")[:500],
-                        "source_id": item.get("source_id"),
-                    }
-                    for item in raw.get("math_ocr_candidates", [])[:8]
-                ],
-            }
-        )
+        item = {
+            "window_id": raw_id,
+            "start": raw.get("start"),
+            "end": raw.get("end"),
+            "asr": str(raw.get("asr") or "")[:1200],
+            "visual_latex": [
+                str(value)[:500]
+                for value in raw.get("visual_latex", [])[:3]
+            ],
+            "math_ocr_candidates": [
+                {
+                    "timestamp": candidate.get("timestamp"),
+                    "text": str(candidate.get("text") or "")[:500],
+                    "source_id": candidate.get("source_id"),
+                }
+                for candidate in raw.get("math_ocr_candidates", [])[:8]
+            ],
+        }
+        extraction_unresolved = [
+            str(value)[:500]
+            for value in raw.get("extraction_unresolved", [])[:6]
+            if str(value).strip()
+        ]
+        if extraction_unresolved:
+            item["extraction_unresolved"] = extraction_unresolved
+        selected.append(item)
 
     result: list[dict[str, Any]] = []
     used = 2
