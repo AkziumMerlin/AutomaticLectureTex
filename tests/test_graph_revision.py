@@ -635,3 +635,123 @@ def test_consensus_keeps_invariant_conclusion_over_ambiguous_same_id_premise() -
         "variant"
     ]
     assert any("branch-invariant invariant" in note for note in consensus.notes)
+
+
+def test_stale_current_observation_ids_do_not_rollback_useful_patch() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="x")},
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="claim",
+                text="old text",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="cleanup-current-observation-id",
+            description="Useful edit plus stale obs_window cleanup.",
+            operations=[
+                ReplaceNodeOp(
+                    op="replace_node",
+                    node_id="canonical",
+                    text="new text",
+                ),
+                MergeNodesOp(
+                    op="merge_nodes",
+                    node_ids=[
+                        "obs_window_0039_000",
+                        "obs_window_0040_000",
+                    ],
+                    into_id="canonical",
+                ),
+                SuppressNodeOp(
+                    op="suppress_node",
+                    node_id="obs_window_0040_000",
+                    reason="already absorbed",
+                ),
+            ],
+        ),
+    )
+
+    assert revised.nodes["canonical"].text == "new text"
+    assert revised.applied_patches[-1] == "cleanup-current-observation-id"
+
+
+def test_merge_ignores_only_missing_provisionals_when_real_source_survives() -> None:
+    state = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", text="canonical"),
+            "e2": EvidenceRecord(id="e2", text="remaining observation"),
+        },
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="claim",
+                text="canonical",
+                evidence_ids=["e1"],
+            ),
+            "obs_window_0044_000": GraphNode(
+                id="obs_window_0044_000",
+                kind="provisional_claim",
+                text="remaining",
+                evidence_ids=["e2"],
+            ),
+        },
+    )
+
+    revised = apply_patch(
+        state,
+        GraphPatch(
+            id="partial-stale-merge",
+            description="Some provisional sources were already absorbed.",
+            operations=[
+                MergeNodesOp(
+                    op="merge_nodes",
+                    node_ids=[
+                        "obs_window_0039_000",
+                        "obs_window_0040_000",
+                        "obs_window_0044_000",
+                    ],
+                    into_id="canonical",
+                )
+            ],
+        ),
+    )
+
+    assert "obs_window_0044_000" not in revised.nodes
+    assert set(revised.nodes["canonical"].evidence_ids) == {"e1", "e2"}
+
+
+def test_missing_canonical_merge_source_remains_error() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="canonical")},
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="claim",
+                text="canonical",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="merge missing nodes"):
+        apply_patch(
+            state,
+            GraphPatch(
+                id="hard-missing",
+                description="Canonical source typo must still fail.",
+                operations=[
+                    MergeNodesOp(
+                        op="merge_nodes",
+                        node_ids=["missing_canonical_node"],
+                        into_id="canonical",
+                    )
+                ],
+            ),
+        )
