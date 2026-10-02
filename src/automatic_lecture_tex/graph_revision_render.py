@@ -155,6 +155,34 @@ def _surface_title(node: GraphNode) -> str:
     return _canonical_surface_text(node.title or "")
 
 
+def _split_tex_top_level(value: str, token: str) -> list[str]:
+    """Split on a TeX token only outside {...} groups."""
+
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        escaped = index > 0 and value[index - 1] == "\\"
+        if char == "{" and not escaped:
+            depth += 1
+            index += 1
+            continue
+        if char == "}" and not escaped:
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0 and value.startswith(token, index):
+            parts.append(value[start:index])
+            index += len(token)
+            start = index
+            continue
+        index += 1
+    parts.append(value[start:])
+    return parts
+
+
 def _surface_display_latex(value: str) -> str:
     """Break long displays structurally; never shrink them to fit the page."""
 
@@ -163,7 +191,7 @@ def _surface_display_latex(value: str) -> str:
         return latex
 
     for separator in (r"\\qquad", r"\\quad"):
-        parts = [part.strip() for part in latex.split(separator)]
+        parts = [part.strip() for part in _split_tex_top_level(latex, separator)]
         if len(parts) >= 3 and all(parts):
             return (
                 "\\begin{aligned}\n"
@@ -171,25 +199,23 @@ def _surface_display_latex(value: str) -> str:
                 + "\n\\end{aligned}"
             )
 
-    if latex.count("=") >= 3:
-        parts = [part.strip() for part in latex.split("=")]
-        if all(parts):
-            lines = [f"{parts[0]} &={parts[1]}"]
-            lines.extend(f"&={part}" for part in parts[2:])
-            return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
+    equality_parts = [part.strip() for part in _split_tex_top_level(latex, "=")]
+    if len(equality_parts) >= 4 and all(equality_parts):
+        lines = [f"{equality_parts[0]} &={equality_parts[1]}"]
+        lines.extend(f"&={part}" for part in equality_parts[2:])
+        return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
 
     for operator in (r"\\Longrightarrow", r"\\Longleftrightarrow"):
-        if operator in latex:
-            left, right = latex.split(operator, 1)
-            if left.strip() and right.strip():
-                return (
-                    "\\begin{aligned}\n"
-                    + left.strip()
-                    + f" &{operator} \\\\\n"
-                    + "&\\quad "
-                    + right.strip()
-                    + "\n\\end{aligned}"
-                )
+        parts = [part.strip() for part in _split_tex_top_level(latex, operator)]
+        if len(parts) == 2 and all(parts):
+            return (
+                "\\begin{aligned}\n"
+                + parts[0]
+                + f" &{operator} \\\\\n"
+                + "&\\quad "
+                + parts[1]
+                + "\n\\end{aligned}"
+            )
 
     return latex
 
