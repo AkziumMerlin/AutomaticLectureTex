@@ -18,6 +18,7 @@ _NONRENDER_KINDS = {
 }
 
 _PROOF_KINDS = {"proof", "proof_step"}
+_PROOF_COMPONENT_KINDS = {"proof", "proof_step", "equation", "notation"}
 _PROOF_CHAIN_RELATIONS = {
     "next_step",
     "precedes",
@@ -80,6 +81,8 @@ _CANONICAL_NAME_REPLACEMENTS = (
     ("Гейне–Банаха", "Хана–Банаха"),
     ("Хан–Банаха", "Хана–Банаха"),
     ("Ризе", "Рисса"),
+    ("Кас 1", "Случай 1"),
+    ("Пример (Прим.)", "Пример"),
 )
 
 
