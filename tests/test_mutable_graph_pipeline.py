@@ -1070,3 +1070,186 @@ def test_renderer_concerns_relation_inherits_topic_from_all_targets() -> None:
         assert "equivalence" not in {
             block.title for block in chunks["l2"].blocks
         }
+
+
+def test_surface_realizer_drops_topic_body_and_transition_nodes() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", start=0.0, end=1.0, text="topic"),
+            "e2": EvidenceRecord(id="e2", start=1.0, end=2.0, text="transition"),
+            "e3": EvidenceRecord(id="e3", start=2.0, end=3.0, text="definition"),
+        },
+        nodes={
+            "topic": GraphNode(
+                id="topic",
+                kind="topic",
+                title="Weak topology",
+                text="Lecturer-facing summary that must not be repeated.",
+                evidence_ids=["e1"],
+            ),
+            "transition": GraphNode(
+                id="transition",
+                kind="transition",
+                text="Лектор переходит к следующему разделу.",
+                evidence_ids=["e2"],
+            ),
+            "definition": GraphNode(
+                id="definition",
+                kind="definition",
+                title="Definition",
+                text="A reader-facing mathematical definition.",
+                evidence_ids=["e3"],
+            ),
+        },
+        edges=[
+            GraphEdge(source="topic", target="transition", relation="contains"),
+            GraphEdge(source="topic", target="definition", relation="contains"),
+        ],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+
+    assert [chunk.section_title for chunk in ir.chunks] == ["Weak topology"]
+    assert len(ir.chunks[0].blocks) == 1
+    assert ir.chunks[0].blocks[0].title == "Definition"
+    assert "Lecturer-facing summary" not in ir.chunks[0].blocks[0].latex
+    assert "переходит" not in ir.chunks[0].blocks[0].latex
+
+
+def test_surface_realizer_drops_observational_prose_when_formula_is_canonical() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="formula")},
+        nodes={
+            "eq": GraphNode(
+                id="eq",
+                kind="equation",
+                title="Norm equality",
+                text="На доске лектор записывает равенство норм.",
+                latex=r"\lVert f\rVert=\lVert u\rVert",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    block = ir.chunks[0].blocks[0]
+
+    assert block.type == BlockType.EQUATION
+    assert block.title == "Norm equality"
+    assert block.latex == r"\lVert f\rVert=\lVert u\rVert"
+    assert "лектор" not in block.latex
+
+
+def test_surface_realizer_uses_mathematical_title_when_legacy_body_is_only_provenance() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="remark")},
+        nodes={
+            "remark": GraphNode(
+                id="remark",
+                kind="remark",
+                title="Вещественный случай является частным случаем комплексного",
+                text="Устно лектор несколько раз повторяет это замечание у доски.",
+                evidence_ids=["e1"],
+            )
+        },
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    block = ir.chunks[0].blocks[0]
+
+    assert block.title is None
+    assert "Вещественный случай является частным случаем комплексного" in block.latex
+    assert "лектор" not in block.latex
+
+
+def test_surface_realizer_coalesces_explicit_proof_chain() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", start=1.0, end=2.0, text="step1"),
+            "e2": EvidenceRecord(id="e2", start=2.0, end=3.0, text="eq"),
+            "e3": EvidenceRecord(id="e3", start=3.0, end=4.0, text="step2"),
+        },
+        nodes={
+            "step1": GraphNode(
+                id="step1",
+                kind="proof_step",
+                title="Choose a vector",
+                text="Choose a nonzero vector.",
+                latex=r"z\ne0",
+                evidence_ids=["e1"],
+            ),
+            "middle": GraphNode(
+                id="middle",
+                kind="equation",
+                title="Decomposition",
+                text="Write the decomposition.",
+                latex=r"x=\alpha z+y",
+                evidence_ids=["e2"],
+            ),
+            "step2": GraphNode(
+                id="step2",
+                kind="proof_step",
+                title="Conclude",
+                text="The conclusion follows.",
+                latex=r"f(x)=(x,y_f)",
+                evidence_ids=["e3"],
+            ),
+        },
+        edges=[
+            GraphEdge(source="step1", target="middle", relation="precedes"),
+            GraphEdge(source="middle", target="step2", relation="precedes"),
+        ],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+
+    assert len(ir.chunks[0].blocks) == 1
+    block = ir.chunks[0].blocks[0]
+    assert block.type == BlockType.PROOF
+    assert r"z\ne0" in block.latex
+    assert r"x=\alpha z+y" in block.latex
+    assert r"f(x)=(x,y_f)" in block.latex
+
+
+def test_surface_order_places_claim_before_proof_that_proves_it() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "claim": EvidenceRecord(id="claim", start=20.0, end=21.0, text="claim"),
+            "proof": EvidenceRecord(id="proof", start=10.0, end=11.0, text="proof"),
+        },
+        nodes={
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                title="Statement",
+                text="The statement.",
+                evidence_ids=["claim"],
+            ),
+            "proof": GraphNode(
+                id="proof",
+                kind="proof_step",
+                title="Proof",
+                text="The proof.",
+                evidence_ids=["proof"],
+            ),
+        },
+        edges=[GraphEdge(source="proof", target="claim", relation="proves")],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+
+    assert [block.type for block in ir.chunks[0].blocks] == [
+        BlockType.PARAGRAPH,
+        BlockType.PROOF,
+    ]
+    assert ir.chunks[0].blocks[0].title == "Statement"
