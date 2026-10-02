@@ -130,6 +130,7 @@ def _block_type(node: GraphNode) -> BlockType:
         "proposition": BlockType.PROPOSITION,
         "corollary": BlockType.COROLLARY,
         "proof": BlockType.PROOF,
+        "proof_step": BlockType.PROOF,
         "example": BlockType.EXAMPLE,
         "remark": BlockType.REMARK,
         "exercise": BlockType.EXERCISE,
@@ -138,15 +139,182 @@ def _block_type(node: GraphNode) -> BlockType:
     return mapping.get(kind, BlockType.PARAGRAPH)
 
 
+def _canonical_surface_text(value: str) -> str:
+    result = value.strip()
+    for source, target in _CANONICAL_NAME_REPLACEMENTS:
+        result = result.replace(source, target)
+    return result
+
+
+def _surface_title(node: GraphNode) -> str:
+    return _canonical_surface_text(node.title or "")
+
+
+def _surface_text(node: GraphNode) -> str:
+    """Return reader-facing prose only; provenance stays in graph/audit artifacts."""
+
+    text = _canonical_surface_text(node.text)
+    if not text:
+        return ""
+    if not _PROVENANCE_LANGUAGE.search(text):
+        return text
+
+    # A canonical formula already carries the mathematics. Observational wrappers such as
+    # "the lecturer writes..." or "the board shows..." are provenance, not lecture prose.
+    if (node.latex or "").strip():
+        return ""
+
+    # Legacy graphs can contain useful mathematics only in a concise title while their body is
+    # entirely an observation report. Preserve that title when it is mathematical, but do not turn
+    # transitions or narration headings into content.
+    title = _surface_title(node)
+    if title and not _META_TITLE.search(title):
+        return title.rstrip(".") + "."
+    return ""
+
+
 def _render_node_body(node: GraphNode) -> str:
     pieces: list[str] = []
-    text = node.text.strip()
+    text = _surface_text(node)
     latex = (node.latex or "").strip()
     if text and text != latex:
         pieces.append(escape_tex(text))
     if latex:
         pieces.append("\\[\n" + latex + "\n\\]")
     return "\n\n".join(pieces)
+
+
+def _render_proof_component(nodes: list[GraphNode]) -> str:
+    pieces: list[str] = []
+    for node in nodes:
+        title = _surface_title(node)
+        text = _surface_text(node)
+        latex = (node.latex or "").strip()
+
+        if title and title.rstrip(".") != text.rstrip("."):
+            pieces.append(f"\\emph{{{escape_tex(title)}}}.")
+        if text:
+            pieces.append(escape_tex(text))
+        if latex:
+            pieces.append("\\[\n" + latex + "\n\\]")
+
+    return "\n\n".join(pieces)
+
+
+def _proof_components(
+    state: GraphState,
+    nodes: list[GraphNode],
+) -> tuple[dict[str, str], dict[str, list[GraphNode]]]:
+    """Group explicit proof chains without re-interpreting their mathematics."""
+
+    by_id = {node.id: node for node in nodes}
+    adjacency: dict[str, set[str]] = defaultdict(set)
+    for edge in state.edges:
+        relation = _kind(edge.relation)
+        if relation not in _PROOF_CHAIN_RELATIONS:
+            continue
+        if edge.source not in by_id or edge.target not in by_id:
+            continue
+        source_kind = _kind(by_id[edge.source].kind)
+        target_kind = _kind(by_id[edge.target].kind)
+        if source_kind not in _PROOF_KINDS and target_kind not in _PROOF_KINDS:
+            continue
+        adjacency[edge.source].add(edge.target)
+        adjacency[edge.target].add(edge.source)
+
+    component_of: dict[str, str] = {}
+    components: dict[str, list[GraphNode]] = {}
+    seen: set[str] = set()
+
+    for node in nodes:
+        if node.id in seen or _kind(node.kind) not in _PROOF_KINDS:
+            continue
+        stack = [node.id]
+        member_ids: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in member_ids:
+                continue
+            member_ids.add(current)
+            stack.extend(adjacency.get(current, set()) - member_ids)
+
+        members = [by_id[node_id] for node_id in member_ids if node_id in by_id]
+        members = _order_nodes(state, members)
+        component_id = members[0].id
+        components[component_id] = members
+        for member in members:
+            component_of[member.id] = component_id
+        seen.update(member_ids)
+
+    return component_of, components
+
+
+def _surface_blocks(state: GraphState, nodes: list[GraphNode]) -> list[NoteBlock]:
+    ordered = _order_nodes(state, nodes)
+    component_of, components = _proof_components(state, ordered)
+    blocks: list[NoteBlock] = []
+    emitted_components: set[str] = set()
+
+    for node in ordered:
+        component_id = component_of.get(node.id)
+        if component_id is not None:
+            if component_id in emitted_components:
+                continue
+            emitted_components.add(component_id)
+            members = components[component_id]
+            body = _render_proof_component(members)
+            if not body:
+                continue
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.PROOF,
+                    title=None,
+                    latex=body,
+                    source_evidence_ids=list(
+                        dict.fromkeys(
+                            evidence_id
+                            for member in members
+                            for evidence_id in member.evidence_ids
+                        )
+                    ),
+                )
+            )
+            continue
+
+        title = _surface_title(node) or None
+        text = _surface_text(node)
+        latex = (node.latex or "").strip()
+        kind = _kind(node.kind)
+
+        if kind == "equation" and latex:
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.EQUATION,
+                    title=title,
+                    latex=latex,
+                    source_evidence_ids=list(node.evidence_ids),
+                )
+            )
+            continue
+
+        body = _render_node_body(node)
+        if not body:
+            continue
+
+        block_title = title
+        if text and title and text.rstrip(".") == title.rstrip(".") and not latex:
+            block_title = None
+
+        blocks.append(
+            NoteBlock(
+                type=_block_type(node),
+                title=block_title,
+                latex=body,
+                source_evidence_ids=list(node.evidence_ids),
+            )
+        )
+
+    return blocks
 
 
 def _is_renderable(node: GraphNode) -> bool:
