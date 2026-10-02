@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from .graph_revision import GraphNode, GraphState
 from .latex import escape_tex
@@ -13,7 +14,76 @@ _NONRENDER_KINDS = {
     "notation_entity",
     "alias",
     "evidence",
+    "transition",
 }
+
+_PROOF_KINDS = {"proof", "proof_step"}
+_PROOF_COMPONENT_KINDS = {"proof", "proof_step", "equation", "notation"}
+_PROOF_CHAIN_RELATIONS = {
+    "next_step",
+    "precedes",
+    "leads_to",
+    "applies",
+    "uses",
+    "derived_from",
+}
+_FORWARD_ORDER_RELATIONS = {
+    "precedes",
+    "next_step",
+    "leads_to",
+    "generates",
+    "defines",
+    "formalizes",
+    "subbasic_of",
+    "used_in",
+    "proved_by",
+}
+_REVERSE_ORDER_RELATIONS = {
+    "applies",
+    "uses",
+    "derived_from",
+    "proves",
+    "supports",
+    "verifies_property_of",
+    "proves_reverse_of",
+    "example_of",
+    "specialization_of",
+    "refines",
+    "elaborates",
+}
+_NONORDERING_RELATIONS = {
+    "contains",
+    "contains_node",
+    "part_of",
+    "in_section",
+    "in_topic",
+    "has_part",
+    "alias",
+    "same_object",
+    "equivalent",
+    "equivalent_to",
+    "concerns",
+}
+
+_PROVENANCE_LANGUAGE = re.compile(
+    r"\b(?:лектор|доск(?:а|е|и|у|ой)|окн(?:о|е|а)|кадр(?:е|ы|ов)?|"
+    r"ASR|OCR|рукопис|видео|визуальн|записан[оаы]?|видн[оы]|пометк|устно|"
+    r"упоминает|подч[её]ркивает|объявляет|записыва(?:ет|ется)|читаются|"
+    r"фиксиру(?:ет|ется)|произносит|начинает фразу|в нескольких окнах)\b",
+    re.IGNORECASE,
+)
+_META_TITLE = re.compile(
+    r"^(?:переход|начало|продолжение|обзор|введение обозначения.*доск)",
+    re.IGNORECASE,
+)
+_CANONICAL_NAME_REPLACEMENTS = (
+    ("Гейма–Банаха", "Хана–Банаха"),
+    ("Гейне–Банаха", "Хана–Банаха"),
+    ("Хан–Банаха", "Хана–Банаха"),
+    ("Ризе", "Рисса"),
+    ("Кас 1", "Случай 1"),
+    ("Пример (Прим.)", "Пример"),
+)
 
 
 def _kind(value: str) -> str:
@@ -65,6 +135,7 @@ def _block_type(node: GraphNode) -> BlockType:
         "proposition": BlockType.PROPOSITION,
         "corollary": BlockType.COROLLARY,
         "proof": BlockType.PROOF,
+        "proof_step": BlockType.PROOF,
         "example": BlockType.EXAMPLE,
         "remark": BlockType.REMARK,
         "exercise": BlockType.EXERCISE,
@@ -73,15 +144,262 @@ def _block_type(node: GraphNode) -> BlockType:
     return mapping.get(kind, BlockType.PARAGRAPH)
 
 
+def _canonical_surface_text(value: str) -> str:
+    result = value.strip()
+    for source, target in _CANONICAL_NAME_REPLACEMENTS:
+        result = result.replace(source, target)
+    return result
+
+
+def _surface_title(node: GraphNode) -> str:
+    return _canonical_surface_text(node.title or "")
+
+
+def _split_tex_top_level(value: str, token: str) -> list[str]:
+    """Split on a TeX token only outside {...} groups."""
+
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        escaped = index > 0 and value[index - 1] == "\\"
+        if char == "{" and not escaped:
+            depth += 1
+            index += 1
+            continue
+        if char == "}" and not escaped:
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0 and value.startswith(token, index):
+            parts.append(value[start:index])
+            index += len(token)
+            start = index
+            continue
+        index += 1
+    parts.append(value[start:])
+    return parts
+
+
+def _surface_display_latex(value: str) -> str:
+    """Break long displays structurally; never shrink them to fit the page."""
+
+    latex = value.strip()
+    if len(latex) <= 140 or "\\begin{" in latex:
+        return latex
+
+    for separator in (r"\\qquad", r"\\quad"):
+        parts = [part.strip() for part in _split_tex_top_level(latex, separator)]
+        if len(parts) >= 3 and all(parts):
+            return (
+                "\\begin{aligned}\n"
+                + " \\\\\n".join(f"&{part}" for part in parts)
+                + "\n\\end{aligned}"
+            )
+
+    equality_parts = [part.strip() for part in _split_tex_top_level(latex, "=")]
+    if len(equality_parts) >= 4 and all(equality_parts):
+        lines = [f"{equality_parts[0]} &={equality_parts[1]}"]
+        lines.extend(f"&={part}" for part in equality_parts[2:])
+        return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
+
+    for operator in (r"\\Longrightarrow", r"\\Longleftrightarrow"):
+        parts = [part.strip() for part in _split_tex_top_level(latex, operator)]
+        if len(parts) == 2 and all(parts):
+            return (
+                "\\begin{aligned}\n"
+                + parts[0]
+                + f" &{operator} \\\\\n"
+                + "&\\quad "
+                + parts[1]
+                + "\n\\end{aligned}"
+            )
+
+    return latex
+
+
+def _surface_text(node: GraphNode) -> str:
+    """Return reader-facing prose only; provenance stays in graph/audit artifacts."""
+
+    text = _canonical_surface_text(node.text)
+    if not text:
+        return ""
+    if not _PROVENANCE_LANGUAGE.search(text):
+        return text
+
+    # Canonical nodes from older runs often contain a clean mathematical sentence followed by
+    # board/ASR commentary. Strip only the observational sentences instead of discarding the whole
+    # body. This is intentionally lexical: the surface layer may omit provenance but must not invent
+    # or paraphrase mathematics.
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-ZА-ЯЁ])", text)
+    clean = [
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip() and not _PROVENANCE_LANGUAGE.search(sentence)
+    ]
+    if clean:
+        return " ".join(clean)
+
+    # If all prose was observational but a canonical formula exists, the formula is sufficient.
+    if (node.latex or "").strip():
+        return ""
+
+    # Legacy prose-only nodes can still carry the mathematical statement in their title.
+    title = _surface_title(node)
+    if title and not _META_TITLE.search(title):
+        return title.rstrip(".") + "."
+    return ""
+
+
 def _render_node_body(node: GraphNode) -> str:
     pieces: list[str] = []
-    text = node.text.strip()
+    text = _surface_text(node)
     latex = (node.latex or "").strip()
     if text and text != latex:
         pieces.append(escape_tex(text))
     if latex:
-        pieces.append("\\[\n" + latex + "\n\\]")
+        pieces.append("\\[\n" + _surface_display_latex(latex) + "\n\\]")
     return "\n\n".join(pieces)
+
+
+def _render_proof_component(nodes: list[GraphNode]) -> str:
+    pieces: list[str] = []
+    for node in nodes:
+        title = _surface_title(node)
+        text = _surface_text(node)
+        latex = (node.latex or "").strip()
+
+        if title and title.rstrip(".") != text.rstrip("."):
+            pieces.append(f"\\emph{{{escape_tex(title)}}}.")
+        if text:
+            pieces.append(escape_tex(text))
+        if latex:
+            pieces.append("\\[\n" + _surface_display_latex(latex) + "\n\\]")
+
+    return "\n\n".join(pieces)
+
+
+def _proof_components(
+    state: GraphState,
+    nodes: list[GraphNode],
+) -> tuple[dict[str, str], dict[str, list[GraphNode]]]:
+    """Group explicit proof chains without re-interpreting their mathematics."""
+
+    by_id = {node.id: node for node in nodes}
+    adjacency: dict[str, set[str]] = defaultdict(set)
+    for edge in state.edges:
+        relation = _kind(edge.relation)
+        if relation not in _PROOF_CHAIN_RELATIONS:
+            continue
+        if edge.source not in by_id or edge.target not in by_id:
+            continue
+        source_kind = _kind(by_id[edge.source].kind)
+        target_kind = _kind(by_id[edge.target].kind)
+        if (
+            source_kind not in _PROOF_COMPONENT_KINDS
+            or target_kind not in _PROOF_COMPONENT_KINDS
+        ):
+            continue
+        if source_kind not in _PROOF_KINDS and target_kind not in _PROOF_KINDS:
+            continue
+        adjacency[edge.source].add(edge.target)
+        adjacency[edge.target].add(edge.source)
+
+    component_of: dict[str, str] = {}
+    components: dict[str, list[GraphNode]] = {}
+    seen: set[str] = set()
+
+    for node in nodes:
+        if node.id in seen or _kind(node.kind) not in _PROOF_KINDS:
+            continue
+        stack = [node.id]
+        member_ids: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in member_ids:
+                continue
+            member_ids.add(current)
+            stack.extend(adjacency.get(current, set()) - member_ids)
+
+        members = [by_id[node_id] for node_id in member_ids if node_id in by_id]
+        members = _order_nodes(state, members)
+        component_id = members[0].id
+        components[component_id] = members
+        for member in members:
+            component_of[member.id] = component_id
+        seen.update(member_ids)
+
+    return component_of, components
+
+
+def _surface_blocks(state: GraphState, nodes: list[GraphNode]) -> list[NoteBlock]:
+    ordered = _order_nodes(state, nodes)
+    component_of, components = _proof_components(state, ordered)
+    blocks: list[NoteBlock] = []
+    emitted_components: set[str] = set()
+
+    for node in ordered:
+        component_id = component_of.get(node.id)
+        if component_id is not None:
+            if component_id in emitted_components:
+                continue
+            emitted_components.add(component_id)
+            members = components[component_id]
+            body = _render_proof_component(members)
+            if not body:
+                continue
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.PROOF,
+                    title=_surface_title(members[0]) or None if len(members) == 1 else None,
+                    latex=body,
+                    source_evidence_ids=list(
+                        dict.fromkeys(
+                            evidence_id
+                            for member in members
+                            for evidence_id in member.evidence_ids
+                        )
+                    ),
+                )
+            )
+            continue
+
+        title = _surface_title(node) or None
+        text = _surface_text(node)
+        latex = (node.latex or "").strip()
+        kind = _kind(node.kind)
+
+        if kind == "equation" and latex:
+            blocks.append(
+                NoteBlock(
+                    type=BlockType.EQUATION,
+                    title=title,
+                    latex=_surface_display_latex(latex),
+                    source_evidence_ids=list(node.evidence_ids),
+                )
+            )
+            continue
+
+        body = _render_node_body(node)
+        if not body:
+            continue
+
+        block_title = title
+        if text and title and text.rstrip(".") == title.rstrip(".") and not latex:
+            block_title = None
+
+        blocks.append(
+            NoteBlock(
+                type=_block_type(node),
+                title=block_title,
+                latex=body,
+                source_evidence_ids=list(node.evidence_ids),
+            )
+        )
+
+    return blocks
 
 
 def _is_renderable(node: GraphNode) -> bool:
@@ -94,7 +412,14 @@ def _is_renderable(node: GraphNode) -> bool:
         return False
     if node.metadata.get("render") is False:
         return False
-    return bool(node.text.strip() or (node.latex or "").strip())
+
+    latex = (node.latex or "").strip()
+    # Do not print an explicitly unresolved OCR placeholder merely because it was preserved as a
+    # canonical audit node. A later resolved replacement can still render normally.
+    if latex and "?" in latex and _PROVENANCE_LANGUAGE.search(node.text):
+        return False
+
+    return bool(node.text.strip() or latex)
 
 
 def _topic_membership(state: GraphState) -> dict[str, str]:
@@ -327,23 +652,15 @@ def _order_nodes(state: GraphState, nodes: list[GraphNode]) -> list[GraphNode]:
             if dependency in by_id and dependency != node.id:
                 precedence.add((dependency, node.id))
 
-    nonordering_relations = {
-        "contains",
-        "contains_node",
-        "part_of",
-        "in_section",
-        "in_topic",
-        "has_part",
-        "alias",
-        "same_object",
-        "equivalent",
-    }
     for edge in state.edges:
         if edge.source not in by_id or edge.target not in by_id:
             continue
-        if _kind(edge.relation) in nonordering_relations:
+        relation = _kind(edge.relation)
+        if relation in _NONORDERING_RELATIONS or edge.source == edge.target:
             continue
-        if edge.source != edge.target:
+        if relation in _REVERSE_ORDER_RELATIONS:
+            precedence.add((edge.target, edge.source))
+        elif relation in _FORWARD_ORDER_RELATIONS:
             precedence.add((edge.source, edge.target))
 
     outgoing: dict[str, set[str]] = defaultdict(set)
@@ -388,7 +705,7 @@ def _order_nodes(state: GraphState, nodes: list[GraphNode]) -> list[GraphNode]:
     return [by_id[node_id] for node_id in ordered]
 
 
-def graph_state_to_ir(
+def realize_graph_surface(
     state: GraphState,
     *,
     lecture_id: str,
@@ -448,7 +765,7 @@ def graph_state_to_ir(
     for index, (topic, nodes) in enumerate(section_nodes):
         if not nodes and topic is None:
             continue
-        if topic is not None and not nodes and not topic.text.strip() and not (topic.latex or ""):
+        if topic is not None and not nodes:
             continue
 
         nodes = _order_nodes(state, nodes)
@@ -464,34 +781,12 @@ def graph_state_to_ir(
         start = min((item[0] for item in ranges), default=0.0)
         end = max((item[1] for item in ranges), default=start)
 
-        blocks: list[NoteBlock] = []
-        if topic is not None:
-            topic_body = _render_node_body(topic)
-            if topic_body:
-                blocks.append(
-                    NoteBlock(
-                        type=BlockType.PARAGRAPH,
-                        title=None,
-                        latex=topic_body,
-                        source_evidence_ids=list(topic.evidence_ids),
-                    )
-                )
-
-        for node in nodes:
-            body = _render_node_body(node)
-            if not body:
-                continue
-            blocks.append(
-                NoteBlock(
-                    type=_block_type(node),
-                    title=node.title or None,
-                    latex=body,
-                    source_evidence_ids=list(node.evidence_ids),
-                )
-            )
+        # Topic nodes determine section headings only. Their descriptive text is latent/audit
+        # context and would merely repeat the section contents in prose.
+        blocks = _surface_blocks(state, nodes)
 
         section_title = (
-            (topic.title or topic.text).strip()
+            _canonical_surface_text(topic.title)
             if topic is not None
             else ("Начало лекции" if topics else title)
         )
@@ -531,3 +826,14 @@ def graph_state_to_ir(
         title=title,
         chunks=chunks,
     )
+
+
+def graph_state_to_ir(
+    state: GraphState,
+    *,
+    lecture_id: str,
+    title: str,
+) -> LectureIR:
+    """Backward-compatible entry point for the deterministic graph surface realizer."""
+
+    return realize_graph_surface(state, lecture_id=lecture_id, title=title)
