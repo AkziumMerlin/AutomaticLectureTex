@@ -560,23 +560,15 @@ def _order_nodes(state: GraphState, nodes: list[GraphNode]) -> list[GraphNode]:
             if dependency in by_id and dependency != node.id:
                 precedence.add((dependency, node.id))
 
-    nonordering_relations = {
-        "contains",
-        "contains_node",
-        "part_of",
-        "in_section",
-        "in_topic",
-        "has_part",
-        "alias",
-        "same_object",
-        "equivalent",
-    }
     for edge in state.edges:
         if edge.source not in by_id or edge.target not in by_id:
             continue
-        if _kind(edge.relation) in nonordering_relations:
+        relation = _kind(edge.relation)
+        if relation in _NONORDERING_RELATIONS or edge.source == edge.target:
             continue
-        if edge.source != edge.target:
+        if relation in _REVERSE_ORDER_RELATIONS:
+            precedence.add((edge.target, edge.source))
+        elif relation in _FORWARD_ORDER_RELATIONS:
             precedence.add((edge.source, edge.target))
 
     outgoing: dict[str, set[str]] = defaultdict(set)
@@ -621,7 +613,7 @@ def _order_nodes(state: GraphState, nodes: list[GraphNode]) -> list[GraphNode]:
     return [by_id[node_id] for node_id in ordered]
 
 
-def graph_state_to_ir(
+def realize_graph_surface(
     state: GraphState,
     *,
     lecture_id: str,
@@ -697,31 +689,9 @@ def graph_state_to_ir(
         start = min((item[0] for item in ranges), default=0.0)
         end = max((item[1] for item in ranges), default=start)
 
-        blocks: list[NoteBlock] = []
-        if topic is not None:
-            topic_body = _render_node_body(topic)
-            if topic_body:
-                blocks.append(
-                    NoteBlock(
-                        type=BlockType.PARAGRAPH,
-                        title=None,
-                        latex=topic_body,
-                        source_evidence_ids=list(topic.evidence_ids),
-                    )
-                )
-
-        for node in nodes:
-            body = _render_node_body(node)
-            if not body:
-                continue
-            blocks.append(
-                NoteBlock(
-                    type=_block_type(node),
-                    title=node.title or None,
-                    latex=body,
-                    source_evidence_ids=list(node.evidence_ids),
-                )
-            )
+        # Topic nodes determine section headings only. Their descriptive text is latent/audit
+        # context and would merely repeat the section contents in prose.
+        blocks = _surface_blocks(state, nodes)
 
         section_title = (
             (topic.title or topic.text).strip()
@@ -764,3 +734,14 @@ def graph_state_to_ir(
         title=title,
         chunks=chunks,
     )
+
+
+def graph_state_to_ir(
+    state: GraphState,
+    *,
+    lecture_id: str,
+    title: str,
+) -> LectureIR:
+    """Backward-compatible entry point for the deterministic graph surface realizer."""
+
+    return realize_graph_surface(state, lecture_id=lecture_id, title=title)
