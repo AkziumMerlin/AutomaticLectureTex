@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from .graph_revision import GraphNode, GraphState
 from .latex import escape_tex
@@ -13,7 +14,71 @@ _NONRENDER_KINDS = {
     "notation_entity",
     "alias",
     "evidence",
+    "transition",
 }
+
+_PROOF_KINDS = {"proof", "proof_step"}
+_PROOF_CHAIN_RELATIONS = {
+    "next_step",
+    "precedes",
+    "leads_to",
+    "applies",
+    "uses",
+    "derived_from",
+}
+_FORWARD_ORDER_RELATIONS = {
+    "precedes",
+    "next_step",
+    "leads_to",
+    "generates",
+    "defines",
+    "formalizes",
+    "subbasic_of",
+    "used_in",
+    "proved_by",
+}
+_REVERSE_ORDER_RELATIONS = {
+    "applies",
+    "uses",
+    "derived_from",
+    "proves",
+    "supports",
+    "verifies_property_of",
+    "proves_reverse_of",
+    "example_of",
+    "specialization_of",
+    "refines",
+    "elaborates",
+}
+_NONORDERING_RELATIONS = {
+    "contains",
+    "contains_node",
+    "part_of",
+    "in_section",
+    "in_topic",
+    "has_part",
+    "alias",
+    "same_object",
+    "equivalent",
+    "equivalent_to",
+    "concerns",
+}
+
+_PROVENANCE_LANGUAGE = re.compile(
+    r"\b(?:лектор|доск(?:а|е|и|у|ой)|окн(?:о|е|а)|кадр(?:е|ы|ов)?|"
+    r"ASR|OCR|рукопис|видео|визуальн|записан[оаы]?|видн[оы]|пометк)\b",
+    re.IGNORECASE,
+)
+_META_TITLE = re.compile(
+    r"^(?:переход|начало|продолжение|обзор|введение обозначения.*доск)",
+    re.IGNORECASE,
+)
+_CANONICAL_NAME_REPLACEMENTS = (
+    ("Гейма–Банаха", "Хана–Банаха"),
+    ("Гейне–Банаха", "Хана–Банаха"),
+    ("Хан–Банаха", "Хана–Банаха"),
+    ("Ризе", "Рисса"),
+)
 
 
 def _kind(value: str) -> str:
