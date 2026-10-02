@@ -234,7 +234,7 @@ def normalize_math_spans(value: str) -> str:
 
 _HEADING_GREEK_CHARS = "αβγδεϵζηθικλμνξοπρστυφϕχψωΓΔΘΛΞΠΣΦΨΩ"
 _HEADING_BARE_LATIN_ATOM = re.compile(
-    r"(?<![A-Za-z0-9\\$])"
+    r"(?<![A-Za-z0-9\\$_^])"
     r"([A-Za-z]"
     r"(?:_(?:\{[^{}\n]+\}|[A-Za-z0-9]+))?"
     r"(?:\^(?:\{[^{}\n]+\}|\*+|[A-Za-z0-9]+))?"
