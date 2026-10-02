@@ -379,9 +379,11 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
         )
 
     ambiguous_evidence: set[str] = set()
+    ambiguous_node_ids: set[str] = set()
     for node_id in sorted(node_ids):
         nodes = [state.nodes[node_id] for state in states]
         if len({semantic_node(node) for node in nodes}) != 1:
+            ambiguous_node_ids.add(node_id)
             variants = [
                 {
                     "kind": node.kind,
@@ -450,9 +452,11 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
     for evidence_id in ambiguous_evidence:
         result.evidence_disposition[evidence_id] = "frontier_ambiguous"
 
-    # A node can be semantically identical across branches while depending on a node that is
-    # branch-specific and therefore absent from the consensus. Remove such dangling conclusions
-    # instead of selecting one hidden premise.
+    # A conclusion may be identical in every branch while one of its premises has competing
+    # realizations under the same canonical id. Such a conclusion is genuinely branch-invariant:
+    # preserve it, but remove the unresolved dependency from the consensus derivation and record
+    # that provenance explicitly. Dependencies that are absent from some branches entirely still
+    # make the conclusion branch-specific and cause recursive omission.
     removed = True
     while removed:
         removed = False
@@ -464,10 +468,34 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
             ]
             if not missing:
                 continue
+
+            hard_missing = [
+                dependency
+                for dependency in missing
+                if dependency not in ambiguous_node_ids
+            ]
+            if not hard_missing:
+                node.derived_from = [
+                    dependency
+                    for dependency in node.derived_from
+                    if dependency not in ambiguous_node_ids
+                ]
+                previous = node.metadata.get("frontier_ambiguous_dependencies", [])
+                if not isinstance(previous, list):
+                    previous = [str(previous)]
+                node.metadata["frontier_ambiguous_dependencies"] = _dedupe(
+                    [*[str(item) for item in previous], *missing]
+                )
+                result.notes.append(
+                    f"Consensus kept branch-invariant {node_id} with ambiguous premise(s): "
+                    + ", ".join(missing)
+                )
+                continue
+
             ambiguous_evidence.update(node.evidence_ids)
             result.notes.append(
                 f"Consensus omitted {node_id} because dependencies are frontier-specific: "
-                + ", ".join(missing)
+                + ", ".join(hard_missing)
             )
             del result.nodes[node_id]
             removed = True
