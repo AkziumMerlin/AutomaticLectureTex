@@ -570,6 +570,12 @@ def metrics(state: GraphState) -> StateMetrics:
     )
 
 
+def _is_provisional_observation_id(node_id: str) -> bool:
+    """Recognize both legacy and current extraction observation node ids."""
+
+    return node_id.startswith("obs::") or node_id.startswith("obs_")
+
+
 def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
     out = state.clone()
 
@@ -604,7 +610,9 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 # idempotently consumed when the canonical target still exists; missing canonical
                 # sources remain a real structural error.
                 stale_provisionals = [
-                    node_id for node_id in missing if node_id.startswith("obs::")
+                    node_id
+                    for node_id in missing
+                    if _is_provisional_observation_id(node_id)
                 ]
                 hard_missing = [
                     node_id for node_id in missing if node_id not in stale_provisionals
@@ -766,9 +774,9 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
         elif isinstance(operation, SuppressNodeOp):
             node = out.nodes.get(operation.node_id)
             if node is None:
-                if operation.node_id.startswith("obs::"):
-                    # Idempotent cleanup: a provisional node can already have been deleted by a
-                    # merge earlier in this or a previous patch.
+                if _is_provisional_observation_id(operation.node_id):
+                    # Idempotent cleanup: a provisional observation can already have been deleted
+                    # by a merge earlier in this or a previous patch.
                     continue
                 raise KeyError(operation.node_id)
             node.status = "suppressed"
