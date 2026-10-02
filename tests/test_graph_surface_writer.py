@@ -91,6 +91,8 @@ def test_surface_writer_prompt_encodes_reference_handout_style():
     assert "every intermediate equation" in prompt
     assert "Every mathematical symbol occurring inside prose must be in math mode" in prompt
     assert "[[MATH:<node_id>]]" in prompt
+    assert "Never wrap it in $...$, $$...$$" in prompt
+    assert "Never use mathematical placeholders" in prompt
 
 
 def test_graph_surface_writer_merges_atoms_into_polished_definition(tmp_path):
@@ -231,3 +233,88 @@ def test_graph_surface_writer_injects_renderer_owned_formula_without_repair(tmp_
     assert len(orchestrator.prompts) == 1
     assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in ir.chunks[0].blocks[0].latex
     assert "[[MATH:" not in ir.chunks[0].blocks[0].latex
+
+
+
+def test_graph_surface_writer_normalizes_loose_wrapped_formula_markers(tmp_path):
+    graph = _definition_graph()
+    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
+    generated = GeneratedGraphSectionNotes(
+        blocks=[
+            GeneratedGraphSectionBlock(
+                type=BlockType.DEFINITION,
+                latex=(
+                    r"Пусть $X$ --- комплексное линейное пространство. "
+                    r"Условие линейности имеет вид $$[MATH:linearity]$$."
+                ),
+                source_node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    orchestrator = StubOrchestrator([generated])
+
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=fallback,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=False,
+    )
+
+    block = ir.chunks[0].blocks[0]
+    assert len(orchestrator.prompts) == 1
+    assert "[MATH:" not in block.latex
+    assert "$$" not in block.latex
+    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in block.latex
+
+
+def test_graph_surface_writer_repairs_placeholder_unicode_and_bad_tex(tmp_path):
+    graph = _definition_graph()
+    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
+    bad = GeneratedGraphSectionNotes(
+        blocks=[
+            GeneratedGraphSectionBlock(
+                type=BlockType.DEFINITION,
+                latex=(
+                    r"Пусть $f:X\to\text{...}$ и $x \tin X$, "
+                    "а φ ∈ Φ. [[MATH:linearity]]"
+                ),
+                source_node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    good = GeneratedGraphSectionNotes(
+        blocks=[
+            GeneratedGraphSectionBlock(
+                type=BlockType.DEFINITION,
+                latex=(
+                    r"Пусть $X$ --- комплексное линейное пространство и $x\in X$. "
+                    r"Условие комплексной линейности имеет вид [[MATH:linearity]]."
+                ),
+                source_node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    orchestrator = StubOrchestrator([bad, good])
+
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=fallback,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=False,
+    )
+
+    assert len(orchestrator.prompts) == 2
+    assert "Verification errors" in orchestrator.prompts[1]
+    block = ir.chunks[0].blocks[0]
+    assert r"$x\in X$" in block.latex
+    assert r"\text{...}" not in block.latex
+    assert "φ" not in block.latex
+    assert r"\tin" not in block.latex

@@ -24,7 +24,7 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-GRAPH_SURFACE_WRITER_VERSION = 2
+GRAPH_SURFACE_WRITER_VERSION = 3
 
 _AUDIT_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск(?:а|е|и|у|ой)|кадр(?:е|ы|ов)?|окн(?:о|е|а)|"
@@ -32,6 +32,17 @@ _AUDIT_LANGUAGE = re.compile(
     re.IGNORECASE,
 )
 _FORMULA_MARKER = re.compile(r"\[\[MATH:([^\]\n]+)\]\]")
+_WRAPPED_FORMULA_MARKER = re.compile(
+    r"(?P<open>\$\$|\$|\\\[|\\\()\s*\[\[?MATH:([^\]\n]+)\]\]?\s*"
+    r"(?P<close>\$\$|\$|\\\]|\\\))"
+)
+_LOOSE_FORMULA_MARKER = re.compile(r"(?<!\[)\[MATH:([^\]\n]+)\](?!\])")
+_UNICODE_MATH = re.compile(
+    r"[∀∃∈∉∋∑∏∫√∞≤≥≠≈≡→←↔⇒⇔⊂⊃⊆⊇∩∪⋂⋃∅ℂℝℕℤℚℓ"
+    r"αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]"
+)
+_SURFACE_PLACEHOLDER = re.compile(r"\\text\{\s*(?:\.{3}|…)\s*\}")
+_BAD_SURFACE_TEX = re.compile(r"\\t(?:le|in|eq)(?![A-Za-z])|\\t\{")
 
 
 class GeneratedGraphSectionBlock(GeneratedStateSectionBlock):
@@ -175,8 +186,16 @@ LATEX CONTRACT:
 - Canonical display formulas are renderer-owned. Do NOT retype or rewrite them. For every node
   whose latex field is non-empty, place the literal marker [[MATH:<node_id>]] in the block that
   explains that node. The host expands the marker to the exact canonical LaTeX after validation.
-- Inline symbol mentions in explanatory prose are allowed, but do not introduce new mathematical
-  identities.
+- Write that marker exactly as plain text. Never wrap it in $...$, $$...$$, \\(...\\), or
+  \\[...\\], and never shorten it to [MATH:<node_id>].
+- Never use mathematical placeholders such as \\text{...}, "...", "см. ниже", or "см. выше" in
+  place of a mathematical object. If a display formula already carries the needed mathematics,
+  write the surrounding prose without restating an uncertain inline formula.
+- Do not use Markdown markup such as **bold**. The renderer owns document typography.
+- Inline symbol mentions in explanatory prose are allowed, but they must be valid LaTeX. Use
+  standard commands such as \\in, \\neq, \\le, \\varphi and \\mathbb{C}; never emit
+  malformed commands such as \\tin, \\teq, or \\tle.
+- Do not introduce new mathematical identities.
 
 COVERAGE CONTRACT:
 - Every canonical node id must appear in source_node_ids of at least one returned block.
@@ -193,6 +212,22 @@ def _formula_key(value: str) -> str:
 
 def _formula_marker(node_id: str) -> str:
     return f"[[MATH:{node_id}]]"
+
+
+def _normalize_generated_surface(generated: GeneratedGraphSectionNotes) -> None:
+    """Normalize harmless model formatting drift before semantic/TeX verification."""
+
+    for block in generated.blocks:
+        latex = _WRAPPED_FORMULA_MARKER.sub(
+            lambda match: _formula_marker(match.group(2)),
+            block.latex,
+        )
+        latex = _LOOSE_FORMULA_MARKER.sub(
+            lambda match: _formula_marker(match.group(1)),
+            latex,
+        )
+        # Markdown emphasis is a presentation choice, not mathematics. The LaTeX renderer owns it.
+        block.latex = latex.replace("**", "")
 
 
 def _inject_formula_markers(
@@ -276,6 +311,17 @@ def _verify_generated(
 
     if _AUDIT_LANGUAGE.search(combined):
         errors.append("reader-facing output contains provenance/audit language")
+    if _UNICODE_MATH.search(combined):
+        errors.append("reader-facing output contains Unicode math instead of LaTeX")
+    if _SURFACE_PLACEHOLDER.search(combined):
+        errors.append("reader-facing output contains mathematical placeholder \\text{...}")
+    if _BAD_SURFACE_TEX.search(combined):
+        errors.append("reader-facing output contains malformed TeX command such as \\tin/\\teq/\\tle")
+    if "$$" in combined:
+        errors.append("reader-facing output contains raw $$ display delimiters")
+    residual_marker_text = _FORMULA_MARKER.sub("", combined)
+    if "[MATH:" in residual_marker_text:
+        errors.append("reader-facing output contains malformed formula marker")
 
     return errors
 
@@ -404,6 +450,7 @@ def write_graph_surface(
         cache_hit = generated is not None
 
         if generated is not None:
+            _normalize_generated_surface(generated)
             _inject_formula_markers(spec=spec, generated=generated)
             cached_errors = _verify_generated(spec=spec, generated=generated)
             if cached_errors:
@@ -443,6 +490,7 @@ def write_graph_surface(
                 chunks.append(fallback)
                 continue
 
+        _normalize_generated_surface(generated)
         _inject_formula_markers(spec=spec, generated=generated)
         errors = _verify_generated(spec=spec, generated=generated)
         if errors and not cache_hit:
@@ -472,6 +520,7 @@ def write_graph_surface(
                         orchestrator.config.state_section_writer_repetition_penalty
                     ),
                 )
+                _normalize_generated_surface(generated)
                 _inject_formula_markers(spec=spec, generated=generated)
                 errors = _verify_generated(spec=spec, generated=generated)
             except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
