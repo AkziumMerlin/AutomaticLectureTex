@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from .asr import make_asr_backend
 from .chunking import chunk_transcript
 from .config import AppConfig, LectureConfig
-from . import graph_revision_pipeline
+from . import graph_revision_pipeline, graph_revision_render, graph_surface_writer
 from .knowledge_pipeline import run_knowledge_pipeline
 from .latex import compile_tex, write_course_tex
 from .literature import load_literature, retrieve
@@ -81,6 +81,18 @@ class Pipeline:
                 "notes_cache_version": NOTES_CACHE_VERSION,
                 "mutable_graph_runtime_version": (
                     graph_revision_pipeline.GRAPH_REVISION_RUNTIME_VERSION
+                    if self.config.notes.architecture == "state"
+                    and self.config.notes.state_semantic_backend == "mutable_graph"
+                    else None
+                ),
+                "graph_surface_render_version": (
+                    graph_revision_render.GRAPH_SURFACE_RENDER_VERSION
+                    if self.config.notes.architecture == "state"
+                    and self.config.notes.state_semantic_backend == "mutable_graph"
+                    else None
+                ),
+                "graph_surface_writer_version": (
+                    graph_surface_writer.GRAPH_SURFACE_WRITER_VERSION
                     if self.config.notes.architecture == "state"
                     and self.config.notes.state_semantic_backend == "mutable_graph"
                     else None
