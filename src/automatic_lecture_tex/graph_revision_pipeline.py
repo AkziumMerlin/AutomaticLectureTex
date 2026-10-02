@@ -10,9 +10,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .graph_revision import (
+    AddAliasOp,
+    AddNodeOp,
     AddViolationOp,
+    AttachEvidenceOp,
     GraphPatch,
     GraphState,
+    ReplaceNodeOp,
     SearchResult,
     StateMetrics,
     Violation,
@@ -672,6 +676,99 @@ def _prune_frontier(states: list[GraphState], width: int) -> list[GraphState]:
     return [state for state, _ in eligible[:width]]
 
 
+def _normalize_alternative_patch(
+    state: GraphState,
+    patch: GraphPatch,
+) -> GraphPatch:
+    """Turn a model-emitted sibling alternative into a true competing realization when safe.
+
+    The proposer occasionally encodes a convention variant by adding a second node in the same
+    alternative_group while leaving the common branch-specific node active. That makes the
+    "alternative" branch a superset rather than a competing hypothesis, so consensus incorrectly
+    keeps the common formula. When one new node clearly corresponds to exactly one existing node in
+    the same group, same kind, and same dependency set, reinterpret it as an in-place variant of
+    that canonical object. This is a controller-level representation repair, not a mathematical
+    choice between the variants.
+    """
+
+    group_add_counts: dict[str, int] = {}
+    for operation in patch.operations:
+        if isinstance(operation, AddNodeOp) and operation.node.alternative_group:
+            group = operation.node.alternative_group
+            group_add_counts[group] = group_add_counts.get(group, 0) + 1
+
+    operations: list[Any] = []
+    changed = False
+    for operation in patch.operations:
+        if not isinstance(operation, AddNodeOp):
+            operations.append(operation)
+            continue
+
+        variant = operation.node
+        group = variant.alternative_group
+        if not group or group_add_counts.get(group) != 1:
+            operations.append(operation)
+            continue
+
+        candidates = [
+            node
+            for node in state.nodes.values()
+            if node.status != "suppressed" and node.alternative_group == group
+        ]
+        if len(candidates) != 1:
+            operations.append(operation)
+            continue
+
+        target = candidates[0]
+        if (
+            target.kind != variant.kind
+            or set(target.derived_from) != set(variant.derived_from)
+        ):
+            operations.append(operation)
+            continue
+
+        metadata_update = dict(variant.metadata)
+        metadata_update["frontier_variant_source_id"] = variant.id
+        operations.append(
+            ReplaceNodeOp(
+                op="replace_node",
+                node_id=target.id,
+                title=variant.title,
+                text=variant.text,
+                latex=variant.latex,
+                metadata_update=metadata_update,
+            )
+        )
+
+        missing_evidence = [
+            evidence_id
+            for evidence_id in variant.evidence_ids
+            if evidence_id not in target.evidence_ids
+        ]
+        if missing_evidence:
+            operations.append(
+                AttachEvidenceOp(
+                    op="attach_evidence",
+                    node_id=target.id,
+                    evidence_ids=missing_evidence,
+                )
+            )
+        for alias in variant.aliases:
+            if alias not in target.aliases:
+                operations.append(
+                    AddAliasOp(
+                        op="add_alias",
+                        node_id=target.id,
+                        alias=alias,
+                    )
+                )
+        changed = True
+
+    if not changed:
+        return patch
+    return patch.model_copy(update={"operations": operations}, deep=True)
+
+
 def _expand_frontier(
     frontier: list[GraphState],
     proposal: GraphRevisionProposal,
@@ -717,7 +814,8 @@ def _expand_frontier(
         expanded.append(current)
         for alt_index, alternative in enumerate(proposal.alternatives):
             try:
-                expanded.append(apply_patch(current, alternative))
+                normalized = _normalize_alternative_patch(current, alternative)
+                expanded.append(apply_patch(current, normalized))
             except (KeyError, ValueError):
                 continue
 
