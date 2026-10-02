@@ -353,7 +353,7 @@ def _surface_blocks(state: GraphState, nodes: list[GraphNode]) -> list[NoteBlock
             blocks.append(
                 NoteBlock(
                     type=BlockType.PROOF,
-                    title=None,
+                    title=_surface_title(members[0]) or None if len(members) == 1 else None,
                     latex=body,
                     source_evidence_ids=list(
                         dict.fromkeys(
