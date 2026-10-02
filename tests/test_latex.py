@@ -120,3 +120,58 @@ def test_figure_block_may_use_asset_instead_of_latex():
 def test_empty_figure_block_is_invalid():
     with pytest.raises(ValidationError, match="figure block"):
         NoteBlock(type=BlockType.FIGURE, latex="")
+
+
+def test_render_block_title_wraps_bare_latin_math_identifiers():
+    ir = LectureIR(
+        lecture_id="l1",
+        title="Лекция",
+        chunks=[
+            ChunkNotes(
+                section_title="Раздел",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.REMARK,
+                        title=(
+                            "Связь комплексно-линейного функционала f "
+                            "с действительными составляющими u и v"
+                        ),
+                        latex="Содержательное замечание.",
+                    )
+                ],
+            )
+        ],
+    )
+
+    text = render_lecture(ir)
+
+    assert (
+        r"\begin{remark}[Связь комплексно-линейного функционала $f$ "
+        r"с действительными составляющими $u$ и $v$]"
+        in text
+    )
+
+
+def test_heading_math_wraps_decorated_latin_identifiers_without_touching_words():
+    ir = LectureIR(
+        lecture_id="l1",
+        title="Lecture",
+        chunks=[
+            ChunkNotes(
+                section_title="Топология на X* и пространство H",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.PARAGRAPH,
+                        title="Сходимость f_n к f",
+                        latex="Текст.",
+                    )
+                ],
+            )
+        ],
+    )
+
+    text = render_lecture(ir)
+
+    assert r"\section{Топология на $X^*$ и пространство $H$}" in text
+    assert r"\paragraph{Сходимость $f_n$ к $f$}" in text
+    assert r"\chapter{Lecture}" in text

@@ -232,13 +232,48 @@ def normalize_math_spans(value: str) -> str:
     return "".join(result)
 
 
-_HEADING_GREEK_CHARS = "αβγδεϵλμνπφϕτΓΔΦΨΩ"
+_HEADING_GREEK_CHARS = "αβγδεϵζηθικλμνξοπρστυφϕχψωΓΔΘΛΞΠΣΦΨΩ"
+_HEADING_BARE_LATIN_ATOM = re.compile(
+    r"(?<![A-Za-z0-9\\$_^])"
+    r"([A-Za-z]"
+    r"(?:_(?:\{[^{}\n]+\}|[A-Za-z0-9]+))?"
+    r"(?:\^(?:\{[^{}\n]+\}|\*+|[A-Za-z0-9]+))?"
+    r"\*{0,2}"
+    r"(?:\([^()\n]*\))?"
+    r")"
+    r"(?![A-Za-z0-9])"
+)
 _HEADING_LATIN_SUB_GREEK = re.compile(
     rf"(?<![A-Za-z0-9\\])([A-Za-z][A-Za-z0-9]*)_([{_HEADING_GREEK_CHARS}])"
 )
 _HEADING_GREEK_SUB_LATIN = re.compile(
     rf"([{_HEADING_GREEK_CHARS}])_([A-Za-z][A-Za-z0-9]*)"
 )
+
+
+def _wrap_heading_bare_latin_atoms(value: str) -> str:
+    """Wrap standalone Latin mathematical identifiers in heading prose.
+
+    This is intentionally limited to one-letter identifiers (possibly decorated/indexed or used as
+    a simple function call), so ordinary Latin words and theorem names remain text. A trailing
+    asterisk is normalized as a dual-space superscript.
+    """
+
+    has_cyrillic = _CYRILLIC.search(value) is not None
+
+    def replace(match: re.Match[str]) -> str:
+        atom = match.group(1)
+        # Avoid turning the English article/pronoun into mathematics in otherwise English prose.
+        # In Russian mathematical headings the same letters are overwhelmingly identifiers.
+        if not has_cyrillic and atom in {"A", "a", "I"}:
+            return atom
+        if atom.endswith("**"):
+            atom = atom[:-2] + "^{**}"
+        elif atom.endswith("*"):
+            atom = atom[:-1] + "^*"
+        return "$" + atom + "$"
+
+    return _HEADING_BARE_LATIN_ATOM.sub(replace, value)
 
 
 def _normalize_heading_compound_math(value: str) -> str:
@@ -273,7 +308,12 @@ def normalize_heading_math(value: str) -> str:
         if _INLINE_MATH.fullmatch(part):
             result.append(_normalize_delimited_math(part))
         else:
-            result.append(_wrap_prose_math_atoms(part, dollars=True))
+            result.append(
+                _wrap_prose_math_atoms(
+                    _wrap_heading_bare_latin_atoms(part),
+                    dollars=True,
+                )
+            )
     return "".join(result)
 
 
