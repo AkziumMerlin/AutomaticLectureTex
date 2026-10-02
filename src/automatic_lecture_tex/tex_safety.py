@@ -69,7 +69,7 @@ _BARE_MATH_COMMAND = re.compile(
     rf"(\\(?:{_COMMAND_NAMES})(?:(?:\\?_\{{?[^\s,.;:)]+\}}?)|(?:\^\{{?[^\s,.;:)]+\}}?))*)"
 )
 _BARE_INDEXED_SET_OPERATOR = re.compile(r"(?<![\\A-Za-z])(?:(?:big)?(cap|cup))(?=_)")
-_SIZE_COMMAND = re.compile(r"\\(?:big|Big|bigg|Bigg)[lr]?")
+_SIZE_COMMAND = re.compile(r"\\(?:big|Big|bigg|Bigg)[lr]?(?![A-Za-z])")
 _VALID_SIZED_DELIMITER = re.compile(
     r"(?:[()\[\]|.]|\\[{}]|\\(?:langle|rangle|lvert|rvert|lVert|rVert|vert|Vert|"
     r"lfloor|rfloor|lceil|rceil)\b)"
@@ -133,12 +133,17 @@ def _split_tex_top_level(value: str, token: str) -> list[str]:
     start = 0
     brace_depth = 0
     env_depth = 0
+    delimiter_depth = 0
     index = 0
     while index < len(value):
         if value.startswith(r"\begin{", index):
             env_depth += 1
         elif value.startswith(r"\end{", index):
             env_depth = max(0, env_depth - 1)
+        elif value.startswith(r"\left", index):
+            delimiter_depth += 1
+        elif value.startswith(r"\right", index):
+            delimiter_depth = max(0, delimiter_depth - 1)
 
         char = value[index]
         escaped = index > 0 and value[index - 1] == "\\"
@@ -150,6 +155,8 @@ def _split_tex_top_level(value: str, token: str) -> list[str]:
         if (
             brace_depth == 0
             and env_depth == 0
+            and delimiter_depth == 0
+            and not escaped
             and value.startswith(token, index)
         ):
             parts.append(value[start:index])
@@ -194,9 +201,11 @@ def layout_display_math(value: str, *, target_chars: int = 78) -> str:
         if len(parts) >= 2 and all(parts):
             return _aligned_lines(parts)
 
-    # Equality chains should visually align on the equality sign.
+    # Equality chains should visually align on the equality sign. Do not mistake a
+    # comma-separated system/list containing independent equalities for one chain.
+    comma_parts = [part.strip() for part in _split_tex_top_level(math, ",")]
     equality_parts = [part.strip() for part in _split_tex_top_level(math, "=")]
-    if len(equality_parts) >= 3 and all(equality_parts):
+    if len(equality_parts) >= 3 and all(equality_parts) and len(comma_parts) == 1:
         lines = [f"{equality_parts[0]} &={equality_parts[1]}"]
         lines.extend(f"&={part}" for part in equality_parts[2:])
         return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
@@ -215,7 +224,6 @@ def layout_display_math(value: str, *, target_chars: int = 78) -> str:
 
     # A long comma-separated list has no natural alignment column; multlined gives it room to wrap
     # while preserving the mathematical order and punctuation.
-    comma_parts = [part.strip() for part in _split_tex_top_level(math, ",")]
     if len(comma_parts) >= 3 and all(comma_parts):
         lines: list[str] = []
         current = ""

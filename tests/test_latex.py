@@ -9,6 +9,7 @@ from automatic_lecture_tex.schemas import (
     LectureIR,
     NoteBlock,
 )
+from automatic_lecture_tex.tex_safety import canonicalize_math_fragment, layout_display_math
 
 
 def test_render_lecture_uses_deterministic_environments():
@@ -260,3 +261,25 @@ def test_display_layout_does_not_split_inside_fraction_or_existing_aligned():
 
     assert r"\frac{a;b}{c;d}+\frac{e;f}{g;h}" in text
     assert text.count(r"\begin{aligned}") == 1
+
+
+def test_math_canonicalization_preserves_bigcap_operator():
+    source = r"x_n\in\bigcap_{k=1}^{m}V_k\subset U"
+
+    normalized = canonicalize_math_fragment(source)
+
+    assert normalized == source
+    assert r"\incap" not in normalized
+    assert r"\subsetcap" not in normalized
+
+
+def test_display_layout_keeps_escaped_spacing_and_left_right_group_intact():
+    source = (
+        r"\tilde{\beta}_{\Phi}=\left\{\,\bigcap_{k=1}^{m}"
+        r"V(x,\,\varphi_k,\,\varepsilon)\;\Big|\;"
+        r"x\in X,\;\varepsilon>0\,\right\}"
+    )
+
+    laid_out = layout_display_math(source, target_chars=24)
+
+    assert laid_out == source

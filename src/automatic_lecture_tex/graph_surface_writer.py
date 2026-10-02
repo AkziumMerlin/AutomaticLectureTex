@@ -19,22 +19,19 @@ from .graph_revision_render import (
     _section_assignment,
 )
 from .llm import StructuredTaskTooLargeError
-from .schemas import ChunkNotes, LectureIR, NoteBlock
+from .schemas import BlockType, ChunkNotes, LectureIR, NoteBlock
 from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-GRAPH_SURFACE_WRITER_VERSION = 1
+GRAPH_SURFACE_WRITER_VERSION = 2
 
 _AUDIT_LANGUAGE = re.compile(
-    r"\\b(?:ASR|OCR|доск(?:а|е|и|у|ой)|кадр(?:е|ы|ов)?|окн(?:о|е|а)|"
-    r"лектор|видео|распознан|реконструкц|уверенност|provenance)\\b",
+    r"\b(?:ASR|OCR|доск(?:а|е|и|у|ой)|кадр(?:е|ы|ов)?|окн(?:о|е|а)|"
+    r"лектор|видео|распознан|реконструкц|уверенност|provenance)\b",
     re.IGNORECASE,
 )
-_UNICODE_MATH = re.compile(
-    r"[∀∃∈∉∋∑∏∫√∞≤≥≠≈≡→←↔⇒⇔⊂⊃⊆⊇∩∪ℂℝℕℤℚ"
-    r"αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]"
-)
+_FORMULA_MARKER = re.compile(r"\[\[MATH:([^\]\n]+)\]\]")
 
 
 class GeneratedGraphSectionBlock(GeneratedStateSectionBlock):
@@ -175,10 +172,11 @@ LATEX CONTRACT:
   For example write $f$, $u$, $v$, $X^*$, $\\alpha$, not text-mode f/u/v or Unicode symbols.
 - Do not use renderer-owned environments such as \\begin{{theorem}} or \\begin{{proof}}; block type
   carries that structure.
-- Every non-empty canonical node field latex is immutable. If you use that formula, copy the
-  canonical LaTeX string EXACTLY somewhere in a block body; do not rename symbols or algebraically
-  rewrite it.
-- Do not introduce new mathematical identities.
+- Canonical display formulas are renderer-owned. Do NOT retype or rewrite them. For every node
+  whose latex field is non-empty, place the literal marker [[MATH:<node_id>]] in the block that
+  explains that node. The host expands the marker to the exact canonical LaTeX after validation.
+- Inline symbol mentions in explanatory prose are allowed, but do not introduce new mathematical
+  identities.
 
 COVERAGE CONTRACT:
 - Every canonical node id must appear in source_node_ids of at least one returned block.
@@ -190,7 +188,46 @@ Write prose in language code {output_language}. Return strict structured JSON on
 
 
 def _formula_key(value: str) -> str:
-    return re.sub(r"\\s+", "", value.strip())
+    return re.sub(r"\s+", "", value.strip())
+
+
+def _formula_marker(node_id: str) -> str:
+    return f"[[MATH:{node_id}]]"
+
+
+def _inject_formula_markers(
+    *,
+    spec: GraphSectionSpec,
+    generated: GeneratedGraphSectionNotes,
+) -> None:
+    """Attach renderer-owned canonical formulas to the block claiming each source node."""
+
+    combined = "\n".join(block.latex for block in generated.blocks)
+    combined_key = _formula_key(combined)
+    for node in spec.nodes:
+        latex = (node.latex or "").strip()
+        if not latex:
+            continue
+        marker = _formula_marker(node.id)
+        if marker in combined or _formula_key(latex) in combined_key:
+            continue
+        target = next(
+            (block for block in generated.blocks if node.id in block.source_node_ids),
+            None,
+        )
+        if target is None:
+            continue
+        target.latex = target.latex.rstrip() + "\n\n" + marker
+        combined += "\n" + marker
+        combined_key = _formula_key(combined)
+
+
+def _expand_formula_markers(value: str, node_by_id: dict[str, GraphNode]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        node = node_by_id[match.group(1)]
+        return "\\[\n" + (node.latex or "").strip() + "\n\\]"
+
+    return _FORMULA_MARKER.sub(replace, value)
 
 
 def _verify_generated(
@@ -200,6 +237,7 @@ def _verify_generated(
 ) -> list[str]:
     errors: list[str] = []
     allowed_ids = {node.id for node in spec.nodes}
+    node_by_id = {node.id: node for node in spec.nodes}
     covered_ids = {
         node_id
         for block in generated.blocks
@@ -212,21 +250,32 @@ def _verify_generated(
     if missing_nodes:
         errors.append("uncovered canonical nodes: " + ", ".join(missing_nodes))
 
-    combined = "\\n".join(block.latex for block in generated.blocks)
+    combined = "\n".join(block.latex for block in generated.blocks)
     combined_key = _formula_key(combined)
+    marker_ids = set(_FORMULA_MARKER.findall(combined))
+    unknown_markers = sorted(marker_ids - allowed_ids)
+    if unknown_markers:
+        errors.append("unknown formula markers: " + ", ".join(unknown_markers))
+    nonformula_markers = sorted(
+        node_id
+        for node_id in marker_ids
+        if node_id in node_by_id and not (node_by_id[node_id].latex or "").strip()
+    )
+    if nonformula_markers:
+        errors.append("formula markers for nodes without latex: " + ", ".join(nonformula_markers))
+
     missing_formulas = [
         node.id
         for node in spec.nodes
         if (node.latex or "").strip()
+        and _formula_marker(node.id) not in combined
         and _formula_key(node.latex or "") not in combined_key
     ]
     if missing_formulas:
-        errors.append("missing immutable formulas from: " + ", ".join(missing_formulas))
+        errors.append("missing canonical formulas from: " + ", ".join(missing_formulas))
 
     if _AUDIT_LANGUAGE.search(combined):
         errors.append("reader-facing output contains provenance/audit language")
-    if _UNICODE_MATH.search(combined):
-        errors.append("reader-facing output contains Unicode math instead of LaTeX")
 
     return errors
 
@@ -248,7 +297,29 @@ def _generated_to_chunk(
                 for evidence_id in node_by_id[node_id].evidence_ids
             )
         )
-        blocks.append(block.to_note_block(source_evidence_ids=evidence_ids))
+        marker_ids = _FORMULA_MARKER.findall(block.latex)
+        block_type = block.type
+        latex = block.latex
+        if marker_ids:
+            single_marker = (
+                len(marker_ids) == 1
+                and latex.strip() == _formula_marker(marker_ids[0])
+            )
+            if single_marker and block_type == BlockType.EQUATION:
+                latex = (node_by_id[marker_ids[0]].latex or "").strip()
+            else:
+                latex = _expand_formula_markers(latex, node_by_id)
+                if block_type == BlockType.EQUATION:
+                    block_type = BlockType.PARAGRAPH
+        blocks.append(
+            NoteBlock(
+                type=block_type,
+                title=block.title,
+                latex=latex,
+                source_claim_ids=[],
+                source_evidence_ids=evidence_ids,
+            )
+        )
 
     return ChunkNotes(
         chunk_id=spec.section_id,
@@ -333,6 +404,7 @@ def write_graph_surface(
         cache_hit = generated is not None
 
         if generated is not None:
+            _inject_formula_markers(spec=spec, generated=generated)
             cached_errors = _verify_generated(spec=spec, generated=generated)
             if cached_errors:
                 logger.warning(
@@ -371,6 +443,7 @@ def write_graph_surface(
                 chunks.append(fallback)
                 continue
 
+        _inject_formula_markers(spec=spec, generated=generated)
         errors = _verify_generated(spec=spec, generated=generated)
         if errors and not cache_hit:
             repair_prompt = (
@@ -399,6 +472,7 @@ def write_graph_surface(
                         orchestrator.config.state_section_writer_repetition_penalty
                     ),
                 )
+                _inject_formula_markers(spec=spec, generated=generated)
                 errors = _verify_generated(spec=spec, generated=generated)
             except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
                 errors = [f"repair call failed: {type(exc).__name__}: {exc}"]

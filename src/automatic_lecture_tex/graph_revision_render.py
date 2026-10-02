@@ -82,6 +82,7 @@ _CANONICAL_NAME_REPLACEMENTS = (
     ("Хан–Банаха", "Хана–Банаха"),
     ("Ризе", "Рисса"),
     ("Кас 1", "Случай 1"),
+    ("Кас 2", "Случай 2"),
     ("Пример (Прим.)", "Пример"),
 )
 
@@ -161,8 +162,13 @@ def _split_tex_top_level(value: str, token: str) -> list[str]:
     parts: list[str] = []
     start = 0
     depth = 0
+    delimiter_depth = 0
     index = 0
     while index < len(value):
+        if value.startswith(r"\left", index):
+            delimiter_depth += 1
+        elif value.startswith(r"\right", index):
+            delimiter_depth = max(0, delimiter_depth - 1)
         char = value[index]
         escaped = index > 0 and value[index - 1] == "\\"
         if char == "{" and not escaped:
@@ -173,7 +179,7 @@ def _split_tex_top_level(value: str, token: str) -> list[str]:
             depth = max(0, depth - 1)
             index += 1
             continue
-        if depth == 0 and value.startswith(token, index):
+        if depth == 0 and delimiter_depth == 0 and not escaped and value.startswith(token, index):
             parts.append(value[start:index])
             index += len(token)
             start = index
@@ -199,8 +205,9 @@ def _surface_display_latex(value: str) -> str:
                 + "\n\\end{aligned}"
             )
 
+    comma_parts = [part.strip() for part in _split_tex_top_level(latex, ",")]
     equality_parts = [part.strip() for part in _split_tex_top_level(latex, "=")]
-    if len(equality_parts) >= 4 and all(equality_parts):
+    if len(equality_parts) >= 4 and all(equality_parts) and len(comma_parts) == 1:
         lines = [f"{equality_parts[0]} &={equality_parts[1]}"]
         lines.extend(f"&={part}" for part in equality_parts[2:])
         return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
@@ -267,12 +274,9 @@ def _render_node_body(node: GraphNode) -> str:
 def _render_proof_component(nodes: list[GraphNode]) -> str:
     pieces: list[str] = []
     for node in nodes:
-        title = _surface_title(node)
         text = _surface_text(node)
         latex = (node.latex or "").strip()
 
-        if title and title.rstrip(".") != text.rstrip("."):
-            pieces.append(f"\\emph{{{escape_tex(title)}}}.")
         if text:
             pieces.append(escape_tex(text))
         if latex:
@@ -375,7 +379,7 @@ def _surface_blocks(state: GraphState, nodes: list[GraphNode]) -> list[NoteBlock
             blocks.append(
                 NoteBlock(
                     type=BlockType.EQUATION,
-                    title=title,
+                    title=None,
                     latex=_surface_display_latex(latex),
                     source_evidence_ids=list(node.evidence_ids),
                 )

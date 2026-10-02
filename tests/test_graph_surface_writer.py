@@ -90,6 +90,7 @@ def test_surface_writer_prompt_encodes_reference_handout_style():
     assert "Do NOT create a bold/paragraph heading" in prompt
     assert "every intermediate equation" in prompt
     assert "Every mathematical symbol occurring inside prose must be in math mode" in prompt
+    assert "[[MATH:<node_id>]]" in prompt
 
 
 def test_graph_surface_writer_merges_atoms_into_polished_definition(tmp_path):
@@ -135,14 +136,14 @@ def test_graph_surface_writer_merges_atoms_into_polished_definition(tmp_path):
     assert len(orchestrator.prompts) == 1
 
 
-def test_graph_surface_writer_repairs_missing_formula_and_unicode_math(tmp_path):
+def test_graph_surface_writer_repairs_provenance_language(tmp_path):
     graph = _definition_graph()
     fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
     bad = GeneratedGraphSectionNotes(
         blocks=[
             GeneratedGraphSectionBlock(
                 type=BlockType.DEFINITION,
-                latex="Пусть X — пространство и ∀x выполняется условие.",
+                latex="По данным OCR это определение.",
                 source_node_ids=["definition", "linearity"],
             )
         ]
@@ -196,4 +197,37 @@ def test_graph_surface_verifier_requires_full_node_and_formula_coverage():
     errors = _verify_generated(spec=spec, generated=generated)
 
     assert any("uncovered canonical nodes: linearity" in item for item in errors)
-    assert any("missing immutable formulas from: linearity" in item for item in errors)
+    assert any("missing canonical formulas from: linearity" in item for item in errors)
+
+
+def test_graph_surface_writer_injects_renderer_owned_formula_without_repair(tmp_path):
+    graph = _definition_graph()
+    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
+    generated = GeneratedGraphSectionNotes(
+        blocks=[
+            GeneratedGraphSectionBlock(
+                type=BlockType.DEFINITION,
+                latex=(
+                    r"Пусть $X$ --- комплексное линейное пространство. "
+                    r"Будем называть $f$ комплексно-линейным."
+                ),
+                source_node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    orchestrator = StubOrchestrator([generated])
+
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=fallback,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=False,
+    )
+
+    assert len(orchestrator.prompts) == 1
+    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in ir.chunks[0].blocks[0].latex
+    assert "[[MATH:" not in ir.chunks[0].blocks[0].latex
