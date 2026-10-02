@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from .generated_notes import GeneratedStateSectionBlock, GeneratedStateSectionNotes
 from .graph_revision import GraphNode, GraphState
@@ -18,6 +18,7 @@ from .graph_revision_render import (
     _order_nodes,
     _section_assignment,
 )
+from .llm import StructuredTaskTooLargeError
 from .schemas import ChunkNotes, LectureIR, NoteBlock
 from .util import atomic_json_dump, stable_hash
 
@@ -331,24 +332,44 @@ def write_graph_surface(
         generated = None if force else _load_cached(path, fingerprint)
         cache_hit = generated is not None
 
+        if generated is not None:
+            cached_errors = _verify_generated(spec=spec, generated=generated)
+            if cached_errors:
+                logger.warning(
+                    "[graph_surface_writer] invalid cached section %s (%s); regenerating",
+                    spec.section_id,
+                    "; ".join(cached_errors),
+                )
+                generated = None
+                cache_hit = False
+
         if generated is None:
-            generated = orchestrator._structured(
-                prompt,
-                GeneratedGraphSectionNotes,
-                operation="graph_surface_write",
-                split_oversized_task=True,
-                temperature=float(orchestrator.config.state_section_writer_temperature),
-                thinking=bool(orchestrator.config.state_section_writer_thinking),
-                top_p=float(orchestrator.config.state_section_writer_top_p),
-                top_k=int(orchestrator.config.state_section_writer_top_k),
-                min_p=float(orchestrator.config.state_section_writer_min_p),
-                presence_penalty=float(
-                    orchestrator.config.state_section_writer_presence_penalty
-                ),
-                repetition_penalty=float(
-                    orchestrator.config.state_section_writer_repetition_penalty
-                ),
-            )
+            try:
+                generated = orchestrator._structured(
+                    prompt,
+                    GeneratedGraphSectionNotes,
+                    operation="graph_surface_write",
+                    split_oversized_task=True,
+                    temperature=float(orchestrator.config.state_section_writer_temperature),
+                    thinking=bool(orchestrator.config.state_section_writer_thinking),
+                    top_p=float(orchestrator.config.state_section_writer_top_p),
+                    top_k=int(orchestrator.config.state_section_writer_top_k),
+                    min_p=float(orchestrator.config.state_section_writer_min_p),
+                    presence_penalty=float(
+                        orchestrator.config.state_section_writer_presence_penalty
+                    ),
+                    repetition_penalty=float(
+                        orchestrator.config.state_section_writer_repetition_penalty
+                    ),
+                )
+            except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
+                logger.warning(
+                    "[graph_surface_writer] section %s writer failed: %s; using deterministic fallback",
+                    spec.section_id,
+                    exc,
+                )
+                chunks.append(fallback)
+                continue
 
         errors = _verify_generated(spec=spec, generated=generated)
         if errors and not cache_hit:
@@ -360,24 +381,27 @@ def write_graph_surface(
                 + "\\nPrevious JSON:\\n"
                 + generated.model_dump_json()
             )
-            generated = orchestrator._structured(
-                repair_prompt,
-                GeneratedGraphSectionNotes,
-                operation="graph_surface_write_repair",
-                split_oversized_task=True,
-                temperature=float(orchestrator.config.state_section_writer_temperature),
-                thinking=bool(orchestrator.config.state_section_writer_thinking),
-                top_p=float(orchestrator.config.state_section_writer_top_p),
-                top_k=int(orchestrator.config.state_section_writer_top_k),
-                min_p=float(orchestrator.config.state_section_writer_min_p),
-                presence_penalty=float(
-                    orchestrator.config.state_section_writer_presence_penalty
-                ),
-                repetition_penalty=float(
-                    orchestrator.config.state_section_writer_repetition_penalty
-                ),
-            )
-            errors = _verify_generated(spec=spec, generated=generated)
+            try:
+                generated = orchestrator._structured(
+                    repair_prompt,
+                    GeneratedGraphSectionNotes,
+                    operation="graph_surface_write_repair",
+                    split_oversized_task=True,
+                    temperature=float(orchestrator.config.state_section_writer_temperature),
+                    thinking=bool(orchestrator.config.state_section_writer_thinking),
+                    top_p=float(orchestrator.config.state_section_writer_top_p),
+                    top_k=int(orchestrator.config.state_section_writer_top_k),
+                    min_p=float(orchestrator.config.state_section_writer_min_p),
+                    presence_penalty=float(
+                        orchestrator.config.state_section_writer_presence_penalty
+                    ),
+                    repetition_penalty=float(
+                        orchestrator.config.state_section_writer_repetition_penalty
+                    ),
+                )
+                errors = _verify_generated(spec=spec, generated=generated)
+            except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
+                errors = [f"repair call failed: {type(exc).__name__}: {exc}"]
 
         if errors:
             logger.warning(
