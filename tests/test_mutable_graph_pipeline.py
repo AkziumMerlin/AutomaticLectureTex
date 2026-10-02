@@ -26,6 +26,7 @@ from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
 from automatic_lecture_tex.llm import StructuredTaskTooLargeError
 from automatic_lecture_tex.knowledge_pipeline import _load_state_raw_window_index
 from automatic_lecture_tex.schemas import (
+    BlockType,
     LectureObservation,
     LectureState,
     ObservationKind,
