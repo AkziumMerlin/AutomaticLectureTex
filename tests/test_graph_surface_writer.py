@@ -87,7 +87,8 @@ def test_surface_writer_prompt_encodes_reference_handout_style():
     assert "Пусть ..." in prompt
     assert "Будем называть ... , если ..." in prompt
     assert "Заметим, что" in prompt
-    assert "Do NOT create a bold/paragraph heading for every intermediate equation" in prompt
+    assert "Do NOT create a bold/paragraph heading" in prompt
+    assert "every intermediate equation" in prompt
     assert "Every mathematical symbol occurring inside prose must be in math mode" in prompt
 
 
