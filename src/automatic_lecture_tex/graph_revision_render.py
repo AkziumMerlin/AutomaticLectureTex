@@ -405,7 +405,10 @@ def graph_state_to_ir(
         violation.message
         for violation in state.violations.values()
     ]
-    unresolved_global.extend(state.notes)
+    # GraphState.notes are controller/audit diagnostics (frontier ambiguity descriptions,
+    # rejected patch traces, provenance comments). They stay in graph artifacts but are not
+    # reader-facing unresolved lecture content. Actual unresolved mathematics is represented by
+    # graph violations or explicit surviving alternative groups below.
     ambiguous_groups = sorted(
         {
             node.alternative_group
