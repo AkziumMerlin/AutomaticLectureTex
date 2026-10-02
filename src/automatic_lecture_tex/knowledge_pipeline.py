@@ -16,6 +16,7 @@ from .claim_compaction import compact_repaired_claims
 from .graph_revision import metrics as graph_revision_metrics
 from .graph_revision_pipeline import run_iterative_graph_revision
 from .graph_revision_render import graph_state_to_ir
+from .graph_surface_writer import write_graph_surface
 from .generated_notes import (
     GeneratedObservationStatePatch,
     GeneratedSemanticTextCleanupBatch,
@@ -2849,15 +2850,43 @@ def run_knowledge_pipeline(
             consensus.model_dump(mode="json"),
         )
         logger.info(
-            "[graph_revision] rendering consensus graph to LectureIR: lecture=%s active_nodes=%d",
+            "[graph_revision] rendering consensus graph to deterministic LectureIR fallback: "
+            "lecture=%s active_nodes=%d",
             lecture.id,
             len(consensus.active_nodes()),
         )
-        ir = graph_state_to_ir(
+        fallback_ir = graph_state_to_ir(
             consensus,
             lecture_id=lecture.id,
             title=lecture.title or lecture.id,
         )
+        surface_writer_seconds = 0.0
+        if pipeline.config.notes.state_section_assembly == "llm":
+            surface_started = time.perf_counter()
+            logger.info(
+                "[graph_surface_writer] start: lecture=%s sections=%d",
+                lecture.id,
+                len(fallback_ir.chunks),
+            )
+            ir = write_graph_surface(
+                orchestrator,
+                state=consensus,
+                lecture_id=lecture.id,
+                lecture_title=lecture.title or lecture.id,
+                fallback_ir=fallback_ir,
+                work=work,
+                llm_config=pipeline.config.llm.model_dump(mode="json"),
+                force=force,
+            )
+            surface_writer_seconds = time.perf_counter() - surface_started
+            logger.info(
+                "[graph_surface_writer] complete: lecture=%s seconds=%.1f",
+                lecture.id,
+                surface_writer_seconds,
+            )
+        else:
+            ir = fallback_ir
+
         logger.info(
             "[graph_revision] LectureIR ready: lecture=%s sections=%d blocks=%d unresolved=%d",
             lecture.id,
@@ -2890,6 +2919,7 @@ def run_knowledge_pipeline(
                 "knowledge_extract_seconds": round(extract_seconds, 3),
                 "episode_track_seconds": round(episode_track_seconds, 3),
                 "graph_revision_seconds": round(graph_seconds, 3),
+                "graph_surface_writer_seconds": round(surface_writer_seconds, 3),
                 "graph_revision": {
                     **graph_run.stats,
                     "frontier_states": len(graph_run.frontier),
