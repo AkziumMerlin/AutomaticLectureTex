@@ -8,6 +8,8 @@ from .latex import escape_tex
 from .schemas import BlockType, ChunkNotes, LectureIR, NoteBlock
 
 
+GRAPH_SURFACE_RENDER_VERSION = 2
+
 _TOPIC_KINDS = {"topic", "section", "subsection"}
 _NONRENDER_KINDS = {
     "symbol",
