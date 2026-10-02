@@ -155,6 +155,45 @@ def _surface_title(node: GraphNode) -> str:
     return _canonical_surface_text(node.title or "")
 
 
+def _surface_display_latex(value: str) -> str:
+    """Break long displays structurally; never shrink them to fit the page."""
+
+    latex = value.strip()
+    if len(latex) <= 140 or "\\begin{" in latex:
+        return latex
+
+    for separator in (r"\\qquad", r"\\quad"):
+        parts = [part.strip() for part in latex.split(separator)]
+        if len(parts) >= 3 and all(parts):
+            return (
+                "\\begin{aligned}\n"
+                + " \\\\\n".join(f"&{part}" for part in parts)
+                + "\n\\end{aligned}"
+            )
+
+    if latex.count("=") >= 3:
+        parts = [part.strip() for part in latex.split("=")]
+        if all(parts):
+            lines = [f"{parts[0]} &={parts[1]}"]
+            lines.extend(f"&={part}" for part in parts[2:])
+            return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
+
+    for operator in (r"\\Longrightarrow", r"\\Longleftrightarrow"):
+        if operator in latex:
+            left, right = latex.split(operator, 1)
+            if left.strip() and right.strip():
+                return (
+                    "\\begin{aligned}\n"
+                    + left.strip()
+                    + f" &{operator} \\\\\n"
+                    + "&\\quad "
+                    + right.strip()
+                    + "\n\\end{aligned}"
+                )
+
+    return latex
+
+
 def _surface_text(node: GraphNode) -> str:
     """Return reader-facing prose only; provenance stays in graph/audit artifacts."""
 
