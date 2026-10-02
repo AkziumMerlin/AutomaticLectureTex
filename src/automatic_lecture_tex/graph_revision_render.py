@@ -379,7 +379,7 @@ def _surface_blocks(state: GraphState, nodes: list[GraphNode]) -> list[NoteBlock
             blocks.append(
                 NoteBlock(
                     type=BlockType.EQUATION,
-                    title=None,
+                    title=title,
                     latex=_surface_display_latex(latex),
                     source_evidence_ids=list(node.evidence_ids),
                 )
