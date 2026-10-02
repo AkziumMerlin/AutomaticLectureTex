@@ -171,7 +171,7 @@ def _aligned_lines(parts: list[str], *, delimiter: str = "") -> str:
     return "\\begin{aligned}\n" + " \\\\\n".join(lines) + "\n\\end{aligned}"
 
 
-def layout_display_math(value: str, *, target_chars: int = 92) -> str:
+def layout_display_math(value: str, *, target_chars: int = 78) -> str:
     """Lay out long display math without shrinking it.
 
     Only top-level separators are used, so commands nested in braces/environments are preserved.
