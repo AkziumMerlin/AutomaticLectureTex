@@ -673,7 +673,7 @@ def realize_graph_surface(
     for index, (topic, nodes) in enumerate(section_nodes):
         if not nodes and topic is None:
             continue
-        if topic is not None and not nodes and not topic.text.strip() and not (topic.latex or ""):
+        if topic is not None and not nodes:
             continue
 
         nodes = _order_nodes(state, nodes)
@@ -694,7 +694,7 @@ def realize_graph_surface(
         blocks = _surface_blocks(state, nodes)
 
         section_title = (
-            (topic.title or topic.text).strip()
+            _canonical_surface_text(topic.title)
             if topic is not None
             else ("Начало лекции" if topics else title)
         )
