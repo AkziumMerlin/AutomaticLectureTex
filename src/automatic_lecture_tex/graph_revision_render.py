@@ -234,7 +234,7 @@ def _render_node_body(node: GraphNode) -> str:
     if text and text != latex:
         pieces.append(escape_tex(text))
     if latex:
-        pieces.append("\\[\n" + latex + "\n\\]")
+        pieces.append("\\[\n" + _surface_display_latex(latex) + "\n\\]")
     return "\n\n".join(pieces)
 
 
@@ -250,7 +250,7 @@ def _render_proof_component(nodes: list[GraphNode]) -> str:
         if text:
             pieces.append(escape_tex(text))
         if latex:
-            pieces.append("\\[\n" + latex + "\n\\]")
+            pieces.append("\\[\n" + _surface_display_latex(latex) + "\n\\]")
 
     return "\n\n".join(pieces)
 
@@ -271,6 +271,11 @@ def _proof_components(
             continue
         source_kind = _kind(by_id[edge.source].kind)
         target_kind = _kind(by_id[edge.target].kind)
+        if (
+            source_kind not in _PROOF_COMPONENT_KINDS
+            or target_kind not in _PROOF_COMPONENT_KINDS
+        ):
+            continue
         if source_kind not in _PROOF_KINDS and target_kind not in _PROOF_KINDS:
             continue
         adjacency[edge.source].add(edge.target)
@@ -345,7 +350,7 @@ def _surface_blocks(state: GraphState, nodes: list[GraphNode]) -> list[NoteBlock
                 NoteBlock(
                     type=BlockType.EQUATION,
                     title=title,
-                    latex=latex,
+                    latex=_surface_display_latex(latex),
                     source_evidence_ids=list(node.evidence_ids),
                 )
             )
