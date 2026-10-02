@@ -10,11 +10,13 @@ from automatic_lecture_tex.graph_revision import (
     RetypeNodeOp,
     AddRelationOp,
     Violation,
+    apply_patch,
 )
 from automatic_lecture_tex.graph_revision_pipeline import (
     GraphRevisionProposal,
     _compact_catalog,
     _expand_frontier,
+    _normalize_alternative_patch,
     run_iterative_graph_revision,
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
@@ -394,7 +396,7 @@ def test_global_catalog_index_keeps_late_canonical_node_under_tight_budget() -> 
     assert "riesz_late" in detail_ids
 
 
-def test_renderer_collapses_child_topics_and_preserves_pretopic_material() -> None:
+def test_renderer_flattens_child_topic_and_preserves_pretopic_material() -> None:
     from automatic_lecture_tex.graph_revision import (
         EvidenceRecord,
         GraphState,
@@ -452,10 +454,10 @@ def test_renderer_collapses_child_topics_and_preserves_pretopic_material() -> No
 
     assert [chunk.section_title for chunk in ir.chunks] == [
         "Начало лекции",
-        "Root topic",
+        "Child topic",
     ]
     assert [block.title for block in ir.chunks[0].blocks] == ["Initial definition"]
-    assert any(block.title == "Child theorem" for block in ir.chunks[1].blocks)
+    assert [block.title for block in ir.chunks[1].blocks] == ["Child theorem"]
 
 
 def test_catalog_includes_distant_derived_node_in_focus_detail() -> None:
@@ -744,3 +746,105 @@ def test_renderer_refinement_anchor_pulls_late_premises_into_refined_topic() -> 
         l2_titles = {block.title for block in chunks["l2 example"].blocks}
         assert "Equivalent basis refinement" not in l2_titles
         assert "Finite-intersection family" not in l2_titles
+
+
+def test_sibling_alternative_node_is_normalized_to_competing_same_id_variant() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    base = GraphState(
+        evidence={
+            "plain": EvidenceRecord(id="plain", text="plain"),
+            "conj": EvidenceRecord(id="conj", text="conjugated"),
+        },
+        nodes={
+            "riesz_vector": GraphNode(
+                id="riesz_vector",
+                kind="equation",
+                title="Plain coefficient",
+                text="plain coefficient",
+                evidence_ids=["plain", "conj"],
+                derived_from=[],
+                alternative_group="riesz_convention",
+            )
+        },
+    )
+    alternative = GraphPatch(
+        id="conjugated",
+        description="Competing conjugated reading.",
+        operations=[
+            AddNodeOp(
+                op="add_node",
+                node=GraphNode(
+                    id="riesz_vector_conj",
+                    kind="equation",
+                    title="Conjugated coefficient",
+                    text="conjugated coefficient",
+                    evidence_ids=["conj"],
+                    derived_from=[],
+                    status="alternative",
+                    alternative_group="riesz_convention",
+                ),
+            )
+        ],
+    )
+
+    normalized = _normalize_alternative_patch(base, alternative)
+    revised = apply_patch(base, normalized)
+
+    assert "riesz_vector_conj" not in revised.nodes
+    assert revised.nodes["riesz_vector"].text == "conjugated coefficient"
+    assert revised.nodes["riesz_vector"].metadata["frontier_variant_source_id"] == (
+        "riesz_vector_conj"
+    )
+
+
+def test_nested_substantive_topic_renders_as_own_flat_section() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "intro": EvidenceRecord(id="intro", start=0.0, end=1.0, text="intro"),
+            "weak": EvidenceRecord(id="weak", start=100.0, end=101.0, text="weak"),
+        },
+        nodes={
+            "part": GraphNode(
+                id="part",
+                kind="topic",
+                title="Part 2",
+                evidence_ids=["intro"],
+            ),
+            "weak_topic": GraphNode(
+                id="weak_topic",
+                kind="topic",
+                title="Weak topology",
+                evidence_ids=["weak"],
+            ),
+            "intro_def": GraphNode(
+                id="intro_def",
+                kind="definition",
+                title="Intro definition",
+                text="intro",
+                evidence_ids=["intro"],
+            ),
+            "weak_def": GraphNode(
+                id="weak_def",
+                kind="definition",
+                title="Weak definition",
+                text="weak",
+                evidence_ids=["weak"],
+            ),
+        },
+        edges=[
+            GraphEdge(source="part", target="intro_def", relation="contains"),
+            GraphEdge(source="weak_topic", target="part", relation="part_of"),
+            GraphEdge(source="weak_topic", target="weak_def", relation="contains"),
+        ],
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    chunks = {chunk.section_title: chunk for chunk in ir.chunks}
+
+    assert "Part 2" in chunks
+    assert "Weak topology" in chunks
+    assert {block.title for block in chunks["Part 2"].blocks} == {"Intro definition"}
+    assert {block.title for block in chunks["Weak topology"].blocks} == {"Weak definition"}

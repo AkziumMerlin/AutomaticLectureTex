@@ -598,3 +598,40 @@ def test_resolving_violation_clears_tagged_failure_note() -> None:
 
     assert "focus::common_failed::0" not in revised.violations
     assert revised.notes == []
+
+
+def test_consensus_keeps_invariant_conclusion_over_ambiguous_same_id_premise() -> None:
+    left = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", text="premise"),
+            "e2": EvidenceRecord(id="e2", text="conclusion"),
+        },
+        nodes={
+            "variant": GraphNode(
+                id="variant",
+                kind="equation",
+                text="plain coefficient",
+                evidence_ids=["e1"],
+                alternative_group="coefficient_convention",
+            ),
+            "invariant": GraphNode(
+                id="invariant",
+                kind="equation",
+                text="same norm identity",
+                evidence_ids=["e2"],
+                derived_from=["variant"],
+            ),
+        },
+    )
+    right = left.clone()
+    right.nodes["variant"].text = "conjugated coefficient"
+
+    consensus = graph_consensus([left, right])
+
+    assert "variant" not in consensus.nodes
+    assert "invariant" in consensus.nodes
+    assert consensus.nodes["invariant"].derived_from == []
+    assert consensus.nodes["invariant"].metadata["frontier_ambiguous_dependencies"] == [
+        "variant"
+    ]
+    assert any("branch-invariant invariant" in note for note in consensus.notes)

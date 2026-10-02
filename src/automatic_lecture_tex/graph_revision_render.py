@@ -178,17 +178,16 @@ def _section_assignment(
     ]
     topic_by_id = {node.id: node for node in all_topics}
     topic_ids = set(topic_by_id)
-    parents = _topic_parents(state, topic_ids)
-    root_ids = {
-        _root_topic(topic_id, parents)
-        for topic_id in topic_ids
-    }
-    topics = [
-        topic_by_id[topic_id]
-        for topic_id in root_ids
-        if topic_id in topic_by_id
-    ]
-    topics.sort(key=lambda node: (_topic_time(state, node), node.id))
+
+    # LectureIR is flat: it has sections but no subsection hierarchy. Collapsing every child topic
+    # into its root therefore destroys semantic boundaries (e.g. a late weak-topology topic can be
+    # swallowed by a generic "Part 2" container). Render every substantive topic that owns content
+    # as its own flat section; parent relations remain useful graph semantics but are not a license
+    # to erase the child heading.
+    topics = sorted(
+        all_topics,
+        key=lambda node: (_topic_time(state, node), node.id),
+    )
 
     membership = _topic_membership(state)
     grouped: dict[str, list[GraphNode]] = defaultdict(list)
@@ -209,7 +208,7 @@ def _section_assignment(
     for node in renderable:
         explicit = membership.get(node.id)
         if explicit is not None and explicit in topic_ids:
-            assignment[node.id] = _root_topic(explicit, parents)
+            assignment[node.id] = explicit
             assignment_origin[node.id] = "explicit"
             continue
 
