@@ -294,7 +294,7 @@ _SPLIT_SLANT_COMMAND = re.compile(r"\\\((\\(?:leq|geq))\\\)slant")
 
 
 def _repair_unmatched_display_lines(value: str) -> str:
-    """Repair multiple independent one-line \`$$formula\` serialization failures."""
+    """Repair multiple independent one-line `$$formula` serialization failures."""
 
     repaired: list[str] = []
     for line in value.splitlines():
