@@ -259,8 +259,14 @@ def _wrap_heading_bare_latin_atoms(value: str) -> str:
     asterisk is normalized as a dual-space superscript.
     """
 
+    has_cyrillic = _CYRILLIC.search(value) is not None
+
     def replace(match: re.Match[str]) -> str:
         atom = match.group(1)
+        # Avoid turning the English article/pronoun into mathematics in otherwise English prose.
+        # In Russian mathematical headings the same letters are overwhelmingly identifiers.
+        if not has_cyrillic and atom in {"A", "a", "I"}:
+            return atom
         if atom.endswith("**"):
             atom = atom[:-2] + "^{**}"
         elif atom.endswith("*"):
