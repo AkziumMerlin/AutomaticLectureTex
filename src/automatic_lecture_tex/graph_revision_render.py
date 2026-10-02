@@ -159,14 +159,24 @@ def _surface_text(node: GraphNode) -> str:
     if not _PROVENANCE_LANGUAGE.search(text):
         return text
 
-    # A canonical formula already carries the mathematics. Observational wrappers such as
-    # "the lecturer writes..." or "the board shows..." are provenance, not lecture prose.
+    # Canonical nodes from older runs often contain a clean mathematical sentence followed by
+    # board/ASR commentary. Strip only the observational sentences instead of discarding the whole
+    # body. This is intentionally lexical: the surface layer may omit provenance but must not invent
+    # or paraphrase mathematics.
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-ZА-ЯЁ])", text)
+    clean = [
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip() and not _PROVENANCE_LANGUAGE.search(sentence)
+    ]
+    if clean:
+        return " ".join(clean)
+
+    # If all prose was observational but a canonical formula exists, the formula is sufficient.
     if (node.latex or "").strip():
         return ""
 
-    # Legacy graphs can contain useful mathematics only in a concise title while their body is
-    # entirely an observation report. Preserve that title when it is mathematical, but do not turn
-    # transitions or narration headings into content.
+    # Legacy prose-only nodes can still carry the mathematical statement in their title.
     title = _surface_title(node)
     if title and not _META_TITLE.search(title):
         return title.rstrip(".") + "."
@@ -327,7 +337,14 @@ def _is_renderable(node: GraphNode) -> bool:
         return False
     if node.metadata.get("render") is False:
         return False
-    return bool(node.text.strip() or (node.latex or "").strip())
+
+    latex = (node.latex or "").strip()
+    # Do not print an explicitly unresolved OCR placeholder merely because it was preserved as a
+    # canonical audit node. A later resolved replacement can still render normally.
+    if latex and "?" in latex and _PROVENANCE_LANGUAGE.search(node.text):
+        return False
+
+    return bool(node.text.strip() or latex)
 
 
 def _topic_membership(state: GraphState) -> dict[str, str]:
