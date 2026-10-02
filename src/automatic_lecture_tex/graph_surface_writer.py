@@ -188,12 +188,12 @@ LATEX CONTRACT:
   explains that node. The host expands the marker to the exact canonical LaTeX after validation.
 - Write that marker exactly as plain text. Never wrap it in $...$, $$...$$, \\(...\\), or
   \\[...\\], and never shorten it to [MATH:<node_id>].
-- Never use mathematical placeholders such as \\text{...}, "...", "см. ниже", or "см. выше" in
+- Never use mathematical placeholders such as \\text{{...}}, "...", "см. ниже", or "см. выше" in
   place of a mathematical object. If a display formula already carries the needed mathematics,
   write the surrounding prose without restating an uncertain inline formula.
 - Do not use Markdown markup such as **bold**. The renderer owns document typography.
 - Inline symbol mentions in explanatory prose are allowed, but they must be valid LaTeX. Use
-  standard commands such as \\in, \\neq, \\le, \\varphi and \\mathbb{C}; never emit
+  standard commands such as \\in, \\neq, \\le, \\varphi and \\mathbb{{C}}; never emit
   malformed commands such as \\tin, \\teq, or \\tle.
 - Do not introduce new mathematical identities.
 
