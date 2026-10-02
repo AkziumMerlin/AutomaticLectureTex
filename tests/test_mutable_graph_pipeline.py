@@ -855,7 +855,7 @@ def test_nested_substantive_topic_renders_as_own_flat_section() -> None:
 def test_proposal_fingerprint_changes_when_prompt_changes() -> None:
     from automatic_lecture_tex.graph_revision import GraphState
 
-    state = GraphState()
+    state = GraphState(evidence={})
     kwargs = dict(
         state=state,
         focus_id="focus",
@@ -881,7 +881,7 @@ def test_proposal_fingerprint_changes_when_prompt_changes() -> None:
 def test_rejected_patch_is_audit_note_not_graph_violation() -> None:
     from automatic_lecture_tex.graph_revision import GraphState
 
-    state = GraphState()
+    state = GraphState(evidence={})
     failed = _apply_or_mark_failure(
         state,
         GraphPatch(
