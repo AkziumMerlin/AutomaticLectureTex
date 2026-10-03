@@ -2834,7 +2834,10 @@ def run_knowledge_pipeline(
                 pipeline.config.notes.state_graph_revision_raw_context_chars
             ),
             max_images=pipeline.config.notes.state_graph_revision_max_images,
-            max_tokens=pipeline.config.notes.state_graph_revision_max_tokens,
+            max_tokens=(
+                pipeline.config.notes.state_graph_revision_max_tokens
+                or pipeline.config.llm.max_tokens
+            ),
             force=force,
         )
         graph_seconds = time.perf_counter() - graph_started

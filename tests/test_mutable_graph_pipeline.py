@@ -17,13 +17,17 @@ from automatic_lecture_tex.graph_revision_pipeline import (
     _compact_catalog,
     _expand_frontier,
     _focus_raw_windows,
+    _load_cached_split,
     _normalize_alternative_patch,
     _proposal_fingerprint,
     _apply_or_mark_failure,
     run_iterative_graph_revision,
 )
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
-from automatic_lecture_tex.llm import StructuredTaskTooLargeError
+from automatic_lecture_tex.llm import (
+    StructuredOutputTruncatedError,
+    StructuredTaskTooLargeError,
+)
 from automatic_lecture_tex.knowledge_pipeline import _load_state_raw_window_index
 from automatic_lecture_tex.schemas import (
     BlockType,
@@ -1254,3 +1258,98 @@ def test_surface_order_places_claim_before_proof_that_proves_it() -> None:
         BlockType.PROOF,
     ]
     assert ir.chunks[0].blocks[0].title == "Statement"
+
+
+
+class OutputRetryOrchestrator:
+    output_language = "ru"
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def _structured(self, prompt, schema, **kwargs):
+        del prompt, schema
+        budget = int(kwargs["max_tokens"])
+        self.calls.append(budget)
+        if len(self.calls) == 1:
+            raise StructuredOutputTruncatedError(
+                "graph_revision_proposal structured output was truncated",
+                max_tokens=budget,
+                raw_chars=0,
+            )
+        return GraphRevisionProposal(focus_id="round_00_focus_000", stable=True)
+
+
+def test_graph_revision_retries_same_focus_at_global_output_budget(tmp_path: Path) -> None:
+    orchestrator = OutputRetryOrchestrator()
+    result = run_iterative_graph_revision(
+        orchestrator,
+        lecture_state=_lecture_state(),
+        raw_windows=[],
+        work=tmp_path,
+        llm_config={"model": "fake", "max_tokens": 32768},
+        rounds=1,
+        batch_observations=3,
+        overlap_observations=0,
+        frontier_width=2,
+        catalog_chars=10000,
+        raw_context_chars=10000,
+        max_images=0,
+        max_tokens=16384,
+        force=True,
+    )
+
+    assert orchestrator.calls == [16384, 32768]
+    assert result.stats["output_budget_retries"] == 1
+    assert result.stats["split_focuses"] == 0
+
+
+def test_cached_output_truncation_split_is_not_replayed(tmp_path: Path) -> None:
+    path = tmp_path / "proposal.json"
+    path.write_text(
+        '{"fingerprint":"fp","split":{"reason":'
+        '"graph_revision_proposal structured output was truncated at max_tokens=16384",'
+        '"children":["a","b"]}}',
+        encoding="utf-8",
+    )
+
+    assert _load_cached_split(path, "fp") is False
+
+
+def test_catalog_does_not_expand_singleton_focus_with_nearby_provisionals() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    evidence = {
+        "focus": EvidenceRecord(id="focus", start=70.0, end=71.0, text="focus"),
+        "near": EvidenceRecord(id="near", start=200.0, end=201.0, text="near"),
+    }
+    graph = GraphState(
+        evidence=evidence,
+        nodes={
+            "obs::focus": GraphNode(
+                id="obs::focus",
+                kind="provisional_claim",
+                text="focus",
+                evidence_ids=["focus"],
+            ),
+            "obs::near": GraphNode(
+                id="obs::near",
+                kind="provisional_claim",
+                text="near",
+                evidence_ids=["near"],
+            ),
+            "canonical_near": GraphNode(
+                id="canonical_near",
+                kind="definition",
+                text="canonical",
+                evidence_ids=["near"],
+            ),
+        },
+    )
+
+    catalog = _compact_catalog(graph, 10000, focus_evidence_ids=["focus"])
+    detail_ids = {row["id"] for row in catalog["detail"]}
+
+    assert "obs::focus" in detail_ids
+    assert "obs::near" not in detail_ids
+    assert "canonical_near" in detail_ids

@@ -13,7 +13,12 @@ from pydantic import BaseModel
 from pydantic_core import ValidationError
 
 from .llm import LectureModelClient as BaseLectureModelClient
-from .llm import SYSTEM, StructuredTaskTooLargeError
+from .llm import (
+    SYSTEM,
+    StructuredInputTooLargeError,
+    StructuredOutputTruncatedError,
+    StructuredTaskTooLargeError,
+)
 from .util import strip_thinking_and_fences
 
 T = TypeVar("T", bound=BaseModel)
@@ -248,7 +253,7 @@ class LectureModelClient(BaseLectureModelClient):
                                 "delegating split to caller",
                                 operation,
                             )
-                            raise StructuredTaskTooLargeError(
+                            raise StructuredInputTooLargeError(
                                 f"{operation} input cannot fit in one backend request: {exc}"
                             ) from exc
                         raise
@@ -260,12 +265,13 @@ class LectureModelClient(BaseLectureModelClient):
                     explicit_ceiling = _explicit_max_tokens_ceiling(exc)
                     if explicit_ceiling is not None and split_oversized_task:
                         logger.warning(
-                            "[%s] backend reported an explicit output ceiling; "
+                            "[%s] backend reported an explicit context/output ceiling; "
                             "delegating semantic split to caller",
                             operation,
                         )
-                        raise StructuredTaskTooLargeError(
-                            f"{operation} exceeds backend output ceiling: {exc}"
+                        raise StructuredInputTooLargeError(
+                            f"{operation} backend context cannot reserve the requested "
+                            f"structured-output budget: {exc}"
                         ) from exc
                     if explicit_ceiling is not None:
                         next_max_tokens = min(current_max_tokens - 1, explicit_ceiling)
@@ -279,8 +285,8 @@ class LectureModelClient(BaseLectureModelClient):
 
                     if next_max_tokens < 256 or next_max_tokens >= current_max_tokens:
                         if split_oversized_task:
-                            raise StructuredTaskTooLargeError(
-                                f"{operation} cannot reserve a usable completion budget: {exc}"
+                            raise StructuredInputTooLargeError(
+                                f"{operation} input leaves no usable completion budget: {exc}"
                             ) from exc
                         raise
                     context_output_ceiling = (
@@ -326,9 +332,11 @@ class LectureModelClient(BaseLectureModelClient):
                         operation,
                         current_max_tokens,
                     )
-                    raise StructuredTaskTooLargeError(
+                    raise StructuredOutputTruncatedError(
                         f"{operation} structured output was truncated at "
-                        f"max_tokens={current_max_tokens}"
+                        f"max_tokens={current_max_tokens}",
+                        max_tokens=current_max_tokens,
+                        raw_chars=len(raw),
                     ) from exc
 
                 previous_truncated = truncated

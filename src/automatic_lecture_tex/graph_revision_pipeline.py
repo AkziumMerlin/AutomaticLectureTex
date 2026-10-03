@@ -26,12 +26,16 @@ from .graph_revision import (
     seed_observation_graph,
 )
 from .knowledge import KnowledgeOrchestrator
-from .llm import StructuredTaskTooLargeError
+from .llm import (
+    StructuredInputTooLargeError,
+    StructuredOutputTruncatedError,
+    StructuredTaskTooLargeError,
+)
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
 GRAPH_REVISION_PROPOSAL_VERSION = 5
-GRAPH_REVISION_RUNTIME_VERSION = 7
+GRAPH_REVISION_RUNTIME_VERSION = 8
 
 logger = logging.getLogger(__name__)
 
@@ -184,12 +188,17 @@ def _compact_catalog(
             and focus_start != float("-inf")
             and focus_start - 300.0 <= start <= focus_end + 300.0
         )
+        provisional = node.kind.startswith("provisional_")
         topic = node.kind.strip().lower() in {"topic", "section", "subsection"}
         if direct:
             bucket = 0
         elif node.id in related_ids:
             bucket = 1
-        elif near:
+        elif near and not provisional:
+            # Nearby provisional observations are raw initialization noise. Including hundreds of
+            # seconds of them defeats recursive focus splitting: a singleton focus still sees a
+            # broad pseudo-transcript through graph detail. Canonical neighbours remain available,
+            # while every canonical id is still present in the compact global index.
             bucket = 2
         elif topic:
             bucket = 3
@@ -592,7 +601,21 @@ def _load_cached_split(path: Path, fingerprint: str) -> bool:
         return False
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload.get("fingerprint") == fingerprint and bool(payload.get("split"))
+        if payload.get("fingerprint") != fingerprint:
+            return False
+        split = payload.get("split")
+        if not isinstance(split, dict):
+            return False
+        kind = str(split.get("kind") or "")
+        if kind:
+            return kind == "input_overflow"
+
+        # Migration for pre-v8 artifacts. Output truncation used to be cached as if it proved the
+        # input focus was too large; replaying that split would preserve the original bug forever.
+        reason = str(split.get("reason") or "").lower()
+        if "structured output was truncated" in reason or "output ceiling" in reason:
+            return False
+        return True
     except (OSError, json.JSONDecodeError):
         return False
 
@@ -975,42 +998,92 @@ def _process_focus_resilient(
             raw_windows,
             max_images=max_images,
         )
-        stats["focus_calls"] += 1
         logger.info(
             "[graph_revision] focus %s requesting proposal: observations=%d "
-            "catalog_index=%d catalog_detail=%d images=%d",
+            "catalog_index=%d catalog_detail=%d images=%d max_tokens=%d",
             focus_id,
             len(evidence_ids),
             len(catalog.get("index", [])),
             len(catalog.get("detail", [])),
             len(images),
+            max_tokens,
         )
-        try:
-            proposal = orchestrator._structured(
+
+        def request_proposal(request_max_tokens: int) -> GraphRevisionProposal:
+            stats["focus_calls"] += 1
+            return orchestrator._structured(
                 proposal_prompt,
                 GraphRevisionProposal,
                 operation="graph_revision_proposal",
                 images=images or None,
                 guided_json=not bool(images),
                 split_oversized_task=True,
-                max_tokens=max_tokens,
+                max_tokens=request_max_tokens,
                 thinking=True,
                 temperature=0.6,
                 top_p=0.9,
             )
+
+        split_exc: StructuredTaskTooLargeError | None = None
+        split_kind = "input_overflow"
+        try:
+            proposal = request_proposal(max_tokens)
+        except StructuredOutputTruncatedError as exc:
+            global_max_tokens = int(llm_config.get("max_tokens") or max_tokens)
+            actual_budget = int(exc.max_tokens or max_tokens)
+            if global_max_tokens > actual_budget:
+                stats["output_budget_retries"] += 1
+                logger.warning(
+                    "[graph_revision] focus %s output truncated at max_tokens=%d; "
+                    "retrying same focus with global max_tokens=%d",
+                    focus_id,
+                    actual_budget,
+                    global_max_tokens,
+                )
+                try:
+                    proposal = request_proposal(global_max_tokens)
+                except StructuredInputTooLargeError as retry_exc:
+                    split_exc = retry_exc
+                    split_kind = "input_overflow"
+                except StructuredOutputTruncatedError as retry_exc:
+                    split_exc = retry_exc
+                    split_kind = "output_overflow"
+                except StructuredTaskTooLargeError as retry_exc:
+                    split_exc = retry_exc
+            else:
+                split_exc = exc
+                split_kind = "output_overflow"
+        except StructuredInputTooLargeError as exc:
+            split_exc = exc
+            split_kind = "input_overflow"
         except StructuredTaskTooLargeError as exc:
+            # Compatibility with lightweight/older adapters that only know the base exception.
+            split_exc = exc
+
+        if split_exc is not None:
             if len(evidence_ids) <= 1:
-                raise StructuredTaskTooLargeError(
+                if split_kind == "output_overflow":
+                    raise StructuredOutputTruncatedError(
+                        f"{focus_id} still exceeds the full structured-output budget",
+                        max_tokens=getattr(split_exc, "max_tokens", max_tokens),
+                        raw_chars=getattr(split_exc, "raw_chars", None),
+                    ) from split_exc
+                raise StructuredInputTooLargeError(
                     f"{focus_id} still cannot fit after recursive focus splitting"
-                ) from exc
+                ) from split_exc
 
             midpoint = len(evidence_ids) // 2
             left_ids = evidence_ids[:midpoint]
             right_ids = evidence_ids[midpoint:]
             stats["split_focuses"] += 1
+            if split_kind == "output_overflow":
+                stats["output_split_focuses"] += 1
+            else:
+                stats["input_split_focuses"] += 1
             logger.warning(
-                "[graph_revision] focus %s too large; split %d observations -> %d + %d",
+                "[graph_revision] focus %s %s; split %d observations -> %d + %d",
                 focus_id,
+                split_kind,
                 len(evidence_ids),
                 len(left_ids),
                 len(right_ids),
@@ -1025,7 +1098,8 @@ def _process_focus_resilient(
                     "fingerprint": fingerprint,
                     "focus_evidence_ids": evidence_ids,
                     "split": {
-                        "reason": str(exc),
+                        "kind": split_kind,
+                        "reason": str(split_exc),
                         "children": [
                             f"{focus_id}__a",
                             f"{focus_id}__b",
@@ -1160,6 +1234,9 @@ def run_iterative_graph_revision(
         "stable_focuses": 0,
         "split_focuses": 0,
         "split_cache_hits": 0,
+        "input_split_focuses": 0,
+        "output_split_focuses": 0,
+        "output_budget_retries": 0,
         "max_split_depth": 0,
         "frontier_sizes": [],
     }
