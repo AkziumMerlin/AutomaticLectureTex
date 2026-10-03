@@ -99,7 +99,9 @@ notes:
   state_graph_revision_catalog_chars: 36000
   state_graph_revision_raw_context_chars: 16000
   state_graph_revision_max_images: 3
-  state_graph_revision_max_tokens: 16384
+  # Use the full LLM completion budget for graph revision. Input overflow is split upstream;
+  # output truncation is not evidence that the observation focus itself is too large.
+  state_graph_revision_max_tokens: null
   state_repaired_episode_batch_observations: 24
   # Qwen3.8 official instruct/non-thinking sampling preset for final section synthesis.
   state_section_writer_thinking: false
