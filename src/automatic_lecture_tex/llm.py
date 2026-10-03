@@ -67,7 +67,26 @@ rather than inventing a correction. Return strict JSON only when a JSON schema i
 
 
 class StructuredTaskTooLargeError(RuntimeError):
-    """A structured task cannot fit in one backend request and must be split upstream."""
+    """Base class for structured-request capacity failures."""
+
+
+class StructuredInputTooLargeError(StructuredTaskTooLargeError):
+    """The request input itself cannot fit and must be semantically split upstream."""
+
+
+class StructuredOutputTruncatedError(StructuredTaskTooLargeError):
+    """The model exhausted its completion budget before producing a complete structured object."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        max_tokens: int | None = None,
+        raw_chars: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.max_tokens = max_tokens
+        self.raw_chars = raw_chars
 
 
 class LectureModelClient:
