@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .graph_revision import (
     AddAliasOp,
@@ -71,6 +71,25 @@ class GraphRevisionProposal(BaseModel):
     """One bounded model review of a focus region against the current whole-lecture graph."""
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("common_patch", mode="before")
+    @classmethod
+    def _coerce_common_patch(cls, value: Any) -> Any:
+        if isinstance(value, GraphPatch) and not isinstance(value, ProposalGraphPatch):
+            return value.model_dump(mode="json")
+        return value
+
+    @field_validator("alternatives", mode="before")
+    @classmethod
+    def _coerce_alternative_patches(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [
+            item.model_dump(mode="json")
+            if isinstance(item, GraphPatch) and not isinstance(item, ProposalAlternativePatch)
+            else item
+            for item in value
+        ]
 
     focus_id: str = Field(max_length=240)
     diagnosed_violations: list[Violation] = Field(
