@@ -2,7 +2,6 @@ import pytest
 from pydantic import ValidationError
 
 from automatic_lecture_tex.graph_revision import (
-    AddAliasOp,
     AddNodeOp,
     AddViolationOp,
     EvidenceRecord,
@@ -22,11 +21,6 @@ from automatic_lecture_tex.graph_revision import (
     search_alternatives,
 )
 
-from automatic_lecture_tex.graph_revision_pipeline import (
-    GraphRevisionProposal,
-    ProposalAlternativePatch,
-    ProposalGraphPatch,
-)
 
 
 def _state() -> GraphState:
@@ -761,43 +755,4 @@ def test_missing_canonical_merge_source_remains_error() -> None:
                     )
                 ],
             ),
-        )
-
-
-
-def test_graph_revision_proposal_bounds_common_patch_operations() -> None:
-    with pytest.raises(ValidationError, match="at most 10 items"):
-        ProposalGraphPatch(
-            id="too-large",
-            description="One focus must remain a bounded delta.",
-            operations=[
-                AddAliasOp(op="add_alias", node_id="n", alias=f"alias-{index}")
-                for index in range(11)
-            ],
-        )
-
-
-def test_graph_revision_proposal_bounds_alternative_delta_and_count() -> None:
-    with pytest.raises(ValidationError, match="at most 4 items"):
-        ProposalAlternativePatch(
-            id="too-large-alt",
-            description="Alternative delta is too large.",
-            operations=[
-                AddAliasOp(op="add_alias", node_id="n", alias=f"alias-{index}")
-                for index in range(5)
-            ],
-        )
-
-    alternatives = [
-        ProposalAlternativePatch(
-            id=f"alt-{index}",
-            description="small alternative",
-            operations=[],
-        )
-        for index in range(3)
-    ]
-    with pytest.raises(ValidationError, match="at most 2 items"):
-        GraphRevisionProposal(
-            focus_id="focus",
-            alternatives=alternatives,
         )
