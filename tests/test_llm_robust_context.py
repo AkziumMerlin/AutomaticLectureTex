@@ -4,7 +4,10 @@ import pytest
 from pydantic import BaseModel
 
 from automatic_lecture_tex.config import LLMConfig
-from automatic_lecture_tex.llm import StructuredTaskTooLargeError
+from automatic_lecture_tex.llm import (
+    StructuredInputTooLargeError,
+    StructuredOutputTruncatedError,
+)
 from automatic_lecture_tex.llm_robust import LectureModelClient
 
 
@@ -88,7 +91,7 @@ def test_split_aware_structured_call_still_delegates_true_input_overflow(
         "input length (61000) exceeds the model maximum context length (60000)",
     )
 
-    with pytest.raises(StructuredTaskTooLargeError, match="input cannot fit"):
+    with pytest.raises(StructuredInputTooLargeError, match="input cannot fit"):
         client._structured(
             "prompt",
             _Payload,
@@ -96,3 +99,51 @@ def test_split_aware_structured_call_still_delegates_true_input_overflow(
             max_tokens=4096,
             split_oversized_task=True,
         )
+
+
+
+class _TruncatedCompletions:
+    def __init__(self) -> None:
+        self.max_tokens = []
+
+    def create(self, **kwargs):
+        self.max_tokens.append(kwargs["max_tokens"])
+        budget = kwargs["max_tokens"]
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=""),
+                    finish_reason="length",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=budget,
+                total_tokens=100 + budget,
+            ),
+        )
+
+
+def test_split_aware_structured_call_reports_output_truncation_separately() -> None:
+    client = LectureModelClient(
+        LLMConfig(
+            model="fake",
+            max_tokens=32768,
+            max_retries=0,
+        )
+    )
+    completions = _TruncatedCompletions()
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    with pytest.raises(StructuredOutputTruncatedError) as caught:
+        client._structured(
+            "prompt",
+            _Payload,
+            operation="graph_revision_proposal",
+            max_tokens=16384,
+            split_oversized_task=True,
+        )
+
+    assert caught.value.max_tokens == 16384
+    assert caught.value.raw_chars == 0
+    assert completions.max_tokens == [16384]
