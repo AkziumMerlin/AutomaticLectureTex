@@ -106,7 +106,7 @@ class NotesConfig(BaseModel):
     state_graph_revision_catalog_chars: int = Field(default=36000, ge=8000, le=120000)
     state_graph_revision_raw_context_chars: int = Field(default=16000, ge=2000, le=60000)
     state_graph_revision_max_images: int = Field(default=3, ge=0, le=5)
-    state_graph_revision_max_tokens: int = Field(default=16384, ge=1024, le=32768)
+    state_graph_revision_max_tokens: int | None = Field(default=None, ge=1024, le=32768)
     state_section_raw_context_seconds: float = Field(default=90.0, ge=0.0, le=300.0)
     state_section_raw_evidence_chars: int = Field(default=16000, ge=2000, le=60000)
     state_section_writer_thinking: bool = False
