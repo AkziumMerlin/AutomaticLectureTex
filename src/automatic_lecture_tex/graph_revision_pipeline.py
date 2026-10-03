@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .graph_revision import (
     AddAliasOp,
@@ -16,7 +16,6 @@ from .graph_revision import (
     AttachEvidenceOp,
     GraphPatch,
     GraphState,
-    PatchOp,
     ReplaceNodeOp,
     SearchResult,
     StateMetrics,
@@ -37,74 +36,17 @@ GRAPH_REVISION_RUNTIME_VERSION = 7
 logger = logging.getLogger(__name__)
 
 
-class ProposalGraphPatch(GraphPatch):
-    """Bounded edit batch emitted by one graph-revision focus.
-
-    A focus is one incremental graph update, not permission to rewrite an arbitrary fraction of
-    the lecture graph. Bounding the structured schema prevents completion-size explosions while
-    preserving the next rounds/focuses as the mechanism for additional revisions.
-    """
-
-    id: str = Field(max_length=160)
-    description: str = Field(max_length=600)
-    operations: list[PatchOp] = Field(
-        default_factory=list,
-        max_length=10,
-        description="At most ten minimal graph edits justified by this focus.",
-    )
-    decision_group: str | None = Field(default=None, max_length=160)
-    incompatible_with: list[str] = Field(default_factory=list, max_length=4)
-    rationale: list[str] = Field(default_factory=list, max_length=4)
-
-
-class ProposalAlternativePatch(ProposalGraphPatch):
-    """A competing interpretation should differ only in a small convention-sensitive delta."""
-
-    operations: list[PatchOp] = Field(
-        default_factory=list,
-        max_length=4,
-        description="At most four edits that distinguish this alternative from the common patch.",
-    )
-
-
 class GraphRevisionProposal(BaseModel):
-    """One bounded model review of a focus region against the current whole-lecture graph."""
+    """One model review of a focus region against the current whole-lecture graph."""
 
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("common_patch", mode="before")
-    @classmethod
-    def _coerce_common_patch(cls, value: Any) -> Any:
-        if isinstance(value, GraphPatch) and not isinstance(value, ProposalGraphPatch):
-            return value.model_dump(mode="json")
-        return value
-
-    @field_validator("alternatives", mode="before")
-    @classmethod
-    def _coerce_alternative_patches(cls, value: Any) -> Any:
-        if not isinstance(value, list):
-            return value
-        return [
-            item.model_dump(mode="json")
-            if isinstance(item, GraphPatch) and not isinstance(item, ProposalAlternativePatch)
-            else item
-            for item in value
-        ]
-
-    focus_id: str = Field(max_length=240)
-    diagnosed_violations: list[Violation] = Field(
-        default_factory=list,
-        max_length=6,
-        description="Only the most important pre-edit violations directly relevant to this focus.",
-    )
-    common_patch: ProposalGraphPatch | None = None
-    alternatives: list[ProposalAlternativePatch] = Field(
-        default_factory=list,
-        max_length=2,
-        description="Only genuinely distinct interpretations; keep each delta minimal.",
-    )
+    focus_id: str
+    diagnosed_violations: list[Violation] = Field(default_factory=list)
+    common_patch: GraphPatch | None = None
+    alternatives: list[GraphPatch] = Field(default_factory=list)
     stable: bool = False
-    summary: str = Field(default="", max_length=1200)
+    summary: str = ""
 
 
 @dataclass
