@@ -608,7 +608,11 @@ def _load_cached_split(path: Path, fingerprint: str) -> bool:
             return False
         kind = str(split.get("kind") or "")
         if kind:
-            return kind == "input_overflow"
+            # Runtime-v8 typed splits are semantic controller decisions. An output split is only
+            # persisted after retrying the same focus with the full usable completion budget, so
+            # replaying it is as valid as replaying an input-context split. The fingerprint still
+            # binds the decision to the exact state, prompt and LLM configuration.
+            return kind in {"input_overflow", "output_overflow"}
 
         # Migration for pre-v8 artifacts. Output truncation used to be cached as if it proved the
         # input focus was too large; replaying that split would preserve the original bug forever.
