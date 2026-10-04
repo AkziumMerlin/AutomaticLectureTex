@@ -202,8 +202,8 @@ class LectureModelClient:
         min_p: float | None = None,
         repetition_penalty: float | None = None,
     ) -> dict:
-        body: dict[str, Any] = dict(self.config.extra_body)
-        if self.config.compatibility_mode != "vllm":
+        body: dict[str, Any] = dict(getattr(self.config, "extra_body", {}) or {})
+        if getattr(self.config, "compatibility_mode", "vllm") != "vllm":
             # Generic OpenAI-compatible endpoints (including OpenRouter) should only receive
             # standard Chat Completions fields plus explicitly configured passthrough data.
             return body
@@ -348,7 +348,10 @@ class LectureModelClient:
         presence_penalty: float | None = None,
         repetition_penalty: float | None = None,
     ) -> T:
-        guided_json = guided_json and self.config.structured_output_mode == "native"
+        guided_json = (
+            guided_json
+            and getattr(self.config, "structured_output_mode", "native") == "native"
+        )
         schema_instruction = ""
         if not guided_json:
             schema_instruction = "\nJSON schema:\n" + json.dumps(
