@@ -80,6 +80,7 @@ class LLMConfig(BaseModel):
     api_key_env: str | None = None
     default_headers: dict[str, str] = Field(default_factory=dict)
     compatibility_mode: Literal["vllm", "generic"] = "vllm"
+    reasoning_transport: Literal["none", "openrouter"] = "none"
     structured_output_mode: Literal["native", "prompt"] = "native"
     extra_body: dict[str, Any] = Field(default_factory=dict)
     model: str = "Qwen/Qwen3.8-27B-FP8"
