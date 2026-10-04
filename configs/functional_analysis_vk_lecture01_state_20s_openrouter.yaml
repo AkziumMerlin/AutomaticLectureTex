@@ -49,7 +49,7 @@ llm:
 notes:
   architecture: state
   # Fine-grained reconstruction ablation: approximately one local semantic window per 20 seconds.
-  # Windows still respect Qwen forced-alignment segment boundaries.
+  # Windows still respect timestamped ASR segment boundaries.
   chunk_target_seconds: 20
   chunk_overlap_seconds: 5
   # One direct board-state channel per semantic window; state timestamps are selected by
