@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from pydantic_core import ValidationError
 
 from .config import LLMConfig
+from .openai_compat import make_openai_client
 from .schemas import (
     BlockReviewDecision,
     ChunkAnalysis,
@@ -104,14 +105,12 @@ class LectureModelClient:
         self._usage_lock = threading.Lock()
         self._usage: dict[str, Any] = {}
         self.reset_usage()
-        try:
-            from openai import OpenAI
-        except ImportError as exc:
-            raise RuntimeError("LLM/VLM backend requires the `openai` Python package") from exc
-        self.client = OpenAI(
+        self.client = make_openai_client(
             base_url=config.base_url,
             api_key=config.api_key,
-            timeout=config.timeout_seconds,
+            api_key_env=config.api_key_env,
+            timeout_seconds=config.timeout_seconds,
+            default_headers=config.default_headers,
         )
 
     @staticmethod
@@ -203,12 +202,16 @@ class LectureModelClient:
         min_p: float | None = None,
         repetition_penalty: float | None = None,
     ) -> dict:
+        body: dict[str, Any] = dict(self.config.extra_body)
+        if self.config.compatibility_mode != "vllm":
+            # Generic OpenAI-compatible endpoints (including OpenRouter) should only receive
+            # standard Chat Completions fields plus explicitly configured passthrough data.
+            return body
+
         enable_thinking = self.config.thinking if thinking is None else thinking
-        body: dict[str, Any] = {
-            "chat_template_kwargs": {
-                "enable_thinking": enable_thinking,
-                "preserve_thinking": False,
-            }
+        body["chat_template_kwargs"] = {
+            "enable_thinking": enable_thinking,
+            "preserve_thinking": False,
         }
         reasoning_effort = getattr(self.config, "reasoning_effort", None)
         effective_top_k = getattr(self.config, "top_k", None) if top_k is None else top_k
@@ -345,6 +348,7 @@ class LectureModelClient:
         presence_penalty: float | None = None,
         repetition_penalty: float | None = None,
     ) -> T:
+        guided_json = guided_json and self.config.structured_output_mode == "native"
         schema_instruction = ""
         if not guided_json:
             schema_instruction = "\nJSON schema:\n" + json.dumps(
