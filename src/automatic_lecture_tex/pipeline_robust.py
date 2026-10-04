@@ -52,7 +52,7 @@ class Pipeline(_base_pipeline.Pipeline):
             if self.config.asr.backend == "gigaam" and self.config.asr.gigaam_vad_enabled:
                 self._asr = VadGigaAMBackend(self.config.asr, self.config.runtime)
             else:
-                self._asr = make_asr_backend(self.config.asr, self.config.runtime)
+                self._asr = make_asr_backend(self.config.asr, self.config.runtime, self.config.llm)
         return self._asr
 
     @property
