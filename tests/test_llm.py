@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel
 
+from automatic_lecture_tex.config import LLMConfig
 from automatic_lecture_tex.llm import LectureModelClient
 from automatic_lecture_tex.schemas import (
     ChunkAnalysis,
@@ -216,3 +217,67 @@ def test_math_audit_failure_preserves_primary_notes(monkeypatch) -> None:
 
     assert result.blocks[0].latex == r"x=x"
     assert "audit" in result.unresolved[0]
+
+
+
+def test_generic_openai_mode_does_not_send_vllm_specific_sampling_body() -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client.config = LLMConfig(
+        compatibility_mode="generic",
+        extra_body={"provider": {"allow_fallbacks": True}},
+    )
+
+    body = client._extra_body(
+        thinking=True,
+        top_k=20,
+        min_p=0.1,
+        repetition_penalty=1.1,
+    )
+
+    assert body == {"provider": {"allow_fallbacks": True}}
+    assert "chat_template_kwargs" not in body
+    assert "top_k" not in body
+
+
+def test_prompt_structured_mode_disables_native_response_format(monkeypatch) -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client.config = LLMConfig(
+        model="fake",
+        compatibility_mode="generic",
+        structured_output_mode="prompt",
+        max_tokens=100,
+        max_retries=0,
+    )
+    client._usage_lock = threading.Lock()
+    client.reset_usage()
+
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"latex":"x"}'),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    total_tokens=2,
+                    prompt_tokens_details=None,
+                    completion_tokens_details=None,
+                ),
+            )
+
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions())
+    )
+
+    result = client._structured("Return latex.", LatexPayload)
+
+    assert result.latex == "x"
+    assert "response_format" not in captured
+    assert "JSON schema:" in captured["messages"][1]["content"][0]["text"]
