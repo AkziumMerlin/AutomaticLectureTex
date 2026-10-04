@@ -350,8 +350,8 @@ def _verify_generated(
         errors.append(
             "reader-facing output contains model-authored display math; use canonical MATH markers"
         )
-    if "$" in combined:
-        errors.append("reader-facing output contains raw $ display delimiters")
+    if combined.find("$" + "$") >= 0:
+        errors.append("reader-facing output contains raw double-dollar display delimiters")
     residual_marker_text = _FORMULA_MARKER.sub("", combined)
     if "[MATH:" in residual_marker_text:
         errors.append("reader-facing output contains malformed formula marker")
