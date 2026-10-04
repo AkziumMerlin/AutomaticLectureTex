@@ -8,7 +8,7 @@ from .latex import escape_tex
 from .schemas import BlockType, ChunkNotes, LectureIR, NoteBlock
 
 
-GRAPH_SURFACE_RENDER_VERSION = 2
+GRAPH_SURFACE_RENDER_VERSION = 3
 
 _TOPIC_KINDS = {"topic", "section", "subsection"}
 _NONRENDER_KINDS = {
@@ -725,10 +725,42 @@ def realize_graph_surface(
     topics, grouped = _section_assignment(state, renderable)
     chunks: list[ChunkNotes] = []
 
-    unresolved_global = [
-        violation.message
-        for violation in state.violations.values()
-    ]
+    if not topics:
+        section_nodes = [(None, grouped.get("__lecture__", []))]
+    else:
+        section_nodes = []
+        if grouped.get("__prelude__"):
+            section_nodes.append((None, grouped["__prelude__"]))
+        section_nodes.extend(
+            (topic, nodes)
+            for topic in topics
+            if (nodes := grouped.get(topic.id, []))
+        )
+
+    # Reader-facing unresolved mathematics belongs next to the section whose canonical nodes it
+    # concerns. Keeping every violation in the final section made unrelated weak-topology audit
+    # gaps appear under later weak-* material and obscured where the reconstruction is incomplete.
+    node_to_sections: dict[str, set[int]] = defaultdict(set)
+    for section_index, (topic, nodes) in enumerate(section_nodes):
+        if topic is not None:
+            node_to_sections[topic.id].add(section_index)
+        for node in nodes:
+            node_to_sections[node.id].add(section_index)
+
+    unresolved_by_section: dict[int, list[str]] = defaultdict(list)
+    unresolved_global: list[str] = []
+    for violation in state.violations.values():
+        targets = {
+            section_index
+            for node_id in violation.related_nodes
+            for section_index in node_to_sections.get(node_id, set())
+        }
+        if targets:
+            for section_index in sorted(targets):
+                unresolved_by_section[section_index].append(violation.message)
+        else:
+            unresolved_global.append(violation.message)
+
     # GraphState.notes are controller/audit diagnostics (frontier ambiguity descriptions,
     # rejected patch traces, provenance comments). They stay in graph artifacts but are not
     # reader-facing unresolved lecture content. Actual unresolved mathematics is represented by
@@ -740,10 +772,19 @@ def realize_graph_surface(
             if node.status == "alternative" and node.alternative_group
         }
     )
-    unresolved_global.extend(
-        f"Unresolved graph alternative group: {group}"
-        for group in ambiguous_groups
-    )
+    for group in ambiguous_groups:
+        group_targets = {
+            section_index
+            for node in state.nodes.values()
+            if node.status == "alternative" and node.alternative_group == group
+            for section_index in node_to_sections.get(node.id, set())
+        }
+        message = f"Unresolved graph alternative group: {group}"
+        if group_targets:
+            for section_index in sorted(group_targets):
+                unresolved_by_section[section_index].append(message)
+        else:
+            unresolved_global.append(message)
 
     unrevised_evidence = {
         evidence_id
@@ -755,17 +796,6 @@ def realize_graph_surface(
         unresolved_global.append(
             f"{len(unrevised_evidence)} raw observations remained provisional and were not "
             "rendered as canonical mathematics."
-        )
-
-    if not topics:
-        section_nodes = [(None, grouped.get("__lecture__", []))]
-    else:
-        section_nodes = []
-        if grouped.get("__prelude__"):
-            section_nodes.append((None, grouped["__prelude__"]))
-        section_nodes.extend(
-            (topic, grouped.get(topic.id, []))
-            for topic in topics
         )
 
     for index, (topic, nodes) in enumerate(section_nodes):
@@ -807,9 +837,14 @@ def realize_graph_surface(
                 blocks=blocks,
                 unresolved=list(
                     dict.fromkeys(
-                        unresolved_global
-                        if index == len(section_nodes) - 1
-                        else []
+                        [
+                            *unresolved_by_section.get(index, []),
+                            *(
+                                unresolved_global
+                                if index == len(section_nodes) - 1
+                                else []
+                            ),
+                        ]
                     )
                 ),
             )
