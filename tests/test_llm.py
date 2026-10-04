@@ -281,3 +281,25 @@ def test_prompt_structured_mode_disables_native_response_format(monkeypatch) -> 
     assert result.latex == "x"
     assert "response_format" not in captured
     assert "JSON schema:" in captured["messages"][1]["content"][0]["text"]
+
+
+
+def test_openrouter_reasoning_transport_follows_per_call_thinking() -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client.config = LLMConfig(
+        compatibility_mode="generic",
+        reasoning_transport="openrouter",
+        reasoning_effort="medium",
+        thinking=True,
+    )
+
+    thinking_body = client._extra_body(thinking=True)
+    nonthinking_body = client._extra_body(thinking=False)
+
+    assert thinking_body["reasoning"] == {
+        "enabled": True,
+        "exclude": True,
+        "effort": "medium",
+    }
+    assert nonthinking_body["reasoning"] == {"enabled": False}
+    assert "chat_template_kwargs" not in thinking_body
