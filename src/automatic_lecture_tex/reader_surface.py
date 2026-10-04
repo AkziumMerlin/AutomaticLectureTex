@@ -155,6 +155,19 @@ class GeneratedReaderBlock(BaseModel):
     segments: list[ReaderSurfaceSegment] = Field(min_length=1)
 
 
+class ReaderGroundingIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_index: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=800)
+
+
+class ReaderGroundingReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issues: list[ReaderGroundingIssue] = Field(default_factory=list)
+
+
 def graph_section_specs(
     state: GraphState,
     *,
@@ -534,6 +547,89 @@ def _verify_block(
     return errors
 
 
+def _grounding_prompt(
+    *,
+    projection: ReaderSectionProjection,
+    block: PlannedReaderBlock,
+    generated: GeneratedReaderBlock,
+    output_language: str,
+) -> str:
+    fact_by_id = {fact.node_id: fact for fact in projection.facts}
+    payload = []
+    for index, segment in enumerate(generated.segments):
+        payload.append(
+            {
+                "segment_index": index,
+                "segment": segment.model_dump(mode="json"),
+                "cited_facts": [
+                    {
+                        "node_id": node_id,
+                        "title": fact_by_id[node_id].title,
+                        "statement": fact_by_id[node_id].statement,
+                        "expression_ids": list(fact_by_id[node_id].expression_ids),
+                    }
+                    for node_id in segment.source_node_ids
+                ],
+            }
+        )
+    return f"""Audit one typed lecture-note block for semantic grounding.
+
+PLANNED BLOCK:
+{json.dumps(block.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))}
+
+SEGMENTS WITH THEIR CITED READER FACTS:
+{json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}
+
+For each text or inline_math segment, decide whether it states anything mathematically stronger,
+more specific, or different from its cited reader facts. Flag a segment if it introduces an
+uncited theorem name, identifies an unresolved object, changes a space/domain/codomain, asserts a
+new equality/implication/property in prose, or otherwise adds mathematical content not entailed by
+the cited facts. Exact expression segments are host-owned and need no mathematical reinterpretation.
+
+Do not rewrite the block. Return only issue indices and concise reasons. If every segment is
+grounded, return an empty issues list. Reasons use language code {output_language}.
+Return strict structured JSON only.
+"""
+
+
+def _verify_grounding_review(
+    generated: GeneratedReaderBlock,
+    review: ReaderGroundingReview,
+) -> list[str]:
+    errors: list[str] = []
+    for issue in review.issues:
+        if issue.segment_index >= len(generated.segments):
+            errors.append(f"grounding review references invalid segment {issue.segment_index}")
+    return errors
+
+
+def _review_grounding(
+    orchestrator: Any,
+    *,
+    projection: ReaderSectionProjection,
+    block: PlannedReaderBlock,
+    generated: GeneratedReaderBlock,
+) -> ReaderGroundingReview:
+    prompt = _grounding_prompt(
+        projection=projection,
+        block=block,
+        generated=generated,
+        output_language=orchestrator.output_language,
+    )
+    review = orchestrator._structured(
+        prompt,
+        ReaderGroundingReview,
+        operation="graph_block_grounding_review",
+        **_call_kwargs(orchestrator),
+    )
+    errors = _verify_grounding_review(generated, review)
+    if errors:
+        raise RuntimeError(
+            f"grounding review malformed for {block.block_id}: " + "; ".join(errors)
+        )
+    return review
+
+
 def _render_generated_block(
     *,
     state: GraphState,
@@ -762,27 +858,61 @@ def _write_block(
             operation="graph_block_write",
             **_call_kwargs(orchestrator),
         )
-        errors = _verify_block(projection=projection, block=block, generated=generated)
-        if errors:
-            repair = (
-                prompt
-                + "\n\nThe previous block violated the grounding/coverage contract:\n- "
-                + "\n- ".join(errors)
-                + "\nPrevious JSON:\n"
-                + generated.model_dump_json()
-            )
-            generated = orchestrator._structured(
-                repair,
-                GeneratedReaderBlock,
-                operation="graph_block_write_repair",
-                **_call_kwargs(orchestrator),
-            )
+
     errors = _verify_block(projection=projection, block=block, generated=generated)
+    review = None
+    if not errors:
+        review = _review_grounding(
+            orchestrator,
+            projection=projection,
+            block=block,
+            generated=generated,
+        )
+        if review.issues:
+            errors.extend(
+                f"unsupported segment {issue.segment_index}: {issue.reason}"
+                for issue in review.issues
+            )
+
+    if errors:
+        repair = (
+            prompt
+            + "\n\nThe previous block violated the structural/grounding contract:\n- "
+            + "\n- ".join(errors)
+            + "\nPrevious JSON:\n"
+            + generated.model_dump_json()
+        )
+        generated = orchestrator._structured(
+            repair,
+            GeneratedReaderBlock,
+            operation="graph_block_write_repair",
+            **_call_kwargs(orchestrator),
+        )
+        errors = _verify_block(projection=projection, block=block, generated=generated)
+        if not errors:
+            review = _review_grounding(
+                orchestrator,
+                projection=projection,
+                block=block,
+                generated=generated,
+            )
+            if review.issues:
+                errors.extend(
+                    f"unsupported segment {issue.segment_index}: {issue.reason}"
+                    for issue in review.issues
+                )
+
     if errors:
         raise RuntimeError(f"block writer failed for {block.block_id}: " + "; ".join(errors))
     atomic_json_dump(
         path,
-        {"fingerprint": fingerprint, "generated": generated.model_dump(mode="json")},
+        {
+            "fingerprint": fingerprint,
+            "generated": generated.model_dump(mode="json"),
+            "grounding_review": (
+                review.model_dump(mode="json") if review is not None else {"issues": []}
+            ),
+        },
     )
     return generated
 
