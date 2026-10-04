@@ -11,6 +11,8 @@ from automatic_lecture_tex.reader_surface import (
     GeneratedReaderBlock,
     PlannedReaderBlock,
     ReaderDiscoursePlan,
+    ReaderGroundingIssue,
+    ReaderGroundingReview,
     ReaderProjectionChoice,
     ReaderProjectionChoices,
     ReaderSurfaceSegment,
@@ -266,7 +268,9 @@ def test_surface_pipeline_projection_plan_writer_end_to_end(tmp_path):
             ),
         ]
     )
-    orchestrator = StubOrchestrator([projection, plan, generated])
+    orchestrator = StubOrchestrator(
+        [projection, plan, generated, ReaderGroundingReview(issues=[])]
+    )
     metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
 
     ir = write_graph_surface(
@@ -284,6 +288,7 @@ def test_surface_pipeline_projection_plan_writer_end_to_end(tmp_path):
         "graph_reader_projection",
         "graph_discourse_plan",
         "graph_block_write",
+        "graph_block_grounding_review",
     ]
     assert len(ir.chunks) == 1
     assert len(ir.chunks[0].blocks) == 1
@@ -357,7 +362,9 @@ def test_projection_can_omit_pure_audit_node_without_surface_fallback(tmp_path):
             )
         ]
     )
-    orchestrator = StubOrchestrator([projection, plan, generated])
+    orchestrator = StubOrchestrator(
+        [projection, plan, generated, ReaderGroundingReview(issues=[])]
+    )
     metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
 
     ir = write_graph_surface(
@@ -378,3 +385,100 @@ def test_projection_can_omit_pure_audit_node_without_surface_fallback(tmp_path):
         tmp_path / "graph_surface_writer" / "section_000" / "summary.json"
     ).read_text(encoding="utf-8")
     assert '"audit"' in summary
+
+
+
+def test_grounding_issue_forces_block_repair(tmp_path):
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    semantic_index = _candidate_units(definition).index(
+        "Функционал называется комплексно-линейным."
+    )
+    projection = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[semantic_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    plan = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="definition",
+                type=BlockType.DEFINITION,
+                purpose="Дать определение.",
+                node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    bad = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Пространство совпадает с эл два.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    good = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Рассматривается комплексно-линейный функционал.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    orchestrator = StubOrchestrator(
+        [
+            projection,
+            plan,
+            bad,
+            ReaderGroundingReview(
+                issues=[
+                    ReaderGroundingIssue(
+                        segment_index=0,
+                        reason="Совпадение пространств не следует из cited fact.",
+                    )
+                ]
+            ),
+            good,
+            ReaderGroundingReview(issues=[]),
+        ]
+    )
+    metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
+
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=metadata_ir,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=True,
+    )
+
+    assert "совпадает" not in ir.chunks[0].blocks[0].latex
+    assert orchestrator.operations.count("graph_block_write_repair") == 1
+    assert orchestrator.operations.count("graph_block_grounding_review") == 2
