@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from automatic_lecture_tex.config import AppConfig
+from automatic_lecture_tex.config import AppConfig, load_config
 
 
 def test_minimal_config_parses():
@@ -54,3 +54,26 @@ def test_overlap_must_be_smaller_than_chunk():
                 },
             }
         )
+
+
+
+def test_openrouter_deepseek_config_parses():
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state_20s_openrouter.yaml"
+    )
+
+    cfg = load_config(config_path)
+
+    assert cfg.llm.base_url == "https://openrouter.ai/api/v1"
+    assert cfg.llm.api_key_env == "OPENROUTER_API_KEY"
+    assert cfg.llm.compatibility_mode == "generic"
+    assert cfg.llm.reasoning_transport == "openrouter"
+    assert cfg.llm.model == "deepseek/deepseek-v4.1-flash"
+    assert cfg.asr.backend == "openai_compatible"
+    assert cfg.asr.model == "openai/whisper-large-v3"
+    assert cfg.asr.transcription_response_format == "verbose_json"
+    assert cfg.asr.extra_body["timestamp_granularities"] == ["word"]
+    assert cfg.vision.math_ocr.backend == "openai_compatible"
+    assert cfg.vision.math_ocr.openai_model == "deepseek/deepseek-v4.1-flash"
