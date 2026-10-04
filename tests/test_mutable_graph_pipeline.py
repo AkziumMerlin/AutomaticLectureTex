@@ -1304,16 +1304,26 @@ def test_graph_revision_retries_same_focus_at_global_output_budget(tmp_path: Pat
     assert result.stats["split_focuses"] == 0
 
 
-def test_cached_output_truncation_split_is_not_replayed(tmp_path: Path) -> None:
-    path = tmp_path / "proposal.json"
-    path.write_text(
+def test_typed_output_overflow_split_is_replayed_but_legacy_split_is_not(
+    tmp_path: Path,
+) -> None:
+    typed = tmp_path / "typed.json"
+    typed.write_text(
+        '{"fingerprint":"fp","split":{"kind":"output_overflow","reason":'
+        '"graph_revision_proposal structured output was truncated at max_tokens=16384",'
+        '"children":["a","b"]}}',
+        encoding="utf-8",
+    )
+    assert _load_cached_split(typed, "fp") is True
+
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
         '{"fingerprint":"fp","split":{"reason":'
         '"graph_revision_proposal structured output was truncated at max_tokens=16384",'
         '"children":["a","b"]}}',
         encoding="utf-8",
     )
-
-    assert _load_cached_split(path, "fp") is False
+    assert _load_cached_split(legacy, "fp") is False
 
 
 def test_catalog_does_not_expand_singleton_focus_with_nearby_provisionals() -> None:
