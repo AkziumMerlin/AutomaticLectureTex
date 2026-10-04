@@ -1363,3 +1363,62 @@ def test_catalog_does_not_expand_singleton_focus_with_nearby_provisionals() -> N
     assert "obs::focus" in detail_ids
     assert "obs::near" not in detail_ids
     assert "canonical_near" in detail_ids
+
+
+
+def test_graph_renderer_routes_violation_to_related_section() -> None:
+    from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphState
+
+    graph = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", start=0.0, end=1.0, text="first"),
+            "e2": EvidenceRecord(id="e2", start=100.0, end=101.0, text="second"),
+        },
+        nodes={
+            "topic_a": GraphNode(
+                id="topic_a",
+                kind="topic",
+                title="First topic",
+                evidence_ids=["e1"],
+            ),
+            "topic_b": GraphNode(
+                id="topic_b",
+                kind="topic",
+                title="Second topic",
+                evidence_ids=["e2"],
+            ),
+            "a": GraphNode(
+                id="a",
+                kind="claim",
+                title="A",
+                text="First claim.",
+                evidence_ids=["e1"],
+            ),
+            "b": GraphNode(
+                id="b",
+                kind="claim",
+                title="B",
+                text="Second claim.",
+                evidence_ids=["e2"],
+            ),
+        },
+        edges=[
+            GraphEdge(source="topic_a", target="a", relation="contains"),
+            GraphEdge(source="topic_b", target="b", relation="contains"),
+        ],
+        violations={
+            "missing-a": Violation(
+                id="missing-a",
+                category="evidence",
+                severity=1,
+                message="First-topic evidence is incomplete.",
+                related_nodes=["a"],
+            )
+        },
+    )
+
+    ir = graph_state_to_ir(graph, lecture_id="lecture", title="Lecture")
+    chunks = {chunk.section_title: chunk for chunk in ir.chunks}
+
+    assert chunks["First topic"].unresolved == ["First-topic evidence is incomplete."]
+    assert chunks["Second topic"].unresolved == []
