@@ -10,6 +10,7 @@ from automatic_lecture_tex import math_ocr as math_ocr_module
 from automatic_lecture_tex.config import LLMConfig, MathOCRConfig
 from automatic_lecture_tex.math_ocr import (
     LatexOCRBackend,
+    OpenAICompatibleVLMOCRBackend,
     QwenVLMOCRBackend,
     UniMERNetBackend,
     UniMuMERBackend,
@@ -274,3 +275,57 @@ def test_unimumer_worker_uses_expandable_cuda_allocator(monkeypatch):
     importlib.reload(worker_module)
 
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+
+
+
+def test_generic_openai_compatible_formula_ocr_uses_shared_endpoint(
+    tmp_path, monkeypatch
+) -> None:
+    image_path = tmp_path / "formula.png"
+    Image.new("RGB", (120, 60), "white").save(image_path)
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=r"\frac{x}{y}")
+                    )
+                ]
+            )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions())
+    )
+
+    def fake_make_client(**kwargs):
+        captured["client"] = kwargs
+        return fake_client
+
+    monkeypatch.setattr(math_ocr_module, "make_openai_client", fake_make_client)
+
+    backend = OpenAICompatibleVLMOCRBackend(
+        MathOCRConfig(
+            backend="openai_compatible",
+            openai_model="qwen/qwen3-vl-plus",
+            openai_api_key_env="OPENROUTER_API_KEY",
+            normalize_dark_formula=False,
+        ),
+        LLMConfig(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="EMPTY",
+            compatibility_mode="generic",
+        ),
+    )
+    candidate = backend.recognize(image_path)
+
+    assert candidate is not None
+    assert candidate.backend == "openai_compatible"
+    assert candidate.text == r"\frac{x}{y}"
+    assert captured["client"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert captured["client"]["api_key_env"] == "OPENROUTER_API_KEY"
+    assert captured["request"]["model"] == "qwen/qwen3-vl-plus"
+    content = captured["request"]["messages"][0]["content"]
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")

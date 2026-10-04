@@ -8,8 +8,9 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from .config import ASRConfig, RuntimeConfig
+from .config import ASRConfig, LLMConfig, RuntimeConfig
 from .media import probe_duration
+from .openai_compat import make_openai_client
 from .schemas import Transcript, TranscriptSegment, TranscriptWord
 from .util import run_checked
 
@@ -386,6 +387,190 @@ def _extract_audio_chunk(
     )
 
 
+def _api_value(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _api_word_segments(
+    words: list[Any],
+    *,
+    shift: float,
+    target_seconds: float,
+    hotwords: list[str],
+) -> list[TranscriptSegment]:
+    normalized = [
+        TranscriptWord(
+            text=str(_api_value(word, "word", _api_value(word, "text", ""))).strip(),
+            start=shift + float(_api_value(word, "start", 0.0)),
+            end=shift + float(_api_value(word, "end", 0.0)),
+        )
+        for word in words
+        if str(_api_value(word, "word", _api_value(word, "text", ""))).strip()
+    ]
+    if not normalized:
+        return []
+
+    segments: list[TranscriptSegment] = []
+    current: list[TranscriptWord] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        text = " ".join(word.text for word in current).strip()
+        text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+        if text and not is_hotword_prompt_echo(text, hotwords):
+            segments.append(
+                TranscriptSegment(
+                    id=f"seg_{len(segments):05d}",
+                    start=current[0].start,
+                    end=current[-1].end,
+                    text=text,
+                    words=list(current),
+                )
+            )
+        current.clear()
+
+    for word in normalized:
+        if current:
+            gap = word.start - current[-1].end
+            duration = current[-1].end - current[0].start
+            sentence_end = current[-1].text.rstrip().endswith((".", "!", "?"))
+            if gap >= 1.0 or (duration >= target_seconds and sentence_end):
+                flush()
+        current.append(word)
+        if current[-1].end - current[0].start >= target_seconds * 1.5:
+            flush()
+    flush()
+    return segments
+
+
+class OpenAICompatibleASRBackend(ASRBackend):
+    """Speech-to-text through an OpenAI-compatible /audio/transcriptions endpoint."""
+
+    def __init__(
+        self,
+        config: ASRConfig,
+        runtime: RuntimeConfig,
+        llm_config: LLMConfig | None = None,
+    ) -> None:
+        super().__init__(config, runtime)
+        inherited_base_url = llm_config.base_url if llm_config is not None else None
+        base_url = config.base_url or inherited_base_url
+        if not base_url:
+            raise RuntimeError(
+                "openai_compatible ASR requires asr.base_url or an application llm.base_url"
+            )
+
+        inherited_key = llm_config.api_key if llm_config is not None else None
+        inherited_key_env = llm_config.api_key_env if llm_config is not None else None
+        api_key = config.api_key if config.api_key is not None else inherited_key
+        api_key_env = config.api_key_env or inherited_key_env
+        headers = dict(getattr(llm_config, "default_headers", {}) or {})
+        headers.update(config.default_headers)
+        self.client = make_openai_client(
+            base_url=base_url,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            timeout_seconds=config.timeout_seconds,
+            default_headers=headers,
+        )
+
+    def _transcribe_chunk(
+        self,
+        path: Path,
+        *,
+        shift: float,
+        duration: float,
+    ) -> list[TranscriptSegment]:
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "language": self.config.language,
+            "response_format": self.config.transcription_response_format,
+        }
+        if self.config.hotwords:
+            kwargs["prompt"] = "Expected terminology: " + ", ".join(self.config.hotwords)
+        if self.config.extra_body:
+            kwargs["extra_body"] = dict(self.config.extra_body)
+
+        with path.open("rb") as audio_file:
+            response = self.client.audio.transcriptions.create(
+                file=audio_file,
+                **kwargs,
+            )
+
+        words = list(_api_value(response, "words", []) or [])
+        if words:
+            return _api_word_segments(
+                words,
+                shift=shift,
+                target_seconds=self.config.segment_target_seconds,
+                hotwords=self.config.hotwords,
+            )
+
+        raw_segments = list(_api_value(response, "segments", []) or [])
+        if raw_segments:
+            result: list[TranscriptSegment] = []
+            for raw in raw_segments:
+                text = str(_api_value(raw, "text", "")).strip()
+                if not text or is_hotword_prompt_echo(text, self.config.hotwords):
+                    continue
+                start = shift + float(_api_value(raw, "start", 0.0))
+                end = shift + float(_api_value(raw, "end", duration))
+                result.append(
+                    TranscriptSegment(
+                        id=f"seg_{len(result):05d}",
+                        start=start,
+                        end=end,
+                        text=text,
+                    )
+                )
+            return result
+
+        text = str(_api_value(response, "text", "")).strip()
+        if not text or is_hotword_prompt_echo(text, self.config.hotwords):
+            return []
+        return [
+            TranscriptSegment(
+                id="seg_00000",
+                start=shift,
+                end=shift + duration,
+                text=text,
+            )
+        ]
+
+    def transcribe(self, lecture_id: str, audio_path: Path) -> Transcript:
+        duration = probe_duration(audio_path, self.runtime)
+        chunk_seconds = float(self.config.chunk_seconds)
+        if chunk_seconds <= 0:
+            raise ValueError("ASR chunk_seconds must be positive")
+
+        segments: list[TranscriptSegment] = []
+        with tempfile.TemporaryDirectory(prefix="automatic-lecture-tex-openai-asr-") as tmp_name:
+            tmp = Path(tmp_name)
+            count = math.ceil(duration / chunk_seconds)
+            for index in range(count):
+                start = index * chunk_seconds
+                length = min(chunk_seconds, duration - start)
+                chunk_path = tmp / f"chunk_{index:05d}.wav"
+                _extract_audio_chunk(self.runtime, audio_path, start, length, chunk_path)
+                chunk_segments = self._transcribe_chunk(
+                    chunk_path,
+                    shift=start,
+                    duration=length,
+                )
+                for segment in chunk_segments:
+                    segment.id = f"seg_{len(segments):05d}"
+                    segments.append(segment)
+
+        return Transcript(
+            lecture_id=lecture_id,
+            language=self.config.language or "unknown",
+            segments=segments,
+        )
+
+
 class GigaAMBackend(ASRBackend):
     """Short-form ASR using any GigaAM CTC/RNNT family member.
 
@@ -470,11 +655,17 @@ class GigaAMBackend(ASRBackend):
         )
 
 
-def make_asr_backend(config: ASRConfig, runtime: RuntimeConfig) -> ASRBackend:
+def make_asr_backend(
+    config: ASRConfig,
+    runtime: RuntimeConfig,
+    llm_config: LLMConfig | None = None,
+) -> ASRBackend:
     if config.backend == "qwen3":
         return Qwen3ASRBackend(config, runtime)
     if config.backend == "qwen3_hf":
         return LegacyQwen3HFBackend(config, runtime)
     if config.backend == "gigaam":
         return GigaAMBackend(config, runtime)
+    if config.backend == "openai_compatible":
+        return OpenAICompatibleASRBackend(config, runtime, llm_config)
     return FasterWhisperBackend(config, runtime)

@@ -6,13 +6,21 @@ import pytest
 
 from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphEdge, GraphNode, GraphState
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
-from automatic_lecture_tex.graph_surface_writer import (
-    GeneratedGraphSectionBlock,
-    GeneratedGraphSectionNotes,
-    _surface_writer_prompt,
-    _verify_generated,
-    graph_section_specs,
-    write_graph_surface,
+from automatic_lecture_tex.graph_surface_writer import graph_section_specs, write_graph_surface
+from automatic_lecture_tex.reader_surface import (
+    GeneratedReaderBlock,
+    PlannedReaderBlock,
+    ReaderDiscoursePlan,
+    ReaderGroundingIssue,
+    ReaderGroundingReview,
+    ReaderProjectionChoice,
+    ReaderProjectionChoices,
+    ReaderSurfaceSegment,
+    _candidate_units,
+    _materialize_projection,
+    _verify_block,
+    _verify_plan,
+    _verify_projection_choices,
 )
 from automatic_lecture_tex.schemas import BlockType
 
@@ -21,19 +29,22 @@ class StubOrchestrator:
     def __init__(self, responses):
         self.responses = list(responses)
         self.prompts: list[str] = []
+        self.operations: list[str] = []
         self.output_language = "ru"
         self.config = SimpleNamespace(
             state_section_writer_thinking=False,
-            state_section_writer_temperature=0.6,
-            state_section_writer_top_p=0.8,
+            state_section_writer_temperature=0.2,
+            state_section_writer_top_p=0.9,
             state_section_writer_top_k=20,
             state_section_writer_min_p=0.0,
-            state_section_writer_presence_penalty=0.5,
+            state_section_writer_presence_penalty=0.0,
             state_section_writer_repetition_penalty=1.0,
         )
 
     def _structured(self, prompt, schema, **kwargs):
+        del schema
         self.prompts.append(prompt)
+        self.operations.append(kwargs["operation"])
         return self.responses.pop(0)
 
 
@@ -54,14 +65,17 @@ def _definition_graph() -> GraphState:
                 id="definition",
                 kind="definition",
                 title="Комплексно-линейный функционал",
-                text="Определяется комплексная линейность функционала.",
+                text=(
+                    "Функционал называется комплексно-линейным. "
+                    "На доске ниже записано определяющее тождество."
+                ),
                 evidence_ids=["e1"],
             ),
             "linearity": GraphNode(
                 id="linearity",
                 kind="equation",
-                title="Линейность",
-                text="Условие комплексной линейности.",
+                title="Условие комплексной линейности",
+                text="Условие комплексной линейности задаётся равенством.",
                 latex=r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)",
                 evidence_ids=["e2"],
                 derived_from=["definition"],
@@ -74,360 +88,397 @@ def _definition_graph() -> GraphState:
     )
 
 
-def test_surface_writer_prompt_encodes_reference_handout_style():
+def test_reader_projection_is_extractive_and_rejects_provenance_selection():
     graph = _definition_graph()
     spec = graph_section_specs(graph, lecture_title="Lecture")[0]
-    payload = {
-        "section_id": spec.section_id,
-        "title": spec.title,
-        "nodes": [],
-        "relations": [],
-    }
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    units = _candidate_units(definition)
 
-    prompt = _surface_writer_prompt(payload=payload, output_language="ru")
+    assert units[0] == "Комплексно-линейный функционал"
+    assert "Функционал называется комплексно-линейным." in units
+    audit_index = next(index for index, unit in enumerate(units) if "доске" in unit)
 
-    assert "Пусть ..." in prompt
-    assert "Будем называть ... , если ..." in prompt
-    assert "Заметим, что" in prompt
-    assert "Do NOT create a bold/paragraph heading" in prompt
-    assert "every intermediate equation" in prompt
-    assert "Every mathematical symbol occurring inside prose must be in math mode" in prompt
-    assert "[[MATH:<node_id>]]" in prompt
-    assert "Never wrap it in $...$, $$...$$" in prompt
-    assert "Never use mathematical placeholders" in prompt
+    bad = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[audit_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    errors = _verify_projection_choices(spec=spec, choices=bad)
+
+    assert any("provenance language" in error for error in errors)
 
 
-def test_graph_surface_writer_merges_atoms_into_polished_definition(tmp_path):
+def test_projection_materializes_only_selected_source_units():
     graph = _definition_graph()
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    generated = GeneratedGraphSectionNotes(
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    units = _candidate_units(definition)
+    semantic_index = units.index("Функционал называется комплексно-линейным.")
+
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[semantic_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+
+    projection = _materialize_projection(graph, spec, choices)
+    fact = next(item for item in projection.facts if item.node_id == "definition")
+
+    assert fact.statement == "Функционал называется комплексно-линейным."
+    assert "доске" not in fact.statement
+    expression = projection.expressions[0]
+    assert expression.id == "expr::linearity"
+    assert expression.latex == r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)"
+
+
+def test_discourse_plan_requires_exact_ordered_coverage():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id=node.id,
+                disposition="render",
+                selected_unit_indices=[0],
+            )
+            for node in spec.nodes
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+
+    reversed_plan = ReaderDiscoursePlan(
         blocks=[
-            GeneratedGraphSectionBlock(
+            PlannedReaderBlock(
+                block_id="b0",
                 type=BlockType.DEFINITION,
-                title=None,
-                latex=(
-                    r"Пусть $X$ --- комплексное линейное пространство. "
-                    r"Будем называть функционал $f\colon X\to\mathbb C$ комплексно-линейным, если "
-                    r"для любых $\alpha,\beta\in\mathbb C$ и $x,y\in X$ выполняется "
-                    r"[[MATH:linearity]]"
-                ),
-                source_node_ids=["definition", "linearity"],
+                purpose="Определение",
+                node_ids=["linearity", "definition"],
             )
         ]
     )
-    orchestrator = StubOrchestrator([generated])
+
+    assert _verify_plan(projection, reversed_plan)
+
+
+def test_typed_inline_math_cannot_smuggle_a_new_relation():
+    with pytest.raises(ValueError, match="cannot contain mathematical relations"):
+        ReaderSurfaceSegment(
+            kind="inline_math",
+            source_node_ids=["definition"],
+            latex=r"H=L_2",
+        )
+
+
+def test_block_requires_all_host_owned_expressions():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id=node.id,
+                disposition="render",
+                selected_unit_indices=[0],
+            )
+            for node in spec.nodes
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    block = PlannedReaderBlock(
+        block_id="definition",
+        type=BlockType.DEFINITION,
+        purpose="Определить функционал.",
+        node_ids=["definition", "linearity"],
+    )
+    generated = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition", "linearity"],
+                text="Определим комплексно-линейный функционал.",
+            )
+        ]
+    )
+
+    errors = _verify_block(projection=projection, block=block, generated=generated)
+
+    assert any("omits canonical expressions" in error for error in errors)
+
+
+def test_surface_pipeline_projection_plan_writer_end_to_end(tmp_path):
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    definition_units = _candidate_units(definition)
+    semantic_index = definition_units.index("Функционал называется комплексно-линейным.")
+
+    projection = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[semantic_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    plan = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="definition",
+                type=BlockType.DEFINITION,
+                purpose="Дать определение и точное условие линейности.",
+                node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    generated = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Будем называть функционал комплексно-линейным, если выполняется условие",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    orchestrator = StubOrchestrator(
+        [projection, plan, generated, ReaderGroundingReview(issues=[])]
+    )
+    metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
 
     ir = write_graph_surface(
         orchestrator,
         state=graph,
         lecture_id="l1",
         lecture_title="Lecture",
-        fallback_ir=fallback,
+        fallback_ir=metadata_ir,
         work=tmp_path,
         llm_config={"model": "fake"},
         force=False,
     )
 
+    assert orchestrator.operations == [
+        "graph_reader_projection",
+        "graph_discourse_plan",
+        "graph_block_write",
+        "graph_block_grounding_review",
+    ]
     assert len(ir.chunks) == 1
     assert len(ir.chunks[0].blocks) == 1
-    block = ir.chunks[0].blocks[0]
-    assert block.type == BlockType.DEFINITION
-    assert "Будем называть функционал" in block.latex
-    assert r"$f\colon X\to\mathbb C$" in block.latex
-    assert block.source_evidence_ids == ["e1", "e2"]
-    assert len(orchestrator.prompts) == 1
+    output = ir.chunks[0].blocks[0].latex
+    assert "доске" not in output
+    assert r"\[" in output
+    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in output
+    assert ir.chunks[0].blocks[0].source_claim_ids == ["definition", "linearity"]
+    section_root = tmp_path / "graph_surface_writer" / "section_000"
+    assert (section_root / "reader_projection.json").is_file()
+    assert (section_root / "plan.json").is_file()
+    assert (section_root / "block_000.json").is_file()
 
 
-def test_graph_surface_writer_repairs_provenance_language(tmp_path):
-    graph = _definition_graph()
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    bad = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex="По данным OCR это определение.",
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    good = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex=(
-                    r"Пусть $X$ --- комплексное линейное пространство. "
-                    r"Будем называть $f$ комплексно-линейным, если "
-                    r"[[MATH:linearity]]"
-                ),
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    orchestrator = StubOrchestrator([bad, good])
-
-    ir = write_graph_surface(
-        orchestrator,
-        state=graph,
-        lecture_id="l1",
-        lecture_title="Lecture",
-        fallback_ir=fallback,
-        work=tmp_path,
-        llm_config={"model": "fake"},
-        force=False,
-    )
-
-    assert len(orchestrator.prompts) == 2
-    assert "Verification errors" in orchestrator.prompts[1]
-    assert "Будем называть $f$" in ir.chunks[0].blocks[0].latex
-
-
-def test_graph_surface_verifier_requires_full_node_and_formula_coverage():
-    graph = _definition_graph()
-    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
-    generated = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.PARAGRAPH,
-                latex="Только текст.",
-                source_node_ids=["definition"],
-            )
-        ]
-    )
-
-    errors = _verify_generated(spec=spec, generated=generated)
-
-    assert any("uncovered canonical nodes: linearity" in item for item in errors)
-    assert any("missing canonical formulas from: linearity" in item for item in errors)
-
-
-def test_graph_surface_writer_injects_renderer_owned_formula_without_repair(tmp_path):
-    graph = _definition_graph()
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    generated = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex=(
-                    r"Пусть $X$ --- комплексное линейное пространство. "
-                    r"Будем называть $f$ комплексно-линейным."
-                ),
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    orchestrator = StubOrchestrator([generated])
-
-    ir = write_graph_surface(
-        orchestrator,
-        state=graph,
-        lecture_id="l1",
-        lecture_title="Lecture",
-        fallback_ir=fallback,
-        work=tmp_path,
-        llm_config={"model": "fake"},
-        force=False,
-    )
-
-    assert len(orchestrator.prompts) == 1
-    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in ir.chunks[0].blocks[0].latex
-    assert "[[MATH:" not in ir.chunks[0].blocks[0].latex
-
-
-
-def test_graph_surface_writer_normalizes_loose_wrapped_formula_markers(tmp_path):
-    graph = _definition_graph()
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    generated = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex=(
-                    r"Пусть $X$ --- комплексное линейное пространство. "
-                    r"Условие линейности имеет вид $$[MATH:linearity]$$."
-                ),
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    orchestrator = StubOrchestrator([generated])
-
-    ir = write_graph_surface(
-        orchestrator,
-        state=graph,
-        lecture_id="l1",
-        lecture_title="Lecture",
-        fallback_ir=fallback,
-        work=tmp_path,
-        llm_config={"model": "fake"},
-        force=False,
-    )
-
-    block = ir.chunks[0].blocks[0]
-    assert len(orchestrator.prompts) == 1
-    assert "[MATH:" not in block.latex
-    assert "$$" not in block.latex
-    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in block.latex
-
-
-def test_graph_surface_writer_repairs_placeholder_unicode_and_bad_tex(tmp_path):
-    graph = _definition_graph()
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    bad = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex=(
-                    r"Пусть $f:X\to\text{...}$ и $x \tin X$, "
-                    "а φ ∈ Φ. [[MATH:linearity]]"
-                ),
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    good = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex=(
-                    r"Пусть $X$ --- комплексное линейное пространство и $x\in X$. "
-                    r"Условие комплексной линейности имеет вид [[MATH:linearity]]."
-                ),
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    orchestrator = StubOrchestrator([bad, good])
-
-    ir = write_graph_surface(
-        orchestrator,
-        state=graph,
-        lecture_id="l1",
-        lecture_title="Lecture",
-        fallback_ir=fallback,
-        work=tmp_path,
-        llm_config={"model": "fake"},
-        force=False,
-    )
-
-    assert len(orchestrator.prompts) == 2
-    assert "Verification errors" in orchestrator.prompts[1]
-    block = ir.chunks[0].blocks[0]
-    assert r"$x\in X$" in block.latex
-    assert r"\text{...}" not in block.latex
-    assert "φ" not in block.latex
-    assert r"\tin" not in block.latex
-
-
-def test_graph_surface_verifier_checks_titles_and_model_authored_math():
-    graph = _definition_graph()
-    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
-    generated = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                title=r"Оценка $||u|| le ||f||$",
-                latex=(
-                    r"По нечитаемой рукописной записи восстановлена формула "
-                    r"\[f(x)=g(x)\] [[MATH:linearity]]"
-                ),
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-
-    errors = _verify_generated(spec=spec, generated=generated)
-
-    assert any("provenance/audit language" in item for item in errors)
-    assert any("malformed/non-LaTeX inline math" in item for item in errors)
-    assert any("model-authored display math" in item for item in errors)
-
-
-def test_graph_surface_writer_recursively_splits_instead_of_using_fallback(tmp_path):
-    graph = _definition_graph()
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    bad = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.PARAGRAPH,
-                latex="По данным OCR это восстановленная запись.",
-                source_node_ids=["definition", "linearity"],
-            )
-        ]
-    )
-    left = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex=r"Введём комплексно-линейный функционал $f$.",
-                source_node_ids=["definition"],
-            )
-        ]
-    )
-    right = GeneratedGraphSectionNotes(
-        blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.EQUATION,
-                latex="[[MATH:linearity]]",
-                source_node_ids=["linearity"],
-            )
-        ]
-    )
-    orchestrator = StubOrchestrator([bad, bad, left, right])
-
-    ir = write_graph_surface(
-        orchestrator,
-        state=graph,
-        lecture_id="l1",
-        lecture_title="Lecture",
-        fallback_ir=fallback,
-        work=tmp_path,
-        llm_config={"model": "fake"},
-        force=False,
-    )
-
-    assert len(orchestrator.prompts) == 4
-    assert len(ir.chunks) == 1
-    rendered = "\n".join(block.latex for block in ir.chunks[0].blocks)
-    assert "OCR" not in rendered
-    assert "восстановлен" not in rendered
-    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in rendered
-    payload = (tmp_path / "graph_surface_writer" / "section_000.json").read_text()
-    assert '"split"' in payload
-
-
-def test_graph_surface_writer_indivisible_failure_aborts_run(tmp_path):
+def test_projection_can_omit_pure_audit_node_without_surface_fallback(tmp_path):
     graph = GraphState(
-        evidence={"e1": EvidenceRecord(id="e1", start=0.0, end=1.0, text="definition")},
+        evidence={
+            "e1": EvidenceRecord(id="e1", start=0.0, end=1.0, text="audit"),
+            "e2": EvidenceRecord(id="e2", start=1.0, end=2.0, text="claim"),
+        },
         nodes={
-            "definition": GraphNode(
-                id="definition",
-                kind="definition",
-                title="Definition",
-                text="Canonical mathematical definition.",
+            "audit": GraphNode(
+                id="audit",
+                kind="remark",
+                title="Неоднозначность записи",
+                text="В окне OCR не позволяет надёжно прочитать строку.",
                 evidence_ids=["e1"],
-            )
+            ),
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                title="Непрерывность функционала",
+                text="Функционал непрерывен.",
+                evidence_ids=["e2"],
+            ),
         },
     )
-    fallback = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
-    bad = GeneratedGraphSectionNotes(
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    audit_units = _candidate_units(graph.nodes["audit"])
+    claim_units = _candidate_units(graph.nodes["claim"])
+    projection = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="audit",
+                disposition="omit",
+                selected_unit_indices=[],
+            ),
+            ReaderProjectionChoice(
+                node_id="claim",
+                disposition="render",
+                selected_unit_indices=[claim_units.index("Функционал непрерывен.")],
+            ),
+        ]
+    )
+    plan = ReaderDiscoursePlan(
         blocks=[
-            GeneratedGraphSectionBlock(
-                type=BlockType.DEFINITION,
-                latex="По данным OCR это определение.",
-                source_node_ids=["definition"],
+            PlannedReaderBlock(
+                block_id="claim",
+                type=BlockType.PARAGRAPH,
+                purpose="Сформулировать утверждение.",
+                node_ids=["claim"],
             )
         ]
     )
-    orchestrator = StubOrchestrator([bad, bad])
+    generated = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["claim"],
+                text="Функционал непрерывен.",
+            )
+        ]
+    )
+    orchestrator = StubOrchestrator(
+        [projection, plan, generated, ReaderGroundingReview(issues=[])]
+    )
+    metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
 
-    with pytest.raises(RuntimeError, match="indivisible canonical node"):
-        write_graph_surface(
-            orchestrator,
-            state=graph,
-            lecture_id="l1",
-            lecture_title="Lecture",
-            fallback_ir=fallback,
-            work=tmp_path,
-            llm_config={"model": "fake"},
-            force=False,
-        )
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=metadata_ir,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=False,
+    )
+
+    rendered = "\n".join(block.latex for block in ir.chunks[0].blocks)
+    assert "OCR" not in rendered
+    assert "окне" not in rendered
+    summary = (
+        tmp_path / "graph_surface_writer" / "section_000" / "summary.json"
+    ).read_text(encoding="utf-8")
+    assert '"audit"' in summary
+
+
+
+def test_grounding_issue_forces_block_repair(tmp_path):
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    semantic_index = _candidate_units(definition).index(
+        "Функционал называется комплексно-линейным."
+    )
+    projection = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[semantic_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    plan = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="definition",
+                type=BlockType.DEFINITION,
+                purpose="Дать определение.",
+                node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    bad = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Пространство совпадает с эл два.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    good = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Рассматривается комплексно-линейный функционал.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    orchestrator = StubOrchestrator(
+        [
+            projection,
+            plan,
+            bad,
+            ReaderGroundingReview(
+                issues=[
+                    ReaderGroundingIssue(
+                        segment_index=0,
+                        reason="Совпадение пространств не следует из cited fact.",
+                    )
+                ]
+            ),
+            good,
+            ReaderGroundingReview(issues=[]),
+        ]
+    )
+    metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
+
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=metadata_ir,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=True,
+    )
+
+    assert "совпадает" not in ir.chunks[0].blocks[0].latex
+    assert orchestrator.operations.count("graph_block_write_repair") == 1
+    assert orchestrator.operations.count("graph_block_grounding_review") == 2

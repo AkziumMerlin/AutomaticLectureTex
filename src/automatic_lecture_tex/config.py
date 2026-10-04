@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -36,8 +36,21 @@ class CourseConfig(BaseModel):
 
 
 class ASRConfig(BaseModel):
-    backend: Literal["qwen3", "qwen3_hf", "faster_whisper", "gigaam"] = "qwen3"
+    backend: Literal[
+        "qwen3",
+        "qwen3_hf",
+        "faster_whisper",
+        "gigaam",
+        "openai_compatible",
+    ] = "qwen3"
     model: str = "Qwen/Qwen3-ASR-1.7B"
+    base_url: str | None = None
+    api_key: str | None = None
+    api_key_env: str | None = None
+    timeout_seconds: float = Field(default=300.0, gt=0.0)
+    default_headers: dict[str, str] = Field(default_factory=dict)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+    transcription_response_format: Literal["json", "verbose_json"] = "verbose_json"
     aligner_model: str | None = "Qwen/Qwen3-ForcedAligner-0.6B"
     language: str | None = "ru"
     hotwords: list[str] = Field(default_factory=list)
@@ -64,6 +77,12 @@ class ASRConfig(BaseModel):
 class LLMConfig(BaseModel):
     base_url: str = "http://127.0.0.1:8000/v1"
     api_key: str = "EMPTY"
+    api_key_env: str | None = None
+    default_headers: dict[str, str] = Field(default_factory=dict)
+    compatibility_mode: Literal["vllm", "generic"] = "vllm"
+    reasoning_transport: Literal["none", "openrouter"] = "none"
+    structured_output_mode: Literal["native", "prompt"] = "native"
+    extra_body: dict[str, Any] = Field(default_factory=dict)
     model: str = "Qwen/Qwen3.8-27B-FP8"
     output_language: str = "ru"
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
@@ -217,7 +236,15 @@ class FormulaDetectionConfig(BaseModel):
 
 
 class MathOCRConfig(BaseModel):
-    backend: Literal["none", "mathpix", "unimernet", "unimumer", "qwen_vlm", "latexocr"] = "none"
+    backend: Literal[
+        "none",
+        "mathpix",
+        "unimernet",
+        "unimumer",
+        "qwen_vlm",
+        "openai_compatible",
+        "latexocr",
+    ] = "none"
     min_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
     board_scan_enabled: bool = False
     board_scan_max_images: int = Field(default=3, ge=1, le=8)
@@ -236,6 +263,15 @@ class MathOCRConfig(BaseModel):
     # Deprecated vLLM-era setting retained so older configs still parse; the Transformers worker
     # does not use it.
     unimumer_gpu_memory_utilization: float = Field(default=0.35, gt=0.05, le=0.95)
+    # Generic OpenAI-compatible multimodal OCR endpoint. The qwen_vlm fields below are retained
+    # as backwards-compatible aliases.
+    openai_model: str | None = None
+    openai_base_url: str | None = None
+    openai_api_key: str | None = None
+    openai_api_key_env: str | None = None
+    openai_timeout_seconds: float = Field(default=300.0, gt=0.0)
+    openai_default_headers: dict[str, str] = Field(default_factory=dict)
+    openai_max_tokens: int = Field(default=1024, ge=64, le=8192)
     qwen_vlm_model: str | None = None
     qwen_vlm_base_url: str | None = None
     qwen_vlm_api_key: str | None = None

@@ -366,3 +366,48 @@ repository.
 The board pipeline keeps ASR, raw board pixels, detected formula crops, and UniMERNet predictions as
 separate evidence channels. UniMERNet is preferred for glyph-level transcription, but the multimodal
 reconstruction model also receives the corresponding crop pixels and may mark conflicts unresolved.
+
+
+## OpenAI-compatible / OpenRouter backends
+
+The text/vision, formula-OCR, and ASR stages can share one OpenAI-compatible endpoint. For
+OpenRouter, keep the API key outside YAML:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+A complete API-backed model routing example is:
+
+```yaml
+llm:
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  compatibility_mode: generic
+  reasoning_transport: openrouter
+  structured_output_mode: native
+  model: deepseek/deepseek-v4.1-flash
+  max_tokens: 32768
+
+asr:
+  backend: openai_compatible
+  # base_url/key are inherited from llm when omitted.
+  model: openai/whisper-large-v3-turbo
+  language: ru
+  chunk_seconds: 60
+  transcription_response_format: verbose_json
+
+vision:
+  math_ocr:
+    backend: openai_compatible
+    # base_url/key are inherited from llm when omitted.
+    openai_model: deepseek/deepseek-v4.1-flash
+    openai_max_tokens: 512
+```
+
+`compatibility_mode: generic` suppresses vLLM/Qwen-only request fields such as
+`chat_template_kwargs`, `top_k`, `min_p`, and `repetition_penalty`.
+`reasoning_transport: openrouter` maps the existing per-stage `thinking=True/False` switches to
+OpenRouter's normalized `reasoning` request object. Set
+`structured_output_mode: prompt` for an OpenAI-compatible model/provider that does not implement
+native JSON-schema response formats.

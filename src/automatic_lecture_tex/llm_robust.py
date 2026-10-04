@@ -174,7 +174,10 @@ class LectureModelClient(BaseLectureModelClient):
                 "Return only the JSON object requested by the response schema."
             )
 
-        use_guided_json = guided_json
+        use_guided_json = (
+            guided_json
+            and getattr(self.config, "structured_output_mode", "native") == "native"
+        )
         content: list[dict] = [{"type": "text", "text": build_instruction(use_guided_json)}]
         for image in images or []:
             mime = mimetypes.guess_type(image.name)[0] or "image/jpeg"
