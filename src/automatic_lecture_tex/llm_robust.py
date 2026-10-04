@@ -175,7 +175,8 @@ class LectureModelClient(BaseLectureModelClient):
             )
 
         use_guided_json = (
-            guided_json and self.config.structured_output_mode == "native"
+            guided_json
+            and getattr(self.config, "structured_output_mode", "native") == "native"
         )
         content: list[dict] = [{"type": "text", "text": build_instruction(use_guided_json)}]
         for image in images or []:
