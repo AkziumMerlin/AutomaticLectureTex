@@ -7,6 +7,46 @@ _CONTROL_TRANSLATION = {
     for codepoint in [*range(0x00, 0x09), *range(0x0B, 0x20), 0x7F]
 }
 
+_GREEK_MATH_UNICODE = {
+    "α": r"\alpha ",
+    "β": r"\beta ",
+    "γ": r"\gamma ",
+    "δ": r"\delta ",
+    "ε": r"\varepsilon ",
+    "ϵ": r"\epsilon ",
+    "ζ": r"\zeta ",
+    "η": r"\eta ",
+    "θ": r"\theta ",
+    "ι": r"\iota ",
+    "κ": r"\kappa ",
+    "λ": r"\lambda ",
+    "μ": r"\mu ",
+    "ν": r"\nu ",
+    "ξ": r"\xi ",
+    # Standard LaTeX has no dedicated \\omicron command; mathematical omicron is typeset as o.
+    "ο": "o ",
+    "π": r"\pi ",
+    "ρ": r"\rho ",
+    "σ": r"\sigma ",
+    "τ": r"\tau ",
+    "υ": r"\upsilon ",
+    "φ": r"\varphi ",
+    "ϕ": r"\phi ",
+    "χ": r"\chi ",
+    "ψ": r"\psi ",
+    "ω": r"\omega ",
+    "Γ": r"\Gamma ",
+    "Δ": r"\Delta ",
+    "Θ": r"\Theta ",
+    "Λ": r"\Lambda ",
+    "Ξ": r"\Xi ",
+    "Π": r"\Pi ",
+    "Σ": r"\Sigma ",
+    "Φ": r"\Phi ",
+    "Ψ": r"\Psi ",
+    "Ω": r"\Omega ",
+}
+
 _MATH_UNICODE = {
     "∈": r"\in ",
     "∉": r"\notin ",
@@ -28,24 +68,7 @@ _MATH_UNICODE = {
     "∥": r"\|",
     "·": r"\cdot ",
     "×": r"\times ",
-    "α": r"\alpha ",
-    "β": r"\beta ",
-    "γ": r"\gamma ",
-    "δ": r"\delta ",
-    "ε": r"\varepsilon ",
-    "ϵ": r"\epsilon ",
-    "λ": r"\lambda ",
-    "μ": r"\mu ",
-    "ν": r"\nu ",
-    "π": r"\pi ",
-    "φ": r"\varphi ",
-    "ϕ": r"\phi ",
-    "τ": r"\tau ",
-    "Γ": r"\Gamma ",
-    "Δ": r"\Delta ",
-    "Φ": r"\Phi ",
-    "Ψ": r"\Psi ",
-    "Ω": r"\Omega ",
+    **_GREEK_MATH_UNICODE,
     "ℂ": r"\mathbb{C}",
     "ℝ": r"\mathbb{R}",
     "ℕ": r"\mathbb{N}",
@@ -59,9 +82,11 @@ _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _TEXT_COMMAND = re.compile(r"\\text\{[^{}]*\}")
 
 _COMMAND_NAMES = (
-    "alpha|beta|gamma|delta|epsilon|varepsilon|lambda|mu|nu|pi|phi|varphi|tau|"
-    "Gamma|Delta|Phi|Psi|Omega|in|notin|neq|leq|geq|leqslant|geqslant|ell|"
-    "subset|subseteq|cup|cap|bigcup|bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt"
+    "alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|iota|kappa|lambda|"
+    "mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|"
+    "Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|"
+    "in|notin|neq|leq|geq|leqslant|geqslant|ell|subset|subseteq|cup|cap|bigcup|"
+    "bigcap|to|mapsto|Rightarrow|Leftrightarrow|infty|sqrt"
 )
 _BAD_TAB_COMMAND = re.compile(rf"\\t({_COMMAND_NAMES})\b")
 _BARE_COMMAND_WORD = re.compile(rf"(?<![\\A-Za-z])({_COMMAND_NAMES})\b")
@@ -362,7 +387,7 @@ def normalize_math_spans(value: str) -> str:
     return "".join(result)
 
 
-_HEADING_GREEK_CHARS = "αβγδεϵζηθικλμνξοπρστυφϕχψωΓΔΘΛΞΠΣΦΨΩ"
+_HEADING_GREEK_CHARS = "".join(_GREEK_MATH_UNICODE)
 _HEADING_BARE_LATIN_ATOM = re.compile(
     r"(?<![A-Za-z0-9\\$_^])"
     r"([A-Za-z]"
