@@ -9,7 +9,11 @@ from automatic_lecture_tex.schemas import (
     LectureIR,
     NoteBlock,
 )
-from automatic_lecture_tex.tex_safety import canonicalize_math_fragment, layout_display_math
+from automatic_lecture_tex.tex_safety import (
+    canonicalize_math_fragment,
+    layout_display_math,
+    normalize_heading_math,
+)
 
 
 def test_render_lecture_uses_deterministic_environments():
@@ -283,3 +287,39 @@ def test_display_layout_keeps_escaped_spacing_and_left_right_group_intact():
     laid_out = layout_display_math(source, target_chars=24)
 
     assert laid_out == source
+
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    list("αβγδεϵζηθικλμνξοπρστυφϕχψωΓΔΘΛΞΠΣΦΨΩ"),
+)
+def test_heading_compound_unicode_greek_symbols_are_total(symbol: str) -> None:
+    normalized = normalize_heading_math(f"Сходимость {symbol}_n")
+
+    assert normalized.count("$") == 2
+    assert "_{n}" in normalized
+
+
+def test_render_heading_wraps_raw_tex_xi_and_sigma_commands() -> None:
+    ir = LectureIR(
+        lecture_id="l1",
+        title="Лекция",
+        chunks=[
+            ChunkNotes(
+                section_title=r"Сходимость \xi_n",
+                blocks=[
+                    NoteBlock(
+                        type=BlockType.REMARK,
+                        title=r"Связь \xi_n и \sigma_k",
+                        latex="Текст.",
+                    )
+                ],
+            )
+        ],
+    )
+
+    text = render_lecture(ir)
+
+    assert r"\section{Сходимость $\xi_n$}" in text
+    assert r"\begin{remark}[Связь $\xi_n$ и $\sigma_k$]" in text
