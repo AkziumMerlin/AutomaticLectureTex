@@ -10,11 +10,11 @@ course:
         url: https://vkvideo.ru/video-206078025_456241291?pl=-206078025_250
 
 asr:
-  # OpenRouter speech-to-text. Whisper Large V3 is used instead of Turbo because the
-  # transcription endpoint explicitly supports verbose segment/word timestamps for this model.
+  # Chinese ASR via OpenRouter. Qwen3 ASR 1.7B supports Russian plus multilingual
+  # segment/word timestamps and keeps the whole model stack on non-OpenAI providers.
   backend: openai_compatible
   # base_url / API key are inherited from llm below.
-  model: openai/whisper-large-v3
+  model: qwen/qwen3-asr-1.7b
   language: ru
   chunk_seconds: 60
   segment_target_seconds: 20

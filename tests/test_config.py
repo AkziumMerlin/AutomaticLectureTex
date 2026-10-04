@@ -72,7 +72,7 @@ def test_openrouter_deepseek_config_parses():
     assert cfg.llm.reasoning_transport == "openrouter"
     assert cfg.llm.model == "deepseek/deepseek-v4.1-flash"
     assert cfg.asr.backend == "openai_compatible"
-    assert cfg.asr.model == "openai/whisper-large-v3"
+    assert cfg.asr.model == "qwen/qwen3-asr-1.7b"
     assert cfg.asr.transcription_response_format == "verbose_json"
     assert cfg.asr.extra_body["timestamp_granularities"] == ["word"]
     assert cfg.vision.math_ocr.backend == "openai_compatible"
