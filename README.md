@@ -384,6 +384,7 @@ llm:
   base_url: https://openrouter.ai/api/v1
   api_key_env: OPENROUTER_API_KEY
   compatibility_mode: generic
+  reasoning_transport: openrouter
   structured_output_mode: native
   model: deepseek/deepseek-v4.1-flash
   max_tokens: 32768
@@ -405,6 +406,8 @@ vision:
 ```
 
 `compatibility_mode: generic` suppresses vLLM/Qwen-only request fields such as
-`chat_template_kwargs`, `top_k`, `min_p`, and `repetition_penalty`. Set
+`chat_template_kwargs`, `top_k`, `min_p`, and `repetition_penalty`.
+`reasoning_transport: openrouter` maps the existing per-stage `thinking=True/False` switches to
+OpenRouter's normalized `reasoning` request object. Set
 `structured_output_mode: prompt` for an OpenAI-compatible model/provider that does not implement
 native JSON-schema response formats.
