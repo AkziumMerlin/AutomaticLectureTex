@@ -47,7 +47,8 @@ _SURFACE_PLACEHOLDER = re.compile(r"\\text\{\s*(?:\.{3}|…)\s*\}")
 _BAD_SURFACE_TEX = re.compile(r"\\t(?:le|in|eq)(?![A-Za-z])|\\t\{")
 _INLINE_MATH = re.compile(r"\$([^$\n]*)\$")
 _BAD_INLINE_ASCII_MATH = re.compile(
-    r"(?:->|\|\||(?<!\\)\b(?:le|ge|neq|in|to)\b|\\textbf\{[A-Za-z]+\})"
+    r"(?:->|\|\||(?<!\\)\b(?:le|ge|neq|in|to|Re|Im|Arg)\b|"
+    r"\\textbf\{[A-Za-z]+\}|\\text\{(?:R|C|N|Z|Q)\})"
 )
 _RAW_MODEL_DISPLAY = re.compile(r"\\\[|\\\]|\\begin\{(?:aligned|alignedat|gathered|multlined|cases|array|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|split)\}")
 
@@ -292,9 +293,15 @@ def _verify_generated(
     if missing_nodes:
         errors.append("uncovered canonical nodes: " + ", ".join(missing_nodes))
 
-    combined = "\n".join(block.latex for block in generated.blocks)
-    combined_key = _formula_key(combined)
-    marker_ids = set(_FORMULA_MARKER.findall(combined))
+    body_combined = "\n".join(block.latex for block in generated.blocks)
+    combined = "\n".join(
+        part
+        for block in generated.blocks
+        for part in (block.title or "", block.latex)
+        if part
+    )
+    combined_key = _formula_key(body_combined)
+    marker_ids = set(_FORMULA_MARKER.findall(body_combined))
     unknown_markers = sorted(marker_ids - allowed_ids)
     if unknown_markers:
         errors.append("unknown formula markers: " + ", ".join(unknown_markers))
@@ -310,7 +317,7 @@ def _verify_generated(
         node.id
         for node in spec.nodes
         if (node.latex or "").strip()
-        and _formula_marker(node.id) not in combined
+        and _formula_marker(node.id) not in body_combined
         and _formula_key(node.latex or "") not in combined_key
     ]
     if missing_formulas:
@@ -324,8 +331,22 @@ def _verify_generated(
         errors.append("reader-facing output contains mathematical placeholder \\text{...}")
     if _BAD_SURFACE_TEX.search(combined):
         errors.append("reader-facing output contains malformed TeX command such as \\tin/\\teq/\\tle")
-    if "$$" in combined:
-        errors.append("reader-facing output contains raw $$ display delimiters")
+    bad_inline = [
+        math
+        for math in _INLINE_MATH.findall(combined)
+        if _BAD_INLINE_ASCII_MATH.search(math)
+    ]
+    if bad_inline:
+        errors.append(
+            "reader-facing output contains malformed/non-LaTeX inline math: "
+            + "; ".join(bad_inline[:3])
+        )
+    if _RAW_MODEL_DISPLAY.search(body_combined):
+        errors.append(
+            "reader-facing output contains model-authored display math; use canonical MATH markers"
+        )
+    if "$" in combined:
+        errors.append("reader-facing output contains raw $ display delimiters")
     residual_marker_text = _FORMULA_MARKER.sub("", combined)
     if "[MATH:" in residual_marker_text:
         errors.append("reader-facing output contains malformed formula marker")
