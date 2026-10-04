@@ -204,6 +204,11 @@ LATEX CONTRACT:
   standard commands such as \\in, \\neq, \\le, \\varphi and \\mathbb{{C}}; never emit
   malformed commands such as \\tin, \\teq, or \\tle.
 - Do not introduce new mathematical identities.
+- Do not author display mathematics yourself. Use [[MATH:<node_id>]] for every displayed canonical
+  formula; the host is the only component allowed to emit display formulas.
+- If a canonical node explicitly says that the role or interpretation of a visible formula is
+  unresolved, do not resolve that ambiguity yourself. State only the unambiguous mathematical
+  content, or introduce the canonical formula neutrally without assigning it a stronger role.
 
 COVERAGE CONTRACT:
 - Every canonical node id must appear in source_node_ids of at least one returned block.
@@ -420,6 +425,254 @@ def _load_cached(
         return None
 
 
+
+def _surface_writer_fingerprint(
+    *,
+    payload: dict[str, Any],
+    prompt: str,
+    llm_config: dict[str, Any],
+    orchestrator: Any,
+) -> str:
+    return stable_hash(
+        {
+            "writer_version": GRAPH_SURFACE_WRITER_VERSION,
+            "section": payload,
+            "prompt": prompt,
+            "llm": llm_config,
+            "writer": {
+                "thinking": orchestrator.config.state_section_writer_thinking,
+                "temperature": orchestrator.config.state_section_writer_temperature,
+                "top_p": orchestrator.config.state_section_writer_top_p,
+                "top_k": orchestrator.config.state_section_writer_top_k,
+                "min_p": orchestrator.config.state_section_writer_min_p,
+                "presence_penalty": orchestrator.config.state_section_writer_presence_penalty,
+                "repetition_penalty": orchestrator.config.state_section_writer_repetition_penalty,
+            },
+        }
+    )
+
+
+def _subspec(
+    state: GraphState,
+    parent: GraphSectionSpec,
+    nodes: list[GraphNode],
+    suffix: str,
+) -> GraphSectionSpec:
+    starts: list[float] = []
+    ends: list[float] = []
+    for node in nodes:
+        start, end = _node_times(state, node)
+        if start != float("inf"):
+            starts.append(start)
+            ends.append(end)
+    return GraphSectionSpec(
+        section_id=f"{parent.section_id}{suffix}",
+        title=parent.title,
+        start=min(starts) if starts else parent.start,
+        end=max(ends) if ends else parent.end,
+        nodes=nodes,
+    )
+
+
+def _surface_call_kwargs(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "split_oversized_task": True,
+        "temperature": float(orchestrator.config.state_section_writer_temperature),
+        "thinking": bool(orchestrator.config.state_section_writer_thinking),
+        "top_p": float(orchestrator.config.state_section_writer_top_p),
+        "top_k": int(orchestrator.config.state_section_writer_top_k),
+        "min_p": float(orchestrator.config.state_section_writer_min_p),
+        "presence_penalty": float(orchestrator.config.state_section_writer_presence_penalty),
+        "repetition_penalty": float(orchestrator.config.state_section_writer_repetition_penalty),
+    }
+
+
+def _split_surface_realization(
+    orchestrator: Any,
+    *,
+    state: GraphState,
+    spec: GraphSectionSpec,
+    path: Path,
+    fingerprint: str,
+    work_force: bool,
+    llm_config: dict[str, Any],
+    reason: str,
+    depth: int,
+) -> tuple[GeneratedGraphSectionNotes, bool]:
+    if len(spec.nodes) <= 1:
+        node_id = spec.nodes[0].id if spec.nodes else "<empty>"
+        raise RuntimeError(
+            "graph surface realization failed for indivisible canonical node "
+            f"{node_id} in section {spec.section_id}: {reason}"
+        )
+
+    midpoint = len(spec.nodes) // 2
+    left = _subspec(state, spec, spec.nodes[:midpoint], "::__a")
+    right = _subspec(state, spec, spec.nodes[midpoint:], "::__b")
+    logger.warning(
+        "[graph_surface_writer] section %s rejected at depth=%d (%s); "
+        "split %d nodes -> %d + %d",
+        spec.section_id,
+        depth,
+        reason,
+        len(spec.nodes),
+        len(left.nodes),
+        len(right.nodes),
+    )
+
+    left_path = path.with_name(path.stem + "__a" + path.suffix)
+    right_path = path.with_name(path.stem + "__b" + path.suffix)
+    left_generated, _ = _realize_surface_spec(
+        orchestrator,
+        state=state,
+        spec=left,
+        path=left_path,
+        llm_config=llm_config,
+        force=work_force,
+        depth=depth + 1,
+    )
+    right_generated, _ = _realize_surface_spec(
+        orchestrator,
+        state=state,
+        spec=right,
+        path=right_path,
+        llm_config=llm_config,
+        force=work_force,
+        depth=depth + 1,
+    )
+
+    generated = GeneratedGraphSectionNotes(
+        blocks=[*left_generated.blocks, *right_generated.blocks]
+    )
+    _normalize_generated_surface(generated)
+    _inject_formula_markers(spec=spec, generated=generated)
+    errors = _verify_generated(spec=spec, generated=generated)
+    if errors:
+        raise RuntimeError(
+            f"split realization of section {spec.section_id} failed combined verification: "
+            + "; ".join(errors)
+        )
+
+    atomic_json_dump(
+        path,
+        {
+            "fingerprint": fingerprint,
+            "generated": generated.model_dump(mode="json"),
+            "split": {
+                "reason": reason,
+                "children": [left.section_id, right.section_id],
+            },
+        },
+    )
+    return generated, False
+
+
+def _realize_surface_spec(
+    orchestrator: Any,
+    *,
+    state: GraphState,
+    spec: GraphSectionSpec,
+    path: Path,
+    llm_config: dict[str, Any],
+    force: bool,
+    depth: int = 0,
+) -> tuple[GeneratedGraphSectionNotes, bool]:
+    payload = _section_payload(state, spec)
+    prompt = _surface_writer_prompt(
+        payload=payload,
+        output_language=orchestrator.output_language,
+    )
+    fingerprint = _surface_writer_fingerprint(
+        payload=payload,
+        prompt=prompt,
+        llm_config=llm_config,
+        orchestrator=orchestrator,
+    )
+
+    generated = None if force else _load_cached(path, fingerprint)
+    cache_hit = generated is not None
+    if generated is not None:
+        _normalize_generated_surface(generated)
+        _inject_formula_markers(spec=spec, generated=generated)
+        cached_errors = _verify_generated(spec=spec, generated=generated)
+        if not cached_errors:
+            return generated, True
+        logger.warning(
+            "[graph_surface_writer] invalid cached section %s (%s); regenerating",
+            spec.section_id,
+            "; ".join(cached_errors),
+        )
+        generated = None
+        cache_hit = False
+
+    try:
+        generated = orchestrator._structured(
+            prompt,
+            GeneratedGraphSectionNotes,
+            operation="graph_surface_write",
+            **_surface_call_kwargs(orchestrator),
+        )
+    except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
+        return _split_surface_realization(
+            orchestrator,
+            state=state,
+            spec=spec,
+            path=path,
+            fingerprint=fingerprint,
+            work_force=force,
+            llm_config=llm_config,
+            reason=f"writer call failed: {type(exc).__name__}: {exc}",
+            depth=depth,
+        )
+
+    _normalize_generated_surface(generated)
+    _inject_formula_markers(spec=spec, generated=generated)
+    errors = _verify_generated(spec=spec, generated=generated)
+    if errors:
+        repair_prompt = (
+            prompt
+            + "\n\nThe previous structured realization failed host verification. "
+            + "Repair it without changing mathematics. Verification errors:\n- "
+            + "\n- ".join(errors)
+            + "\nPrevious JSON:\n"
+            + generated.model_dump_json()
+        )
+        try:
+            generated = orchestrator._structured(
+                repair_prompt,
+                GeneratedGraphSectionNotes,
+                operation="graph_surface_write_repair",
+                **_surface_call_kwargs(orchestrator),
+            )
+            _normalize_generated_surface(generated)
+            _inject_formula_markers(spec=spec, generated=generated)
+            errors = _verify_generated(spec=spec, generated=generated)
+        except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
+            errors = [f"repair call failed: {type(exc).__name__}: {exc}"]
+
+    if errors:
+        return _split_surface_realization(
+            orchestrator,
+            state=state,
+            spec=spec,
+            path=path,
+            fingerprint=fingerprint,
+            work_force=force,
+            llm_config=llm_config,
+            reason="; ".join(errors),
+            depth=depth,
+        )
+
+    atomic_json_dump(
+        path,
+        {
+            "fingerprint": fingerprint,
+            "generated": generated.model_dump(mode="json"),
+        },
+    )
+    return generated, cache_hit
+
+
 def write_graph_surface(
     orchestrator: Any,
     *,
@@ -431,144 +684,34 @@ def write_graph_surface(
     llm_config: dict[str, Any],
     force: bool,
 ) -> LectureIR:
-    """Realize canonical graph sections into mathematical prose without reopening evidence."""
+    """Realize canonical graph sections into mathematical prose without reopening evidence.
+
+    Deterministic graph rendering is metadata/debug support only. Reader-facing sections are
+    accepted exclusively after LLM realization and host verification. Large or repeatedly invalid
+    sections are recursively realized in smaller canonical-node batches; an indivisible failure
+    aborts the run instead of silently leaking a graph dump into the final notes.
+    """
 
     specs = graph_section_specs(state, lecture_title=lecture_title)
     if len(specs) != len(fallback_ir.chunks):
-        logger.warning(
-            "[graph_surface_writer] section mismatch (%d specs vs %d fallback); using deterministic surface",
-            len(specs),
-            len(fallback_ir.chunks),
+        raise RuntimeError(
+            "graph surface section mismatch: "
+            f"{len(specs)} canonical specs vs {len(fallback_ir.chunks)} deterministic metadata chunks"
         )
-        return fallback_ir
 
     root = work / "graph_surface_writer"
     root.mkdir(parents=True, exist_ok=True)
     chunks: list[ChunkNotes] = []
 
     for index, (spec, fallback) in enumerate(zip(specs, fallback_ir.chunks, strict=True)):
-        payload = _section_payload(state, spec)
-        prompt = _surface_writer_prompt(
-            payload=payload,
-            output_language=orchestrator.output_language,
-        )
-        fingerprint = stable_hash(
-            {
-                "writer_version": GRAPH_SURFACE_WRITER_VERSION,
-                "section": payload,
-                "prompt": prompt,
-                "llm": llm_config,
-                "writer": {
-                    "thinking": orchestrator.config.state_section_writer_thinking,
-                    "temperature": orchestrator.config.state_section_writer_temperature,
-                    "top_p": orchestrator.config.state_section_writer_top_p,
-                    "top_k": orchestrator.config.state_section_writer_top_k,
-                    "min_p": orchestrator.config.state_section_writer_min_p,
-                    "presence_penalty": (
-                        orchestrator.config.state_section_writer_presence_penalty
-                    ),
-                    "repetition_penalty": (
-                        orchestrator.config.state_section_writer_repetition_penalty
-                    ),
-                },
-            }
-        )
         path = root / f"section_{index:03d}.json"
-        generated = None if force else _load_cached(path, fingerprint)
-        cache_hit = generated is not None
-
-        if generated is not None:
-            _normalize_generated_surface(generated)
-            _inject_formula_markers(spec=spec, generated=generated)
-            cached_errors = _verify_generated(spec=spec, generated=generated)
-            if cached_errors:
-                logger.warning(
-                    "[graph_surface_writer] invalid cached section %s (%s); regenerating",
-                    spec.section_id,
-                    "; ".join(cached_errors),
-                )
-                generated = None
-                cache_hit = False
-
-        if generated is None:
-            try:
-                generated = orchestrator._structured(
-                    prompt,
-                    GeneratedGraphSectionNotes,
-                    operation="graph_surface_write",
-                    split_oversized_task=True,
-                    temperature=float(orchestrator.config.state_section_writer_temperature),
-                    thinking=bool(orchestrator.config.state_section_writer_thinking),
-                    top_p=float(orchestrator.config.state_section_writer_top_p),
-                    top_k=int(orchestrator.config.state_section_writer_top_k),
-                    min_p=float(orchestrator.config.state_section_writer_min_p),
-                    presence_penalty=float(
-                        orchestrator.config.state_section_writer_presence_penalty
-                    ),
-                    repetition_penalty=float(
-                        orchestrator.config.state_section_writer_repetition_penalty
-                    ),
-                )
-            except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
-                logger.warning(
-                    "[graph_surface_writer] section %s writer failed: %s; using deterministic fallback",
-                    spec.section_id,
-                    exc,
-                )
-                chunks.append(fallback)
-                continue
-
-        _normalize_generated_surface(generated)
-        _inject_formula_markers(spec=spec, generated=generated)
-        errors = _verify_generated(spec=spec, generated=generated)
-        if errors and not cache_hit:
-            repair_prompt = (
-                prompt
-                + "\\n\\nThe previous structured realization failed host verification. "
-                + "Repair it without changing mathematics. Verification errors:\\n- "
-                + "\\n- ".join(errors)
-                + "\\nPrevious JSON:\\n"
-                + generated.model_dump_json()
-            )
-            try:
-                generated = orchestrator._structured(
-                    repair_prompt,
-                    GeneratedGraphSectionNotes,
-                    operation="graph_surface_write_repair",
-                    split_oversized_task=True,
-                    temperature=float(orchestrator.config.state_section_writer_temperature),
-                    thinking=bool(orchestrator.config.state_section_writer_thinking),
-                    top_p=float(orchestrator.config.state_section_writer_top_p),
-                    top_k=int(orchestrator.config.state_section_writer_top_k),
-                    min_p=float(orchestrator.config.state_section_writer_min_p),
-                    presence_penalty=float(
-                        orchestrator.config.state_section_writer_presence_penalty
-                    ),
-                    repetition_penalty=float(
-                        orchestrator.config.state_section_writer_repetition_penalty
-                    ),
-                )
-                _normalize_generated_surface(generated)
-                _inject_formula_markers(spec=spec, generated=generated)
-                errors = _verify_generated(spec=spec, generated=generated)
-            except (ValidationError, StructuredTaskTooLargeError, ValueError) as exc:
-                errors = [f"repair call failed: {type(exc).__name__}: {exc}"]
-
-        if errors:
-            logger.warning(
-                "[graph_surface_writer] section %s rejected (%s); using deterministic fallback",
-                spec.section_id,
-                "; ".join(errors),
-            )
-            chunks.append(fallback)
-            continue
-
-        atomic_json_dump(
-            path,
-            {
-                "fingerprint": fingerprint,
-                "generated": generated.model_dump(mode="json"),
-            },
+        generated, cache_hit = _realize_surface_spec(
+            orchestrator,
+            state=state,
+            spec=spec,
+            path=path,
+            llm_config=llm_config,
+            force=force,
         )
         chunks.append(
             _generated_to_chunk(
@@ -593,3 +736,4 @@ def write_graph_surface(
         title=lecture_title,
         chunks=chunks,
     )
+
