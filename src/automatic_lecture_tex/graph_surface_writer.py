@@ -24,11 +24,13 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-GRAPH_SURFACE_WRITER_VERSION = 3
+GRAPH_SURFACE_WRITER_VERSION = 4
 
 _AUDIT_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск(?:а|е|и|у|ой)|кадр(?:е|ы|ов)?|окн(?:о|е|а)|"
-    r"лектор|видео|распознан|реконструкц|уверенност|provenance)\b",
+    r"лектор|видео|распознан|реконструкц|уверенност|provenance|рукопис\w*|"
+    r"нечитаем\w*|восстановлен\w*|пиксел\w*|панел\w*|гипотез\w*|"
+    r"чтени\w*)\b",
     re.IGNORECASE,
 )
 _FORMULA_MARKER = re.compile(r"\[\[MATH:([^\]\n]+)\]\]")
@@ -43,6 +45,11 @@ _UNICODE_MATH = re.compile(
 )
 _SURFACE_PLACEHOLDER = re.compile(r"\\text\{\s*(?:\.{3}|…)\s*\}")
 _BAD_SURFACE_TEX = re.compile(r"\\t(?:le|in|eq)(?![A-Za-z])|\\t\{")
+_INLINE_MATH = re.compile(r"\$([^$\n]*)\$")
+_BAD_INLINE_ASCII_MATH = re.compile(
+    r"(?:->|\|\||(?<!\\)\b(?:le|ge|neq|in|to)\b|\\textbf\{[A-Za-z]+\})"
+)
+_RAW_MODEL_DISPLAY = re.compile(r"\\\[|\\\]|\\begin\{(?:aligned|alignedat|gathered|multlined|cases|array|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|split)\}")
 
 
 class GeneratedGraphSectionBlock(GeneratedStateSectionBlock):
