@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from .config import MathOCRConfig
+from .openai_compat import make_openai_client
 from .schemas import MathOCRCandidate
 
 _MAX_OCR_TEXT_CHARS = 8000
@@ -275,8 +276,8 @@ class UniMuMERBackend(MathOCRBackend):
             pass
 
 
-class QwenVLMOCRBackend(MathOCRBackend):
-    """Reuse an OpenAI-compatible multimodal Qwen server as a literal formula transcriber."""
+class OpenAICompatibleVLMOCRBackend(MathOCRBackend):
+    """Literal formula transcription through an OpenAI-compatible vision chat endpoint."""
 
     _PROMPT = (
         "Transcribe this cropped handwritten mathematical expression from a chalkboard into LaTeX. "
@@ -285,22 +286,52 @@ class QwenVLMOCRBackend(MathOCRBackend):
     )
 
     def __init__(self, config: MathOCRConfig, llm_config) -> None:
-        if llm_config is None and (
-            not config.qwen_vlm_base_url or not config.qwen_vlm_model
-        ):
+        self.config = config
+        legacy = config.backend == "qwen_vlm"
+
+        explicit_base_url = (
+            config.qwen_vlm_base_url if legacy else config.openai_base_url
+        )
+        explicit_model = config.qwen_vlm_model if legacy else config.openai_model
+        explicit_key = config.qwen_vlm_api_key if legacy else config.openai_api_key
+
+        inherited_base_url = getattr(llm_config, "base_url", None)
+        inherited_model = getattr(llm_config, "model", None)
+        inherited_key = getattr(llm_config, "api_key", None)
+        inherited_key_env = getattr(llm_config, "api_key_env", None)
+        inherited_headers = dict(getattr(llm_config, "default_headers", {}) or {})
+
+        base_url = explicit_base_url or inherited_base_url
+        self.model = explicit_model or inherited_model
+        if not base_url or not self.model:
             raise RuntimeError(
-                "qwen_vlm OCR requires the application llm config or explicit "
-                "qwen_vlm_base_url/qwen_vlm_model values"
+                "OpenAI-compatible OCR requires an explicit model/base_url or application llm config"
             )
 
-        from openai import OpenAI
+        api_key_env = None if legacy else config.openai_api_key_env
+        if not api_key_env:
+            api_key_env = inherited_key_env
+        api_key = explicit_key if explicit_key is not None else inherited_key
+        timeout = (
+            getattr(llm_config, "timeout_seconds", config.openai_timeout_seconds)
+            if legacy
+            else config.openai_timeout_seconds
+        )
+        headers = inherited_headers
+        if not legacy:
+            headers.update(config.openai_default_headers)
 
-        self.config = config
-        base_url = config.qwen_vlm_base_url or llm_config.base_url
-        api_key = config.qwen_vlm_api_key or llm_config.api_key
-        self.model = config.qwen_vlm_model or llm_config.model
-        timeout = getattr(llm_config, "timeout_seconds", 300.0)
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self.max_tokens = (
+            config.qwen_vlm_max_tokens if legacy else config.openai_max_tokens
+        )
+        self.backend_name = "qwen_vlm" if legacy else "openai_compatible"
+        self.client = make_openai_client(
+            base_url=base_url,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            timeout_seconds=timeout,
+            default_headers=headers,
+        )
 
     def recognize(self, image_path: Path) -> MathOCRCandidate | None:
         from PIL import Image
@@ -314,7 +345,7 @@ class QwenVLMOCRBackend(MathOCRBackend):
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=0.0,
-            max_tokens=self.config.qwen_vlm_max_tokens,
+            max_tokens=self.max_tokens,
             messages=[
                 {
                     "role": "user",
@@ -336,7 +367,12 @@ class QwenVLMOCRBackend(MathOCRBackend):
         text = text[:_MAX_OCR_TEXT_CHARS]
         if not text:
             return None
-        return MathOCRCandidate(backend="qwen_vlm", text=text)
+        return MathOCRCandidate(backend=self.backend_name, text=text)
+
+
+class QwenVLMOCRBackend(OpenAICompatibleVLMOCRBackend):
+    """Backwards-compatible alias for the historical backend name."""
+
 
 
 class UniMERNetBackend(MathOCRBackend):
@@ -566,8 +602,8 @@ def make_math_ocr_backend(
         return UniMERNetBackend(config)
     if config.backend == "unimumer":
         return UniMuMERBackend(config)
-    if config.backend == "qwen_vlm":
-        return QwenVLMOCRBackend(config, llm_config)
+    if config.backend in {"qwen_vlm", "openai_compatible"}:
+        return OpenAICompatibleVLMOCRBackend(config, llm_config)
     if config.backend == "latexocr":
         return LatexOCRBackend(config)
     raise ValueError(f"unsupported math OCR backend: {config.backend}")
