@@ -40,7 +40,7 @@ class Pipeline:
     @property
     def asr(self):
         if self._asr is None:
-            self._asr = make_asr_backend(self.config.asr, self.config.runtime)
+            self._asr = make_asr_backend(self.config.asr, self.config.runtime, self.config.llm)
         return self._asr
 
     @property
