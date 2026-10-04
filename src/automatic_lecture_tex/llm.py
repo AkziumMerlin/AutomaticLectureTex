@@ -203,12 +203,23 @@ class LectureModelClient:
         repetition_penalty: float | None = None,
     ) -> dict:
         body: dict[str, Any] = dict(getattr(self.config, "extra_body", {}) or {})
+        enable_thinking = self.config.thinking if thinking is None else thinking
         if getattr(self.config, "compatibility_mode", "vllm") != "vllm":
-            # Generic OpenAI-compatible endpoints (including OpenRouter) should only receive
-            # standard Chat Completions fields plus explicitly configured passthrough data.
+            # Generic endpoints receive no vLLM/Qwen-only fields. OpenRouter can optionally map
+            # the pipeline's existing per-operation thinking switch to its normalized reasoning
+            # object, so graph revision may reason while projection/writing stays non-thinking.
+            if getattr(self.config, "reasoning_transport", "none") == "openrouter":
+                if enable_thinking:
+                    reasoning: dict[str, Any] = {"enabled": True, "exclude": True}
+                    effort = getattr(self.config, "reasoning_effort", None)
+                    if effort is not None:
+                        reasoning["effort"] = effort
+                    body["reasoning"] = reasoning
+                else:
+                    body["reasoning"] = {"enabled": False}
             return body
 
-        enable_thinking = self.config.thinking if thinking is None else thinking
+
         body["chat_template_kwargs"] = {
             "enable_thinking": enable_thinking,
             "preserve_thinking": False,
