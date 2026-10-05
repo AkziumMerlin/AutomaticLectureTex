@@ -355,3 +355,29 @@ def test_structured_video_input_uses_data_url_and_model_override(tmp_path) -> No
     content = captured["messages"][1]["content"]
     video_item = next(item for item in content if item["type"] == "video_url")
     assert video_item["video_url"]["url"] == "data:video/mp4;base64,dmlkZW8="
+
+
+
+def test_usage_accounting_records_openrouter_cost_per_operation() -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client._usage_lock = threading.Lock()
+    client.reset_usage()
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            cost=0.0125,
+            prompt_tokens_details=None,
+            completion_tokens_details=None,
+        )
+    )
+
+    client._record_usage("knowledge_extract_native_video", response)
+    usage = client.usage_snapshot()
+
+    assert usage["cost_usd"] == 0.0125
+    assert (
+        usage["by_operation"]["knowledge_extract_native_video"]["cost_usd"]
+        == 0.0125
+    )
