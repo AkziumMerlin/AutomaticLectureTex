@@ -363,6 +363,13 @@ class LectureModelClient(BaseLectureModelClient):
                     use_guided_json
                     and not backend_truncated
                     and finish_reason == "stop"
+                    and (
+                        isinstance(exc, ValidationError)
+                        or (
+                            isinstance(exc, json.JSONDecodeError)
+                            and inferred_truncated
+                        )
+                    )
                 )
                 previous_guided_failure = guided_failure
                 logger.warning(
