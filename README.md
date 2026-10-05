@@ -411,3 +411,37 @@ vision:
 OpenRouter's normalized `reasoning` request object. Set
 `structured_output_mode: prompt` for an OpenAI-compatible model/provider that does not implement
 native JSON-schema response formats.
+
+
+### Scoped proxies for SSH servers
+
+When the lecture pipeline runs on a remote SSH server, model/API traffic and media traffic can be
+routed independently through a reverse SOCKS tunnel on the server:
+
+```bash
+# Run on the laptop. The SOCKS listener appears on the remote server.
+ssh -R 127.0.0.1:1080 user@server
+```
+
+Configure model/API traffic separately:
+
+```yaml
+llm:
+  base_url: https://openrouter.ai/api/v1
+  proxy_url: socks5://127.0.0.1:1080
+```
+
+The proxy is inherited by OpenAI-compatible ASR and formula/VLM backends unless those backends set
+their own proxy override.
+
+Configure `yt-dlp` independently:
+
+```yaml
+runtime:
+  yt_dlp_proxy_url: socks5://127.0.0.1:1080
+```
+
+Every `yt-dlp` invocation then receives `--proxy`. While this media proxy is configured, the
+direct remote-stream `ffmpeg` fallback is skipped so that a signed `googlevideo.com` URL cannot
+silently bypass the tunnel. Local-file ffmpeg operations are unaffected. No global `ALL_PROXY`,
+`HTTP_PROXY`, or `HTTPS_PROXY` variables are required.
