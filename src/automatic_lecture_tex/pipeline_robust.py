@@ -153,7 +153,10 @@ class Pipeline(_base_pipeline.Pipeline):
     def run_lecture(self, lecture, *, force: bool = False):
         original_runner = _base_pipeline.run_knowledge_pipeline
         requested_architecture = self.config.notes.architecture
-        if not force:
+        if (
+            not force
+            and self.config.notes.window_evidence_backend != "native_video"
+        ):
             self._restore_raw_asr_cache(lecture)
 
         if requested_architecture == "linear":

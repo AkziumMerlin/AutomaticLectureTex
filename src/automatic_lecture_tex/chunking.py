@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .schemas import LectureChunk, Transcript
+from .schemas import LectureChunk, Transcript, TranscriptSegment
 from .util import format_timestamp
 
 
@@ -79,3 +79,35 @@ def chunk_transcript(
         start_idx = max(start_idx + 1, next_idx)
 
     return chunks
+
+
+
+def timing_transcript(
+    lecture_id: str,
+    *,
+    duration: float,
+    segment_seconds: float = 5.0,
+) -> Transcript:
+    """Create an empty timing-only transcript for native audio/video evidence extraction."""
+
+    if duration <= 0:
+        raise ValueError("duration must be positive")
+    if segment_seconds <= 0:
+        raise ValueError("segment_seconds must be positive")
+
+    segments: list[TranscriptSegment] = []
+    start = 0.0
+    index = 0
+    while start < duration:
+        end = min(duration, start + segment_seconds)
+        segments.append(
+            TranscriptSegment(
+                id=f"timing_{index:05d}",
+                start=start,
+                end=end,
+                text="",
+            )
+        )
+        start = end
+        index += 1
+    return Transcript(lecture_id=lecture_id, language=None, segments=segments)

@@ -445,3 +445,44 @@ Every `yt-dlp` invocation then receives `--proxy`. While this media proxy is con
 direct remote-stream `ffmpeg` fallback is skipped so that a signed `googlevideo.com` URL cannot
 silently bypass the tunnel. Local-file ffmpeg operations are unaffected. No global `ALL_PROXY`,
 `HTTP_PROXY`, or `HTTPS_PROXY` variables are required.
+
+
+### Native OpenRouter audio+video ablation
+
+A separate state-pipeline config compares the normal `ASR + selected board frames` evidence path
+against native audiovisual understanding:
+
+```text
+20 s overlapping MP4 clip
+        |
+        v
+qwen/qwen3.8-omni-flash on OpenRouter
+        |
+        v
+typed canonical observations
+        |
+        v
+the same episode / mutable-graph / reader-surface pipeline
+```
+
+Use:
+
+```bash
+automatic-lecture-tex run \
+  --config configs/functional_analysis_vk_lecture01_state_20s_openrouter_omni_video.yaml \
+  --lecture lecture_01
+```
+
+In this mode the pipeline does not run ASR for evidence extraction and does not run the board-frame
+or formula-OCR side channel. It creates timing-only overlapping windows from the source-video
+duration, caches the YouTube source locally through the scoped `yt-dlp` proxy, cuts compact MP4
+clips locally with ffmpeg, and sends each clip to OpenRouter as a base64 `video_url`.
+
+The extraction model returns clip-relative event offsets. Absolute lecture timestamps, canonical
+observation IDs, and `video:window_*` provenance are assigned by the host. Downstream semantic
+graph revision and reader-surface generation keep using the configured main LLM, so the ablation
+changes the evidence extractor rather than the rest of the note-generation stack.
+
+Actual OpenRouter-reported `usage.cost` is accumulated as `cost_usd` globally and per operation
+in `run_metrics.json`; compare `knowledge_extract_native_video` against the baseline extraction
+operations instead of estimating multimedia cost from token counts.

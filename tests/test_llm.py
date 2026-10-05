@@ -303,3 +303,81 @@ def test_openrouter_reasoning_transport_follows_per_call_thinking() -> None:
     }
     assert nonthinking_body["reasoning"] == {"enabled": False}
     assert "chat_template_kwargs" not in thinking_body
+
+
+
+def test_structured_video_input_uses_data_url_and_model_override(tmp_path) -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client.config = LLMConfig(
+        model="deepseek/deepseek-v4.1-flash",
+        compatibility_mode="generic",
+        structured_output_mode="native",
+        max_tokens=100,
+        max_retries=0,
+    )
+    client._usage_lock = threading.Lock()
+    client.reset_usage()
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"latex":"x"}'),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    total_tokens=12,
+                    prompt_tokens_details=None,
+                    completion_tokens_details=None,
+                ),
+            )
+
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+
+    result = client._structured(
+        "Read the video.",
+        LatexPayload,
+        videos=[video],
+        model="qwen/qwen3.8-omni-flash",
+        operation="native_video_test",
+    )
+
+    assert result.latex == "x"
+    assert captured["model"] == "qwen/qwen3.8-omni-flash"
+    content = captured["messages"][1]["content"]
+    video_item = next(item for item in content if item["type"] == "video_url")
+    assert video_item["video_url"]["url"] == "data:video/mp4;base64,dmlkZW8="
+
+
+
+def test_usage_accounting_records_openrouter_cost_per_operation() -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client._usage_lock = threading.Lock()
+    client.reset_usage()
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            cost=0.0125,
+            prompt_tokens_details=None,
+            completion_tokens_details=None,
+        )
+    )
+
+    client._record_usage("knowledge_extract_native_video", response)
+    usage = client.usage_snapshot()
+
+    assert usage["cost_usd"] == 0.0125
+    assert (
+        usage["by_operation"]["knowledge_extract_native_video"]["cost_usd"]
+        == 0.0125
+    )

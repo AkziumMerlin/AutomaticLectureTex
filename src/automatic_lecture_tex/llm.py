@@ -99,6 +99,7 @@ class LectureModelClient:
         "cached_prompt_tokens",
         "reasoning_tokens",
     )
+    _USAGE_FLOAT_KEYS = ("cost_usd",)
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
@@ -123,6 +124,7 @@ class LectureModelClient:
             "total_tokens": 0,
             "cached_prompt_tokens": 0,
             "reasoning_tokens": 0,
+            "cost_usd": 0.0,
             "by_operation": {},
         }
 
@@ -132,13 +134,20 @@ class LectureModelClient:
         for usage in usages:
             for key in cls._USAGE_KEYS:
                 combined[key] += int(usage.get(key, 0) or 0)
+            for key in cls._USAGE_FLOAT_KEYS:
+                combined[key] += float(usage.get(key, 0.0) or 0.0)
             for operation, values in usage.get("by_operation", {}).items():
                 target = combined["by_operation"].setdefault(
                     operation,
-                    {key: 0 for key in cls._USAGE_KEYS},
+                    {
+                        **{key: 0 for key in cls._USAGE_KEYS},
+                        **{key: 0.0 for key in cls._USAGE_FLOAT_KEYS},
+                    },
                 )
                 for key in cls._USAGE_KEYS:
                     target[key] += int(values.get(key, 0) or 0)
+                for key in cls._USAGE_FLOAT_KEYS:
+                    target[key] += float(values.get(key, 0.0) or 0.0)
         return combined
 
     @classmethod
@@ -146,6 +155,11 @@ class LectureModelClient:
         delta = cls._empty_usage()
         for key in cls._USAGE_KEYS:
             delta[key] = max(0, int(after.get(key, 0) or 0) - int(before.get(key, 0) or 0))
+        for key in cls._USAGE_FLOAT_KEYS:
+            delta[key] = max(
+                0.0,
+                float(after.get(key, 0.0) or 0.0) - float(before.get(key, 0.0) or 0.0),
+            )
         operations = set(after.get("by_operation", {})) | set(before.get("by_operation", {}))
         for operation in operations:
             after_values = after.get("by_operation", {}).get(operation, {})
@@ -157,6 +171,16 @@ class LectureModelClient:
                 )
                 for key in cls._USAGE_KEYS
             }
+            values.update(
+                {
+                    key: max(
+                        0.0,
+                        float(after_values.get(key, 0.0) or 0.0)
+                        - float(before_values.get(key, 0.0) or 0.0),
+                    )
+                    for key in cls._USAGE_FLOAT_KEYS
+                }
+            )
             if any(values.values()):
                 delta["by_operation"][operation] = values
         return delta
@@ -178,18 +202,23 @@ class LectureModelClient:
         completion_details = getattr(usage, "completion_tokens_details", None)
         cached_tokens = int(getattr(prompt_details, "cached_tokens", 0) or 0)
         reasoning_tokens = int(getattr(completion_details, "reasoning_tokens", 0) or 0)
-        values = {
+        cost_usd = float(getattr(usage, "cost", 0.0) or 0.0)
+        values: dict[str, int | float] = {
             "requests": 1,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "cached_prompt_tokens": cached_tokens,
             "reasoning_tokens": reasoning_tokens,
+            "cost_usd": cost_usd,
         }
         with self._usage_lock:
             per_operation = self._usage["by_operation"].setdefault(
                 operation,
-                {key: 0 for key in values},
+                {
+                    **{key: 0 for key in self._USAGE_KEYS},
+                    **{key: 0.0 for key in self._USAGE_FLOAT_KEYS},
+                },
             )
             for key, value in values.items():
                 self._usage[key] += value
@@ -348,6 +377,7 @@ class LectureModelClient:
         prompt: str,
         schema: type[T],
         images: list[Path] | None = None,
+        videos: list[Path] | None = None,
         max_tokens: int | None = None,
         *,
         guided_json: bool = True,
@@ -359,6 +389,7 @@ class LectureModelClient:
         min_p: float | None = None,
         presence_penalty: float | None = None,
         repetition_penalty: float | None = None,
+        model: str | None = None,
     ) -> T:
         guided_json = (
             guided_json
@@ -381,6 +412,20 @@ class LectureModelClient:
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                }
+            )
+        for video in videos or []:
+            raw = video.read_bytes()
+            if len(raw) > 7_500_000:
+                raise RuntimeError(
+                    f"base64 video input is too large: {video} has {len(raw)} bytes"
+                )
+            mime = mimetypes.guess_type(video.name)[0] or "video/mp4"
+            encoded = base64.b64encode(raw).decode("ascii")
+            content.append(
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:{mime};base64,{encoded}"},
                 }
             )
 
@@ -408,7 +453,7 @@ class LectureModelClient:
                 )
 
             request_kwargs = {
-                "model": self.config.model,
+                "model": model or self.config.model,
                 "messages": [
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
