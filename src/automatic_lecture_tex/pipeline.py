@@ -9,14 +9,14 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .asr import make_asr_backend
-from .chunking import chunk_transcript
+from .chunking import chunk_transcript, timing_transcript
 from .config import AppConfig, LectureConfig
 from . import graph_revision_pipeline, graph_revision_render, graph_surface_writer
 from .knowledge_pipeline import run_knowledge_pipeline
 from .latex import compile_tex, write_course_tex
 from .literature import load_literature, retrieve
 from .llm import LectureModelClient
-from .media import copy_asset, media_source_from_config
+from .media import copy_asset, media_source_from_config, probe_duration
 from .schemas import ChunkNotes, LectureIR, ReviewFinding, ReviewReport, Transcript, VisualEvidence
 from .util import atomic_json_dump, stable_hash
 from .vision import (
@@ -122,54 +122,103 @@ class Pipeline:
                 pass
         atomic_json_dump(source_path, source_identity)
 
-        audio_fingerprint = stable_hash(
-            {"source": source_identity, "audio_format": "pcm_s16le-16k-mono-v1"}
-        )
-        audio_valid = (
-            audio_path.is_file()
-            and audio_path.stat().st_size > 0
-            and not force
-            and (
-                manifest.get("audio_fingerprint") == audio_fingerprint
-                or previous_source_identity == source_identity
-            )
+        native_video_mode = (
+            self.config.notes.architecture in {"knowledge", "state"}
+            and self.config.notes.window_evidence_backend == "native_video"
         )
 
-        transcript_fingerprint = stable_hash(
-            {
-                "source": source_identity,
-                "asr": self.config.asr.model_dump(mode="json"),
-                "asr_cache_version": ASR_CACHE_VERSION,
-            }
-        )
-        transcript_valid = (
-            transcript_path.exists()
-            and manifest.get("transcript_fingerprint") == transcript_fingerprint
-            and not force
-        )
-        if transcript_valid:
-            logger.info("[%s] reusing transcript", lecture.id)
-            transcript = self._load_transcript(transcript_path)
-            asr_seconds = 0.0
-            media_seconds = 0.0
-        else:
-            if audio_valid:
-                logger.info("[%s] reusing normalized audio", lecture.id)
+        if native_video_mode:
+            transcript_fingerprint = stable_hash(
+                {
+                    "source": source_identity,
+                    "mode": "native_video_timing_v1",
+                    "segment_seconds": min(
+                        5.0,
+                        max(1.0, self.config.notes.chunk_target_seconds / 4.0),
+                    ),
+                }
+            )
+            transcript_valid = (
+                transcript_path.exists()
+                and manifest.get("transcript_fingerprint") == transcript_fingerprint
+                and not force
+            )
+            if transcript_valid:
+                logger.info("[%s] reusing native-video timing transcript", lecture.id)
+                transcript = self._load_transcript(transcript_path)
                 media_seconds = 0.0
             else:
-                logger.info("[%s] preparing normalized audio", lecture.id)
+                logger.info("[%s] preparing native video source", lecture.id)
                 media_started = time.perf_counter()
-                source.prepare_audio(audio_path)
+                native_source = source.prepare_video(
+                    work / "native_video_source",
+                    max_height=self.config.notes.native_video_height,
+                )
+                duration = probe_duration(native_source, self.config.runtime)
                 media_seconds = time.perf_counter() - media_started
-            manifest["audio_fingerprint"] = audio_fingerprint
-            logger.info("[%s] running %s ASR", lecture.id, self.config.asr.backend)
-            asr_started = time.perf_counter()
-            transcript = self.asr.transcribe(lecture.id, audio_path)
-            asr_seconds = time.perf_counter() - asr_started
-            atomic_json_dump(transcript_path, transcript.model_dump(mode="json"))
-            manifest["transcript_fingerprint"] = transcript_fingerprint
-            manifest.pop("ir_fingerprint", None)
-            atomic_json_dump(manifest_path, manifest)
+                segment_seconds = min(
+                    5.0,
+                    max(1.0, self.config.notes.chunk_target_seconds / 4.0),
+                )
+                transcript = timing_transcript(
+                    lecture.id,
+                    duration=duration,
+                    segment_seconds=segment_seconds,
+                )
+                atomic_json_dump(transcript_path, transcript.model_dump(mode="json"))
+                manifest["transcript_fingerprint"] = transcript_fingerprint
+                manifest.pop("ir_fingerprint", None)
+                atomic_json_dump(manifest_path, manifest)
+            asr_seconds = 0.0
+        else:
+            audio_fingerprint = stable_hash(
+                {"source": source_identity, "audio_format": "pcm_s16le-16k-mono-v1"}
+            )
+            audio_valid = (
+                audio_path.is_file()
+                and audio_path.stat().st_size > 0
+                and not force
+                and (
+                    manifest.get("audio_fingerprint") == audio_fingerprint
+                    or previous_source_identity == source_identity
+                )
+            )
+
+            transcript_fingerprint = stable_hash(
+                {
+                    "source": source_identity,
+                    "asr": self.config.asr.model_dump(mode="json"),
+                    "asr_cache_version": ASR_CACHE_VERSION,
+                }
+            )
+            transcript_valid = (
+                transcript_path.exists()
+                and manifest.get("transcript_fingerprint") == transcript_fingerprint
+                and not force
+            )
+            if transcript_valid:
+                logger.info("[%s] reusing transcript", lecture.id)
+                transcript = self._load_transcript(transcript_path)
+                asr_seconds = 0.0
+                media_seconds = 0.0
+            else:
+                if audio_valid:
+                    logger.info("[%s] reusing normalized audio", lecture.id)
+                    media_seconds = 0.0
+                else:
+                    logger.info("[%s] preparing normalized audio", lecture.id)
+                    media_started = time.perf_counter()
+                    source.prepare_audio(audio_path)
+                    media_seconds = time.perf_counter() - media_started
+                manifest["audio_fingerprint"] = audio_fingerprint
+                logger.info("[%s] running %s ASR", lecture.id, self.config.asr.backend)
+                asr_started = time.perf_counter()
+                transcript = self.asr.transcribe(lecture.id, audio_path)
+                asr_seconds = time.perf_counter() - asr_started
+                atomic_json_dump(transcript_path, transcript.model_dump(mode="json"))
+                manifest["transcript_fingerprint"] = transcript_fingerprint
+                manifest.pop("ir_fingerprint", None)
+                atomic_json_dump(manifest_path, manifest)
 
         notation = self._load_notation_registry()
         ir_fingerprint = self._ir_fingerprint(transcript, notation)
