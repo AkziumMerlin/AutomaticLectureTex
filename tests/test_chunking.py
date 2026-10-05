@@ -1,4 +1,4 @@
-from automatic_lecture_tex.chunking import chunk_transcript
+from automatic_lecture_tex.chunking import chunk_transcript, timing_transcript
 from automatic_lecture_tex.schemas import Transcript, TranscriptSegment
 
 
@@ -38,3 +38,19 @@ def test_overlap_must_be_smaller_than_window():
         pass
     else:
         raise AssertionError("expected ValueError")
+
+
+
+def test_timing_transcript_builds_empty_segments_for_native_video():
+    transcript = timing_transcript("lecture", duration=12.0, segment_seconds=5.0)
+
+    assert [(item.start, item.end, item.text) for item in transcript.segments] == [
+        (0.0, 5.0, ""),
+        (5.0, 10.0, ""),
+        (10.0, 12.0, ""),
+    ]
+    chunks = chunk_transcript(transcript, target_seconds=10.0, overlap_seconds=5.0)
+    assert [(item.start, item.end, item.text) for item in chunks] == [
+        (0.0, 10.0, ""),
+        (5.0, 12.0, ""),
+    ]
