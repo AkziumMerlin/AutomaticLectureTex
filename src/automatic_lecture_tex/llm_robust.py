@@ -150,6 +150,7 @@ class LectureModelClient(BaseLectureModelClient):
         prompt: str,
         schema: type[T],
         images: list[Path] | None = None,
+        videos: list[Path] | None = None,
         max_tokens: int | None = None,
         *,
         guided_json: bool = True,
@@ -162,6 +163,7 @@ class LectureModelClient(BaseLectureModelClient):
         min_p: float | None = None,
         presence_penalty: float | None = None,
         repetition_penalty: float | None = None,
+        model: str | None = None,
     ) -> T:
         schema_instruction = "\nJSON schema:\n" + json.dumps(
             schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -186,6 +188,20 @@ class LectureModelClient(BaseLectureModelClient):
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                }
+            )
+        for video in videos or []:
+            raw = video.read_bytes()
+            if len(raw) > 7_500_000:
+                raise RuntimeError(
+                    f"base64 video input is too large: {video} has {len(raw)} bytes"
+                )
+            mime = mimetypes.guess_type(video.name)[0] or "video/mp4"
+            encoded = base64.b64encode(raw).decode("ascii")
+            content.append(
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:{mime};base64,{encoded}"},
                 }
             )
 
@@ -215,7 +231,7 @@ class LectureModelClient(BaseLectureModelClient):
                 )
 
             request_kwargs = {
-                "model": self.config.model,
+                "model": model or self.config.model,
                 "messages": [
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": content},
