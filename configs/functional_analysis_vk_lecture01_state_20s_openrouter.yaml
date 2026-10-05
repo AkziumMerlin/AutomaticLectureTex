@@ -29,6 +29,8 @@ llm:
   # One OpenRouter text+vision model for semantic reconstruction, graph revision, board VLM,
   # reader projection, discourse planning, block writing and grounding review.
   base_url: https://openrouter.ai/api/v1
+  # Scoped model/API proxy only; does not affect yt-dlp or other subprocesses.
+  proxy_url: socks5://127.0.0.1:1080
   api_key_env: OPENROUTER_API_KEY
   compatibility_mode: generic
   reasoning_transport: openrouter
@@ -218,3 +220,6 @@ runtime:
   ffmpeg: ffmpeg
   ffprobe: ffprobe
   yt_dlp: yt-dlp
+  # Scoped media proxy. Every yt-dlp invocation receives --proxy; direct ffmpeg CDN fallback is
+  # skipped while this is set so googlevideo traffic cannot silently bypass the tunnel.
+  yt_dlp_proxy_url: socks5://127.0.0.1:1080
