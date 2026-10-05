@@ -232,7 +232,7 @@ def test_native_video_mode_skips_asr_and_builds_timing_transcript(tmp_path, monk
     assert source.prepare_video_calls == 1
     assert captured["asr_seconds"] == 0.0
     transcript = captured["transcript"]
-    assert [segment.text for segment in transcript.segments] == ["", "", ""]
+    assert [segment.text for segment in transcript.segments] == ["", "", "", "", ""]
     assert [(segment.start, segment.end) for segment in transcript.segments] == [
         (0.0, 2.5),
         (2.5, 5.0),
