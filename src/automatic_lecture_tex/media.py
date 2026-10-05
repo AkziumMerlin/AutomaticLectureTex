@@ -474,6 +474,66 @@ def copy_asset(source: Path, destination: Path) -> Path:
 
 
 
+def _api_video_clip_is_valid(
+    runtime: RuntimeConfig,
+    path: Path,
+    *,
+    expected_duration: float,
+) -> bool:
+    """Reject stale/partial cached clips before sending them to a remote video decoder."""
+
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    try:
+        proc = run_checked(
+            [
+                runtime.ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration:stream=codec_type,codec_name,width,height",
+                "-of",
+                "json",
+                str(path),
+            ]
+        )
+        payload = json.loads(proc.stdout)
+        duration = float((payload.get("format") or {}).get("duration") or 0.0)
+        streams = payload.get("streams") or []
+        video_streams = [
+            item
+            for item in streams
+            if item.get("codec_type") == "video"
+            and int(item.get("width") or 0) > 0
+            and int(item.get("height") or 0) > 0
+        ]
+        if not math.isfinite(duration) or duration <= 0.25 or not video_streams:
+            return False
+        if expected_duration > 1.0 and duration < 0.75 * expected_duration:
+            return False
+
+        run_checked(
+            [
+                runtime.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ]
+        )
+        return True
+    except Exception:
+        return False
+
+
 def extract_api_video_clip(
     runtime: RuntimeConfig,
     source_video: Path,
@@ -485,6 +545,8 @@ def extract_api_video_clip(
     video_bitrate_kbps: int,
     audio_bitrate_kbps: int,
     max_bytes: int,
+    force: bool = False,
+    conservative: bool = False,
 ) -> Path:
     """Create a compact MP4 with embedded audio for base64 video input."""
 
@@ -495,8 +557,17 @@ def extract_api_video_clip(
         raise ValueError("video clip duration must be positive")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.is_file() and 0 < output_path.stat().st_size <= max_bytes:
-        return output_path
+    if output_path.is_file() and not force:
+        size = output_path.stat().st_size
+        if 0 < size <= max_bytes and _api_video_clip_is_valid(
+            runtime,
+            output_path,
+            expected_duration=duration,
+        ):
+            return output_path
+        output_path.unlink(missing_ok=True)
+    elif force:
+        output_path.unlink(missing_ok=True)
 
     # Keep the binary payload safely below the configured cap before base64 expansion.
     available_kbps = int((max_bytes * 8 * 0.88) / duration / 1000) - audio_bitrate_kbps
@@ -506,55 +577,98 @@ def extract_api_video_clip(
         )
     effective_video_kbps = min(video_bitrate_kbps, available_kbps)
 
-    scale = f"scale=-2:min({max_height}\\,ih)"
-    run_checked(
+    if conservative:
+        # Normalize timestamps/framerate for provider decoders that reject an otherwise decodable
+        # clip around a source timestamp discontinuity.
+        video_filter = (
+            f"scale=-2:min({max_height}\\,ih),"
+            "fps=8,setpts=PTS-STARTPTS"
+        )
+        audio_filter = "aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS"
+        profile_args = [
+            "-profile:v",
+            "main",
+            "-level:v",
+            "3.1",
+            "-g",
+            "16",
+            "-keyint_min",
+            "16",
+            "-sc_threshold",
+            "0",
+        ]
+    else:
+        video_filter = f"scale=-2:min({max_height}\\,ih)"
+        audio_filter = None
+        profile_args = []
+
+    command = [
+        runtime.ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-ss",
+        f"{start:.3f}",
+        "-t",
+        f"{duration:.3f}",
+        "-i",
+        str(source_video),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        video_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        *profile_args,
+        "-b:v",
+        f"{effective_video_kbps}k",
+        "-maxrate",
+        f"{effective_video_kbps}k",
+        "-bufsize",
+        f"{2 * effective_video_kbps}k",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        f"{audio_bitrate_kbps}k",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+    ]
+    if audio_filter is not None:
+        command.extend(["-af", audio_filter])
+    command.extend(
         [
-            runtime.ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-ss",
-            f"{start:.3f}",
-            "-t",
-            f"{duration:.3f}",
-            "-i",
-            str(source_video),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-vf",
-            scale,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-b:v",
-            f"{effective_video_kbps}k",
-            "-maxrate",
-            f"{effective_video_kbps}k",
-            "-bufsize",
-            f"{2 * effective_video_kbps}k",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            f"{audio_bitrate_kbps}k",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
+            "-avoid_negative_ts",
+            "make_zero",
             "-movflags",
             "+faststart",
             str(output_path),
         ]
     )
+    run_checked(command)
+
     size = output_path.stat().st_size
     if size > max_bytes:
         output_path.unlink(missing_ok=True)
         raise RuntimeError(
             f"native video clip is {size} bytes, above configured limit {max_bytes}"
         )
+    if not _api_video_clip_is_valid(
+        runtime,
+        output_path,
+        expected_duration=duration,
+    ):
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg produced an invalid native-video API clip")
     return output_path
+

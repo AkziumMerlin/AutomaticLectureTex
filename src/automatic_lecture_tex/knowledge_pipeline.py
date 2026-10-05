@@ -2698,6 +2698,7 @@ def run_knowledge_pipeline(
     native_video_prepare_seconds = 0.0
     native_video_clip_seconds = 0.0
     native_video_windows_processed = 0
+    native_video_provider_retries = 0
 
     for chunk in chunks:
         state_before = compact_knowledge_state(kb, pipeline.config.notes)
@@ -2773,14 +2774,53 @@ def run_knowledge_pipeline(
             native_video_windows_processed += 1
 
             extract_started = time.perf_counter()
-            batch = orchestrator.extract_observations_from_video(
-                chunk,
-                native_video_clip,
-                kb,
-                model=pipeline.config.notes.native_video_model,
-                thinking=pipeline.config.notes.native_video_thinking,
-                temperature=pipeline.config.notes.native_video_temperature,
-            )
+            try:
+                batch = orchestrator.extract_observations_from_video(
+                    chunk,
+                    native_video_clip,
+                    kb,
+                    model=pipeline.config.notes.native_video_model,
+                    thinking=pipeline.config.notes.native_video_thinking,
+                    temperature=pipeline.config.notes.native_video_temperature,
+                )
+            except Exception as exc:
+                if "invalid video file" not in str(exc).lower():
+                    raise
+
+                logger.warning(
+                    "[%s] provider rejected %s as an invalid video; rebuilding a conservative "
+                    "H.264/AAC clip with normalized timestamps and retrying once",
+                    lecture.id,
+                    chunk.id,
+                )
+                native_video_provider_retries += 1
+                clip_started = time.perf_counter()
+                native_video_clip = extract_api_video_clip(
+                    pipeline.config.runtime,
+                    native_source_video,
+                    start=chunk.start,
+                    end=chunk.end,
+                    output_path=work / "native_video_windows" / f"{chunk.id}.mp4",
+                    max_height=pipeline.config.notes.native_video_height,
+                    video_bitrate_kbps=(
+                        pipeline.config.notes.native_video_video_bitrate_kbps
+                    ),
+                    audio_bitrate_kbps=(
+                        pipeline.config.notes.native_video_audio_bitrate_kbps
+                    ),
+                    max_bytes=pipeline.config.notes.native_video_max_bytes,
+                    force=True,
+                    conservative=True,
+                )
+                native_video_clip_seconds += time.perf_counter() - clip_started
+                batch = orchestrator.extract_observations_from_video(
+                    chunk,
+                    native_video_clip,
+                    kb,
+                    model=pipeline.config.notes.native_video_model,
+                    thinking=pipeline.config.notes.native_video_thinking,
+                    temperature=pipeline.config.notes.native_video_temperature,
+                )
             extract_seconds += time.perf_counter() - extract_started
         else:
             requests, evidence, visual_elapsed = _collect_visual_evidence(
@@ -2980,6 +3020,7 @@ def run_knowledge_pipeline(
                 "native_video_prepare_seconds": round(native_video_prepare_seconds, 3),
                 "native_video_clip_seconds": round(native_video_clip_seconds, 3),
                 "native_video_windows_processed": native_video_windows_processed,
+                "native_video_provider_retries": native_video_provider_retries,
                 "window_evidence_backend": pipeline.config.notes.window_evidence_backend,
                 "native_video_model": (
                     pipeline.config.notes.native_video_model if native_video_mode else None
