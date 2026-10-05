@@ -79,3 +79,28 @@ def test_openrouter_deepseek_config_parses():
     assert cfg.vision.math_ocr.backend == "openai_compatible"
     assert cfg.vision.math_ocr.openai_model == "deepseek/deepseek-v4.1-flash"
     assert cfg.runtime.yt_dlp_proxy_url == "socks5://127.0.0.1:1080"
+
+
+
+def test_openrouter_omni_video_ablation_config_parses():
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "functional_analysis_vk_lecture01_state_20s_openrouter_omni_video.yaml"
+    )
+
+    cfg = load_config(config_path)
+
+    assert cfg.notes.window_evidence_backend == "native_video"
+    assert cfg.notes.native_video_model == "qwen/qwen3.8-omni-flash"
+    assert cfg.notes.native_video_height == 720
+    assert cfg.notes.native_video_max_bytes == 7_000_000
+    assert cfg.notes.visual_chunk_board_scan is False
+    assert cfg.vision.formula_detection.enabled is False
+    assert cfg.vision.math_ocr.backend == "none"
+    assert cfg.course.lectures[0].source.url == (
+        "https://www.youtube.com/watch?v=H3KIzsh8a0Q"
+    )
+    assert cfg.llm.model == "deepseek/deepseek-v4.1-flash"
+    assert cfg.llm.proxy_url == "socks5://127.0.0.1:1080"
+    assert cfg.runtime.yt_dlp_proxy_url == "socks5://127.0.0.1:1080"
