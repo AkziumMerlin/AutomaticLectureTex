@@ -344,6 +344,7 @@ class KnowledgeOrchestrator:
         operation: str,
         max_tokens: int | None = None,
         images: list[Path] | None = None,
+        videos: list[Path] | None = None,
         guided_json: bool = True,
         split_oversized_task: bool = False,
         temperature: float | None = None,
@@ -353,6 +354,7 @@ class KnowledgeOrchestrator:
         min_p: float | None = None,
         presence_penalty: float | None = None,
         repetition_penalty: float | None = None,
+        model: str | None = None,
     ):
         kwargs = {
             "operation": operation,
@@ -376,6 +378,10 @@ class KnowledgeOrchestrator:
         # multimodal kwargs. Only the actual multimodal path needs these extra arguments.
         if images is not None:
             kwargs["images"] = images
+        if videos is not None:
+            kwargs["videos"] = videos
+        if model is not None:
+            kwargs["model"] = model
         if not guided_json:
             kwargs["guided_json"] = False
         if split_oversized_task:
@@ -399,6 +405,8 @@ class KnowledgeOrchestrator:
                 "min_p",
                 "presence_penalty",
                 "repetition_penalty",
+                "videos",
+                "model",
             )
             removed = False
             for key in optional_keys:
@@ -501,6 +509,100 @@ Write descriptive strings in language code `{self.output_language}`.
             item.end = min(max(item.end, item.start), chunk.end)
             if not item.evidence_refs:
                 item.evidence_refs = [chunk.id]
+        return result
+
+    def extract_observations_from_video(
+        self,
+        chunk: LectureChunk,
+        video_path: Path,
+        kb: LectureKnowledgeBase,
+        *,
+        model: str,
+        thinking: bool,
+        temperature: float,
+    ) -> WindowObservations:
+        """Extract the same canonical window events directly from native audio+video."""
+
+        symbols = [
+            item.model_dump(mode="json")
+            for item in kb.symbols
+            if item.active
+        ]
+        recent_observations = [
+            item.model_dump(mode="json")
+            for item in kb.observations[-20:]
+        ]
+        open_episodes = [
+            item.model_dump(mode="json")
+            for item in kb.episodes
+            if item.status == EpisodeStatus.OPEN
+        ]
+        prompt = f"""Extract evidence events from ONE native audio+video interval of a university
+mathematics lecture. The attached video contains both the lecturer's speech and the board/slide
+pixels. Do not rely on an external transcript and do not write final lecture notes.
+
+Window id: {chunk.id}
+Absolute lecture bounds: [{chunk.start:.3f}, {chunk.end:.3f}]
+The first video frame/audio sample corresponds to absolute lecture time {chunk.start:.3f}s.
+If an event occurs t seconds after the beginning of the attached clip, report its timestamp as
+{chunk.start:.3f} + t, clamped to the absolute bounds above.
+
+Known symbol registry:
+{json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
+
+Recent canonical observations from previous overlapping windows:
+{json.dumps(recent_observations, ensure_ascii=False, separators=(",", ":"))}
+
+Currently open semantic episodes:
+{json.dumps(open_episodes, ensure_ascii=False, separators=(",", ":"))}
+
+Use the AUDIO and VIDEO jointly:
+- speech is evidence for semantic statements and lecturer corrections;
+- visible writing is direct evidence for exact symbols, signs, indices, equations and diagrams;
+- when speech and writing disagree, preserve the disagreement as unresolved unless the lecturer
+  explicitly corrects one of them;
+- do not silently replace the lecturer's mathematics with textbook mathematics.
+
+Return observations in temporal order. Use only these meanings:
+- definition/claim/equation/proof_step/example/notation/remark;
+- correction when the lecturer explicitly corrects an earlier statement/board entry;
+- retraction when the lecturer explicitly withdraws a statement;
+- transition only for a real semantic transition, never because the technical clip ended;
+- unresolved when the audiovisual evidence is insufficient or contradictory.
+
+For correction/retraction, use target_observation_id when the target is one of the recent canonical
+observations above or an earlier observation in this same window. Preserve lecturer mistakes and
+later corrections as separate evidence events.
+
+Put exact mathematical expressions in the latex field and explanatory language in text.
+source_status=observed means directly supported by the attached audiovisual clip.
+Use reconstructed only when the local audiovisual evidence strongly forces one reading and
+inferred only very sparingly. Never infer new mathematics from general knowledge.
+Every observation must lie within the absolute window bounds. Use evidence_refs containing
+video:{chunk.id} for direct audiovisual evidence.
+Write descriptive strings in language code {self.output_language}.
+"""
+        result = self._structured(
+            prompt,
+            WindowObservations,
+            videos=[video_path],
+            operation="knowledge_extract_native_video",
+            model=model,
+            thinking=thinking,
+            temperature=temperature,
+        )
+        result.window_id = chunk.id
+        result.start = chunk.start
+        result.end = chunk.end
+        for index, item in enumerate(result.observations):
+            item.window_id = chunk.id
+            item.window_ids = _merge_unique(item.window_ids, [chunk.id])
+            if not item.id:
+                item.id = f"obs_{chunk.id}_{index:03d}"
+            item.start = min(max(item.start, chunk.start), chunk.end)
+            item.end = min(max(item.end, item.start), chunk.end)
+            if not item.evidence_refs:
+                item.evidence_refs = [f"video:{chunk.id}"]
         return result
 
     def track_episodes(
