@@ -465,8 +465,10 @@ class OpenAICompatibleASRBackend(ASRBackend):
 
         inherited_key = llm_config.api_key if llm_config is not None else None
         inherited_key_env = llm_config.api_key_env if llm_config is not None else None
+        inherited_proxy = llm_config.proxy_url if llm_config is not None else None
         api_key = config.api_key if config.api_key is not None else inherited_key
         api_key_env = config.api_key_env or inherited_key_env
+        proxy_url = config.proxy_url or inherited_proxy
         headers = dict(getattr(llm_config, "default_headers", {}) or {})
         headers.update(config.default_headers)
         self.client = make_openai_client(
@@ -475,6 +477,7 @@ class OpenAICompatibleASRBackend(ASRBackend):
             api_key_env=api_key_env,
             timeout_seconds=config.timeout_seconds,
             default_headers=headers,
+            proxy_url=proxy_url,
         )
 
     def _transcribe_chunk(

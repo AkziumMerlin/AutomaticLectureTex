@@ -55,3 +55,58 @@ def test_local_frame_extraction_reuses_existing_frame(tmp_path, monkeypatch):
     frames = source.extract_frames([12.5], output)
 
     assert frames[0].path == expected
+
+
+
+def test_ytdlp_proxy_is_added_only_to_ytdlp_commands() -> None:
+    source = YouTubeMediaSource(
+        "https://www.youtube.com/watch?v=abc123",
+        RuntimeConfig(yt_dlp_proxy_url="socks5://127.0.0.1:1080"),
+        VisionConfig(),
+    )
+
+    assert source._yt_dlp_command() == [
+        "yt-dlp",
+        "--proxy",
+        "socks5://127.0.0.1:1080",
+    ]
+
+
+def test_ytdlp_proxy_skips_direct_ffmpeg_stream_fallback(tmp_path, monkeypatch) -> None:
+    calls: list[bool] = []
+
+    def fake_download(
+        self,
+        *,
+        start,
+        end,
+        directory,
+        force_keyframes,
+    ):
+        del self, start, end
+        calls.append(force_keyframes)
+        if force_keyframes:
+            raise RuntimeError("forced-keyframe extraction failed")
+        segment = directory / "segment.mp4"
+        segment.write_bytes(b"segment")
+        return segment
+
+    def fail_direct_stream(*args, **kwargs):
+        raise AssertionError("direct ffmpeg stream fallback must not bypass scoped yt-dlp proxy")
+
+    def fake_extract_section(self, **kwargs):
+        del self, kwargs
+        return []
+
+    monkeypatch.setattr(YouTubeMediaSource, "_download_section", fake_download)
+    monkeypatch.setattr(YouTubeMediaSource, "_extract_frames_from_stream", fail_direct_stream)
+    monkeypatch.setattr(YouTubeMediaSource, "_extract_frames_from_section", fake_extract_section)
+
+    source = YouTubeMediaSource(
+        "https://www.youtube.com/watch?v=abc123",
+        RuntimeConfig(yt_dlp_proxy_url="socks5://127.0.0.1:1080"),
+        VisionConfig(),
+    )
+
+    assert source.extract_frames([12.0], tmp_path / "frames") == []
+    assert calls == [True, False]

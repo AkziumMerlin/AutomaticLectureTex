@@ -111,6 +111,7 @@ class LectureModelClient:
             api_key_env=config.api_key_env,
             timeout_seconds=config.timeout_seconds,
             default_headers=config.default_headers,
+            proxy_url=config.proxy_url,
         )
 
     @staticmethod

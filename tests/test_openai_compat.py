@@ -49,3 +49,38 @@ def test_make_openai_client_forwards_base_url_headers_and_timeout(monkeypatch) -
     assert captured["api_key"] == "sk-or-test"
     assert captured["timeout"] == 42.0
     assert captured["default_headers"]["HTTP-Referer"] == "https://example.test"
+
+
+
+def test_make_openai_client_uses_scoped_proxy(monkeypatch) -> None:
+    captured = {}
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            captured["httpx"] = kwargs
+
+    httpx_module = ModuleType("httpx")
+    httpx_module.Client = FakeHTTPClient
+    monkeypatch.setitem(sys.modules, "httpx", httpx_module)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["openai"] = kwargs
+
+    openai_module = ModuleType("openai")
+    openai_module.OpenAI = FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", openai_module)
+
+    client = make_openai_client(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="secret",
+        timeout_seconds=90.0,
+        proxy_url="socks5://127.0.0.1:1080",
+    )
+
+    assert isinstance(client, FakeOpenAI)
+    assert captured["httpx"] == {
+        "proxy": "socks5://127.0.0.1:1080",
+        "timeout": 90.0,
+    }
+    assert isinstance(captured["openai"]["http_client"], FakeHTTPClient)

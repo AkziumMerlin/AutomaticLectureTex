@@ -45,6 +45,7 @@ class ASRConfig(BaseModel):
     ] = "qwen3"
     model: str = "Qwen/Qwen3-ASR-1.7B"
     base_url: str | None = None
+    proxy_url: str | None = None
     api_key: str | None = None
     api_key_env: str | None = None
     timeout_seconds: float = Field(default=300.0, gt=0.0)
@@ -76,6 +77,7 @@ class ASRConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     base_url: str = "http://127.0.0.1:8000/v1"
+    proxy_url: str | None = None
     api_key: str = "EMPTY"
     api_key_env: str | None = None
     default_headers: dict[str, str] = Field(default_factory=dict)
@@ -267,6 +269,7 @@ class MathOCRConfig(BaseModel):
     # as backwards-compatible aliases.
     openai_model: str | None = None
     openai_base_url: str | None = None
+    openai_proxy_url: str | None = None
     openai_api_key: str | None = None
     openai_api_key_env: str | None = None
     openai_timeout_seconds: float = Field(default=300.0, gt=0.0)
@@ -350,6 +353,7 @@ class RuntimeConfig(BaseModel):
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     yt_dlp: str = "yt-dlp"
+    yt_dlp_proxy_url: str | None = None
 
 
 class AppConfig(BaseModel):

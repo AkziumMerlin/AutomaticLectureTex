@@ -16,6 +16,7 @@ dependencies = [
   "Pillow>=10.0",
   "pydantic>=2.9",
   "PyYAML>=6.0.2",
+  "socksio>=1.0.0",
 ]
 
 [project.optional-dependencies]

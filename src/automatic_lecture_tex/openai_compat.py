@@ -30,6 +30,7 @@ def make_openai_client(
     api_key_env: str | None = None,
     timeout_seconds: float = 300.0,
     default_headers: dict[str, str] | None = None,
+    proxy_url: str | None = None,
 ) -> Any:
     try:
         from openai import OpenAI
@@ -38,9 +39,29 @@ def make_openai_client(
             "OpenAI-compatible backend requires the openai Python package"
         ) from exc
 
-    return OpenAI(
-        base_url=base_url,
-        api_key=resolve_api_key(api_key=api_key, api_key_env=api_key_env),
-        timeout=timeout_seconds,
-        default_headers=default_headers or None,
-    )
+    kwargs: dict[str, Any] = {
+        "base_url": base_url,
+        "api_key": resolve_api_key(api_key=api_key, api_key_env=api_key_env),
+        "timeout": timeout_seconds,
+        "default_headers": default_headers or None,
+    }
+
+    if proxy_url:
+        try:
+            import httpx
+        except ImportError as exc:
+            raise RuntimeError(
+                "Proxying an OpenAI-compatible backend requires httpx"
+            ) from exc
+        try:
+            kwargs["http_client"] = httpx.Client(
+                proxy=proxy_url,
+                timeout=timeout_seconds,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "SOCKS proxy support requires socksio; reinstall the project dependencies "
+                "or install socksio before using a socks5 proxy"
+            ) from exc
+
+    return OpenAI(**kwargs)

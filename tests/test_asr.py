@@ -57,6 +57,7 @@ def test_openai_compatible_asr_inherits_endpoint_and_reads_word_timestamps(
         RuntimeConfig(),
         LLMConfig(
             base_url="https://openrouter.ai/api/v1",
+            proxy_url="socks5://127.0.0.1:1080",
             api_key="secret",
             compatibility_mode="generic",
         ),
@@ -67,6 +68,7 @@ def test_openai_compatible_asr_inherits_endpoint_and_reads_word_timestamps(
     segments = backend._transcribe_chunk(audio, shift=120.0, duration=30.0)
 
     assert captured["client"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert captured["client"]["proxy_url"] == "socks5://127.0.0.1:1080"
     assert captured["request"]["model"] == "openai/whisper-large-v3-turbo"
     assert captured["request"]["response_format"] == "verbose_json"
     assert "Хан-Банах" in captured["request"]["prompt"]

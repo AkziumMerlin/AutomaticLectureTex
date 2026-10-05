@@ -67,6 +67,7 @@ def test_openrouter_deepseek_config_parses():
     cfg = load_config(config_path)
 
     assert cfg.llm.base_url == "https://openrouter.ai/api/v1"
+    assert cfg.llm.proxy_url == "socks5://127.0.0.1:1080"
     assert cfg.llm.api_key_env == "OPENROUTER_API_KEY"
     assert cfg.llm.compatibility_mode == "generic"
     assert cfg.llm.reasoning_transport == "openrouter"
@@ -77,3 +78,4 @@ def test_openrouter_deepseek_config_parses():
     assert cfg.asr.extra_body["timestamp_granularities"] == ["word"]
     assert cfg.vision.math_ocr.backend == "openai_compatible"
     assert cfg.vision.math_ocr.openai_model == "deepseek/deepseek-v4.1-flash"
+    assert cfg.runtime.yt_dlp_proxy_url == "socks5://127.0.0.1:1080"

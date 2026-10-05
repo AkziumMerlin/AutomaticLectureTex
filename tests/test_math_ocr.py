@@ -315,6 +315,7 @@ def test_generic_openai_compatible_formula_ocr_uses_shared_endpoint(
         ),
         LLMConfig(
             base_url="https://openrouter.ai/api/v1",
+            proxy_url="socks5://127.0.0.1:1080",
             api_key="EMPTY",
             compatibility_mode="generic",
         ),
@@ -325,6 +326,7 @@ def test_generic_openai_compatible_formula_ocr_uses_shared_endpoint(
     assert candidate.backend == "openai_compatible"
     assert candidate.text == r"\frac{x}{y}"
     assert captured["client"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert captured["client"]["proxy_url"] == "socks5://127.0.0.1:1080"
     assert captured["client"]["api_key_env"] == "OPENROUTER_API_KEY"
     assert captured["request"]["model"] == "qwen/qwen3-vl-plus"
     content = captured["request"]["messages"][0]["content"]
