@@ -500,11 +500,11 @@ def extract_api_video_clip(
 
     # Keep the binary payload safely below the configured cap before base64 expansion.
     available_kbps = int((max_bytes * 8 * 0.88) / duration / 1000) - audio_bitrate_kbps
-    effective_video_kbps = max(200, min(video_bitrate_kbps, available_kbps))
-    if effective_video_kbps < 200:
+    if available_kbps < 200:
         raise RuntimeError(
             f"native video byte budget {max_bytes} is too small for {duration:.1f}s clip"
         )
+    effective_video_kbps = min(video_bitrate_kbps, available_kbps)
 
     scale = f"scale=-2:min({max_height}\\,ih)"
     run_checked(
