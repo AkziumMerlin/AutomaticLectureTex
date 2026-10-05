@@ -71,6 +71,7 @@ def test_native_video_extractor_uses_video_without_transcript(tmp_path):
     assert llm.kwargs["videos"] == [video]
     assert llm.kwargs["model"] == "qwen/qwen3.8-omni-flash"
     assert llm.kwargs["operation"] == "knowledge_extract_native_video"
+    assert llm.kwargs["guided_json"] is False
     assert llm.kwargs["thinking"] is False
     assert llm.kwargs["temperature"] == 0.1
     assert result.observations[0].start == 21.5

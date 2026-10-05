@@ -361,9 +361,15 @@ class LectureModelClient(BaseLectureModelClient):
                 previous_truncated = truncated
                 guided_failure = (
                     use_guided_json
-                    and inferred_truncated
                     and not backend_truncated
                     and finish_reason == "stop"
+                    and (
+                        isinstance(exc, ValidationError)
+                        or (
+                            isinstance(exc, json.JSONDecodeError)
+                            and inferred_truncated
+                        )
+                    )
                 )
                 previous_guided_failure = guided_failure
                 logger.warning(
@@ -380,7 +386,7 @@ class LectureModelClient(BaseLectureModelClient):
                 )
                 if guided_failure:
                     logger.warning(
-                        "[%s] guided JSON returned structurally incomplete output; "
+                        "[%s] guided JSON violated the requested schema; "
                         "falling back to prompt-schema JSON",
                         operation,
                     )

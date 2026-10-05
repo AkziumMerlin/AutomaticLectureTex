@@ -625,6 +625,7 @@ Write descriptive strings in language code {self.output_language}.
             GeneratedNativeVideoWindow,
             videos=[video_path],
             operation="knowledge_extract_native_video",
+            guided_json=False,
             model=model,
             thinking=thinking,
             temperature=temperature,
