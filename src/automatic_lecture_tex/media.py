@@ -112,6 +112,12 @@ class YouTubeMediaSource(MediaSource):
         self._resolved_url: str | None = None
         self._stream_info: tuple[str, dict[str, str]] | None = None
 
+    def _yt_dlp_command(self) -> list[str]:
+        command = [self.runtime.yt_dlp]
+        if self.runtime.yt_dlp_proxy_url:
+            command.extend(["--proxy", self.runtime.yt_dlp_proxy_url])
+        return command
+
     def _is_playlist_url(self) -> bool:
         parsed = urlparse(self.url)
         query = parse_qs(parsed.query)
@@ -126,7 +132,7 @@ class YouTubeMediaSource(MediaSource):
             return self._resolved_url
         proc = run_checked(
             [
-                self.runtime.yt_dlp,
+                *self._yt_dlp_command(),
                 "--flat-playlist",
                 "--playlist-items",
                 "1",
@@ -151,7 +157,7 @@ class YouTubeMediaSource(MediaSource):
             template = tmp / "audio.%(ext)s"
             run_checked(
                 [
-                    self.runtime.yt_dlp,
+                    *self._yt_dlp_command(),
                     "--no-playlist",
                     "--no-progress",
                     "--quiet",
@@ -176,7 +182,7 @@ class YouTubeMediaSource(MediaSource):
             return self._stream_info
         proc = run_checked(
             [
-                self.runtime.yt_dlp,
+                *self._yt_dlp_command(),
                 "--no-playlist",
                 "--no-progress",
                 "--quiet",
@@ -249,7 +255,7 @@ class YouTubeMediaSource(MediaSource):
         template = directory / "segment.%(ext)s"
         section = f"*{start:.3f}-{end:.3f}"
         command = [
-            self.runtime.yt_dlp,
+            *self._yt_dlp_command(),
             "--no-playlist",
             "--no-progress",
             "--quiet",
@@ -341,19 +347,28 @@ class YouTubeMediaSource(MediaSource):
                 )
             except Exception as exc:
                 exact_error = exc
-                logger.warning(
-                    "exact yt-dlp section extraction failed; retrying direct stream seek: %s",
-                    exc,
-                )
+                if self.runtime.yt_dlp_proxy_url:
+                    logger.warning(
+                        "exact yt-dlp section extraction failed; scoped yt-dlp proxy is configured, "
+                        "so direct ffmpeg stream seek is skipped; retrying section extraction "
+                        "without forced keyframes: %s",
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "exact yt-dlp section extraction failed; retrying direct stream seek: %s",
+                        exc,
+                    )
 
-        try:
-            return self._extract_frames_from_stream(safe_times, targets)
-        except Exception as stream_error:
-            logger.warning(
-                "direct stream frame extraction failed; retrying section extraction without "
-                "forced keyframes: %s",
-                stream_error,
-            )
+        if not self.runtime.yt_dlp_proxy_url:
+            try:
+                return self._extract_frames_from_stream(safe_times, targets)
+            except Exception as stream_error:
+                logger.warning(
+                    "direct stream frame extraction failed; retrying section extraction without "
+                    "forced keyframes: %s",
+                    stream_error,
+                )
 
         # Last media-level fallback: avoid re-encoding and ask for a wider section. The cut may land
         # on a neighboring keyframe, which is acceptable for board OCR and temporal aggregation.
