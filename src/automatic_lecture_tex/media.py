@@ -33,6 +33,9 @@ class MediaSource(ABC):
     def identity(self) -> dict[str, str]:
         raise NotImplementedError
 
+    def prepare_video(self, output_dir: Path, *, max_height: int) -> Path:
+        raise NotImplementedError(f"{type(self).__name__} does not support native video preparation")
+
     def _normalize_audio(self, input_path: Path, output_wav: Path) -> Path:
         output_wav.parent.mkdir(parents=True, exist_ok=True)
         run_checked(
@@ -66,6 +69,10 @@ class LocalMediaSource(MediaSource):
 
     def prepare_audio(self, output_wav: Path) -> Path:
         return self._normalize_audio(self.path, output_wav)
+
+    def prepare_video(self, output_dir: Path, *, max_height: int) -> Path:
+        del output_dir, max_height
+        return self.path
 
     def extract_frames(self, timestamps: list[float], output_dir: Path) -> list[ExtractedFrame]:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +181,37 @@ class YouTubeMediaSource(MediaSource):
                     f"yt-dlp produced {len(candidates)} audio files, expected exactly one"
                 )
             return self._normalize_audio(candidates[0], output_wav)
+
+    def prepare_video(self, output_dir: Path, *, max_height: int) -> Path:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cached = sorted(path for path in output_dir.glob("source.*") if path.is_file())
+        if cached:
+            return max(cached, key=lambda path: path.stat().st_size)
+
+        template = output_dir / "source.%(ext)s"
+        video_format = (
+            f"bv*[height<={max_height}]+ba/"
+            f"b[height<={max_height}]/best"
+        )
+        run_checked(
+            [
+                *self._yt_dlp_command(),
+                "--no-playlist",
+                "--no-progress",
+                "--quiet",
+                "-f",
+                video_format,
+                "--merge-output-format",
+                "mp4",
+                "-o",
+                str(template),
+                self._media_url(),
+            ]
+        )
+        candidates = sorted(path for path in output_dir.glob("source.*") if path.is_file())
+        if not candidates:
+            raise RuntimeError("yt-dlp did not produce a native-video source file")
+        return max(candidates, key=lambda path: path.stat().st_size)
 
     def _resolve_video_stream(self) -> tuple[str, dict[str, str]]:
         """Resolve one directly seekable video stream without downloading the full lecture."""
@@ -433,3 +471,90 @@ def copy_asset(source: Path, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     return destination
+
+
+
+def extract_api_video_clip(
+    runtime: RuntimeConfig,
+    source_video: Path,
+    *,
+    start: float,
+    end: float,
+    output_path: Path,
+    max_height: int,
+    video_bitrate_kbps: int,
+    audio_bitrate_kbps: int,
+    max_bytes: int,
+) -> Path:
+    """Create a compact MP4 with embedded audio for base64 video input."""
+
+    start = max(0.0, float(start))
+    end = max(start, float(end))
+    duration = end - start
+    if duration <= 0:
+        raise ValueError("video clip duration must be positive")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.is_file() and 0 < output_path.stat().st_size <= max_bytes:
+        return output_path
+
+    # Keep the binary payload safely below the configured cap before base64 expansion.
+    available_kbps = int((max_bytes * 8 * 0.88) / duration / 1000) - audio_bitrate_kbps
+    effective_video_kbps = max(200, min(video_bitrate_kbps, available_kbps))
+    if effective_video_kbps < 200:
+        raise RuntimeError(
+            f"native video byte budget {max_bytes} is too small for {duration:.1f}s clip"
+        )
+
+    scale = f"scale=-2:min({max_height}\\,ih)"
+    run_checked(
+        [
+            runtime.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(source_video),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-vf",
+            scale,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-b:v",
+            f"{effective_video_kbps}k",
+            "-maxrate",
+            f"{effective_video_kbps}k",
+            "-bufsize",
+            f"{2 * effective_video_kbps}k",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{audio_bitrate_kbps}k",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+    size = output_path.stat().st_size
+    if size > max_bytes:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"native video clip is {size} bytes, above configured limit {max_bytes}"
+        )
+    return output_path
