@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from .config import NotesConfig
 from .episode_graph import reconcile_window_observations
 from .schemas import (
@@ -20,9 +22,12 @@ from .schemas import (
     LectureChunk,
     LectureIR,
     LectureKnowledgeBase,
+    LectureObservation,
     LectureOutline,
     LectureState,
+    ObservationKind,
     OutlineSection,
+    SourceStatus,
     Transcript,
     VisualEvidence,
     WindowObservations,
@@ -30,6 +35,41 @@ from .schemas import (
 
 if TYPE_CHECKING:
     from .llm import LectureModelClient
+
+
+class GeneratedNativeVideoObservation(BaseModel):
+    """Model-facing event with clip-relative timing; the host owns absolute provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_offset_seconds: float = Field(ge=0.0)
+    end_offset_seconds: float = Field(ge=0.0)
+    kind: ObservationKind
+    text: str = Field(min_length=1)
+    latex: str | None = None
+    target_observation_id: str | None = None
+    target_local_index: int | None = Field(default=None, ge=0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    source_status: SourceStatus = SourceStatus.OBSERVED
+
+    @model_validator(mode="after")
+    def validate_event(self) -> "GeneratedNativeVideoObservation":
+        if self.end_offset_seconds < self.start_offset_seconds:
+            raise ValueError("end_offset_seconds must be >= start_offset_seconds")
+        if self.kind == ObservationKind.EQUATION and not (self.latex or "").strip():
+            raise ValueError("equation observations require latex")
+        if self.target_observation_id is not None and self.target_local_index is not None:
+            raise ValueError(
+                "use target_observation_id or target_local_index, not both"
+            )
+        return self
+
+
+class GeneratedNativeVideoWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observations: list[GeneratedNativeVideoObservation] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
 
 
 
@@ -521,89 +561,127 @@ Write descriptive strings in language code `{self.output_language}`.
         thinking: bool,
         temperature: float,
     ) -> WindowObservations:
-        """Extract the same canonical window events directly from native audio+video."""
+        """Extract canonical events directly from native audio+video with host-owned timing."""
 
         symbols = [
             item.model_dump(mode="json")
             for item in kb.symbols
             if item.active
         ]
-        recent_observations = [
-            item.model_dump(mode="json")
-            for item in kb.observations[-20:]
-        ]
+        recent = kb.observations[-20:]
+        recent_observations = [item.model_dump(mode="json") for item in recent]
+        recent_ids = {item.id for item in recent if item.id}
         open_episodes = [
             item.model_dump(mode="json")
             for item in kb.episodes
             if item.status == EpisodeStatus.OPEN
         ]
+        duration = chunk.end - chunk.start
         prompt = f"""Extract evidence events from ONE native audio+video interval of a university
-mathematics lecture. The attached video contains both the lecturer's speech and the board/slide
-pixels. Do not rely on an external transcript and do not write final lecture notes.
+mathematics lecture. The attached video contains both the lecturer's speech and board/slide pixels.
+There is NO external transcript. Do not write final lecture notes.
 
 Window id: {chunk.id}
-Absolute lecture bounds: [{chunk.start:.3f}, {chunk.end:.3f}]
-The first video frame/audio sample corresponds to absolute lecture time {chunk.start:.3f}s.
-If an event occurs t seconds after the beginning of the attached clip, report its timestamp as
-{chunk.start:.3f} + t, clamped to the absolute bounds above.
+Clip duration: {duration:.3f} seconds.
+Absolute lecture interval: [{chunk.start:.3f}, {chunk.end:.3f}].
+
+Return clip-relative start_offset_seconds/end_offset_seconds in [0, {duration:.3f}].
+The host converts those offsets to absolute lecture timestamps. Never return absolute timestamps.
 
 Known symbol registry:
 {json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))}
 
-Recent canonical observations from previous overlapping windows:
+Recent canonical observations from preceding overlapping windows:
 {json.dumps(recent_observations, ensure_ascii=False, separators=(",", ":"))}
 
 Currently open semantic episodes:
 {json.dumps(open_episodes, ensure_ascii=False, separators=(",", ":"))}
 
-Use the AUDIO and VIDEO jointly:
-- speech is evidence for semantic statements and lecturer corrections;
+Use AUDIO and VIDEO jointly:
+- speech is direct evidence for semantic statements and explicit lecturer corrections;
 - visible writing is direct evidence for exact symbols, signs, indices, equations and diagrams;
-- when speech and writing disagree, preserve the disagreement as unresolved unless the lecturer
-  explicitly corrects one of them;
-- do not silently replace the lecturer's mathematics with textbook mathematics.
+- when speech and writing materially disagree, preserve the disagreement as unresolved unless an
+  explicit correction resolves it;
+- do not replace the lecturer's mathematics with textbook mathematics.
 
-Return observations in temporal order. Use only these meanings:
-- definition/claim/equation/proof_step/example/notation/remark;
-- correction when the lecturer explicitly corrects an earlier statement/board entry;
-- retraction when the lecturer explicitly withdraws a statement;
-- transition only for a real semantic transition, never because the technical clip ended;
-- unresolved when the audiovisual evidence is insufficient or contradictory.
+Event kinds:
+definition/claim/equation/proof_step/example/notation/remark/correction/retraction/transition/unresolved.
+A transition is a genuine semantic transition, never the technical clip edge.
 
-For correction/retraction, use target_observation_id when the target is one of the recent canonical
-observations above or an earlier observation in this same window. Preserve lecturer mistakes and
-later corrections as separate evidence events.
+For correction/retraction:
+- target_observation_id may be ONLY an exact id from Recent canonical observations;
+- target_local_index may point ONLY to an earlier observation in THIS response;
+- otherwise leave both target fields null and explain the ambiguity in unresolved.
 
-Put exact mathematical expressions in the latex field and explanatory language in text.
-source_status=observed means directly supported by the attached audiovisual clip.
-Use reconstructed only when the local audiovisual evidence strongly forces one reading and
-inferred only very sparingly. Never infer new mathematics from general knowledge.
-Every observation must lie within the absolute window bounds. Use evidence_refs containing
-video:{chunk.id} for direct audiovisual evidence.
+Put exact mathematical expressions in latex and explanatory language in text.
+source_status=observed means directly supported by audiovisual evidence.
+Use reconstructed only when local audiovisual evidence strongly forces one repaired reading.
+Use inferred very sparingly and never to add unsupported mathematics.
+Preserve lecturer mistakes and later corrections as separate events.
 Write descriptive strings in language code {self.output_language}.
 """
-        result = self._structured(
+        generated = self._structured(
             prompt,
-            WindowObservations,
+            GeneratedNativeVideoWindow,
             videos=[video_path],
             operation="knowledge_extract_native_video",
             model=model,
             thinking=thinking,
             temperature=temperature,
         )
-        result.window_id = chunk.id
-        result.start = chunk.start
-        result.end = chunk.end
-        for index, item in enumerate(result.observations):
-            item.window_id = chunk.id
-            item.window_ids = _merge_unique(item.window_ids, [chunk.id])
-            if not item.id:
-                item.id = f"obs_{chunk.id}_{index:03d}"
-            item.start = min(max(item.start, chunk.start), chunk.end)
-            item.end = min(max(item.end, item.start), chunk.end)
-            if not item.evidence_refs:
-                item.evidence_refs = [f"video:{chunk.id}"]
-        return result
+
+        errors: list[str] = []
+        for index, item in enumerate(generated.observations):
+            if item.end_offset_seconds > duration + 1e-6:
+                errors.append(
+                    f"observation {index} ends at {item.end_offset_seconds:.3f}s "
+                    f"outside clip duration {duration:.3f}s"
+                )
+            if item.target_observation_id is not None and item.target_observation_id not in recent_ids:
+                errors.append(
+                    f"observation {index} targets unknown previous id "
+                    f"{item.target_observation_id!r}"
+                )
+            if item.target_local_index is not None and item.target_local_index >= index:
+                errors.append(
+                    f"observation {index} target_local_index must reference an earlier event"
+                )
+        if errors:
+            raise ValueError("invalid native-video grounding: " + "; ".join(errors))
+
+        canonical_ids = [
+            f"obs_{chunk.id}_{index:03d}"
+            for index in range(len(generated.observations))
+        ]
+        observations: list[LectureObservation] = []
+        for index, item in enumerate(generated.observations):
+            target = item.target_observation_id
+            if item.target_local_index is not None:
+                target = canonical_ids[item.target_local_index]
+            observations.append(
+                LectureObservation(
+                    id=canonical_ids[index],
+                    window_id=chunk.id,
+                    window_ids=[chunk.id],
+                    start=chunk.start + item.start_offset_seconds,
+                    end=chunk.start + item.end_offset_seconds,
+                    kind=item.kind,
+                    text=item.text.strip(),
+                    latex=(item.latex.strip() if item.latex else None),
+                    target_observation_id=target,
+                    confidence=item.confidence,
+                    source_status=item.source_status,
+                    evidence_refs=[f"video:{chunk.id}"],
+                )
+            )
+
+        return WindowObservations(
+            window_id=chunk.id,
+            start=chunk.start,
+            end=chunk.end,
+            observations=observations,
+            unresolved=list(generated.unresolved),
+        )
 
     def track_episodes(
         self,
