@@ -48,7 +48,7 @@ from .knowledge import (
 )
 from .latex import escape_tex
 from .llm import LectureModelClient, StructuredTaskTooLargeError
-from .media import copy_asset
+from .media import copy_asset, extract_api_video_clip
 from .schemas import (
     BlockType,
     ChunkNotes,
@@ -735,9 +735,13 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
                 "window_id": str(chunk.get("id") or path.stem),
                 "start": start,
                 "end": float(chunk.get("end", start)),
-                "asr": _clip_state_raw_text(
-                    str(chunk.get("timestamped_text") or chunk.get("text") or ""),
-                    1200,
+                "asr": (
+                    ""
+                    if payload.get("evidence_backend") == "native_video"
+                    else _clip_state_raw_text(
+                        str(chunk.get("timestamped_text") or chunk.get("text") or ""),
+                        1200,
+                    )
                 ),
                 "visual_latex": visual_latex[:3],
                 "math_ocr_candidates": ocr_candidates,
@@ -2689,6 +2693,11 @@ def run_knowledge_pipeline(
     vision_seconds = 0.0
     extract_seconds = 0.0
     episode_track_seconds = 0.0
+    native_video_mode = pipeline.config.notes.window_evidence_backend == "native_video"
+    native_source_video: Path | None = None
+    native_video_prepare_seconds = 0.0
+    native_video_clip_seconds = 0.0
+    native_video_windows_processed = 0
 
     for chunk in chunks:
         state_before = compact_knowledge_state(kb, pipeline.config.notes)
@@ -2732,25 +2741,68 @@ def run_knowledge_pipeline(
             processed_windows + cache_hits + 1,
             len(chunks),
         )
-        requests, evidence, visual_elapsed = _collect_visual_evidence(
-            pipeline,
-            lecture,
-            chunk,
-            transcript,
-            source,
-            work,
-            figures_root,
-            notation,
-        )
-        vision_seconds += visual_elapsed
-        visual_requests_processed += len(requests)
-        visual_evidence_successful += sum(
-            item.kind != "none" and item.confidence >= 0.75 for item in evidence
-        )
+        native_video_clip: Path | None = None
+        if native_video_mode:
+            requests = []
+            evidence = []
+            if native_source_video is None:
+                prepare_started = time.perf_counter()
+                native_source_video = source.prepare_video(
+                    work / "native_video_source",
+                    max_height=pipeline.config.notes.native_video_height,
+                )
+                native_video_prepare_seconds += time.perf_counter() - prepare_started
 
-        extract_started = time.perf_counter()
-        batch = orchestrator.extract_observations(chunk, evidence, kb)
-        extract_seconds += time.perf_counter() - extract_started
+            clip_started = time.perf_counter()
+            native_video_clip = extract_api_video_clip(
+                pipeline.config.runtime,
+                native_source_video,
+                start=chunk.start,
+                end=chunk.end,
+                output_path=work / "native_video_windows" / f"{chunk.id}.mp4",
+                max_height=pipeline.config.notes.native_video_height,
+                video_bitrate_kbps=(
+                    pipeline.config.notes.native_video_video_bitrate_kbps
+                ),
+                audio_bitrate_kbps=(
+                    pipeline.config.notes.native_video_audio_bitrate_kbps
+                ),
+                max_bytes=pipeline.config.notes.native_video_max_bytes,
+            )
+            native_video_clip_seconds += time.perf_counter() - clip_started
+            native_video_windows_processed += 1
+
+            extract_started = time.perf_counter()
+            batch = orchestrator.extract_observations_from_video(
+                chunk,
+                native_video_clip,
+                kb,
+                model=pipeline.config.notes.native_video_model,
+                thinking=pipeline.config.notes.native_video_thinking,
+                temperature=pipeline.config.notes.native_video_temperature,
+            )
+            extract_seconds += time.perf_counter() - extract_started
+        else:
+            requests, evidence, visual_elapsed = _collect_visual_evidence(
+                pipeline,
+                lecture,
+                chunk,
+                transcript,
+                source,
+                work,
+                figures_root,
+                notation,
+            )
+            vision_seconds += visual_elapsed
+            visual_requests_processed += len(requests)
+            visual_evidence_successful += sum(
+                item.kind != "none" and item.confidence >= 0.75 for item in evidence
+            )
+
+            extract_started = time.perf_counter()
+            batch = orchestrator.extract_observations(chunk, evidence, kb)
+            extract_seconds += time.perf_counter() - extract_started
+
         added_ids = merge_window_observations(kb, batch)
 
         track_started = time.perf_counter()
@@ -2764,6 +2816,12 @@ def run_knowledge_pipeline(
             {
                 "fingerprint": window_fingerprint,
                 "chunk": chunk.model_dump(mode="json"),
+                "evidence_backend": (
+                    "native_video" if native_video_mode else "asr_frames"
+                ),
+                "native_video_clip": (
+                    str(native_video_clip) if native_video_clip is not None else None
+                ),
                 "visual_requests": [item.model_dump(mode="json") for item in requests],
                 "visual_evidence": [item.model_dump(mode="json") for item in evidence],
                 "observations": batch.model_dump(mode="json"),
@@ -2919,6 +2977,13 @@ def run_knowledge_pipeline(
                 "asr_seconds": round(asr_seconds, 3),
                 "notes_seconds": round(time.perf_counter() - notes_started, 3),
                 "vision_seconds": round(vision_seconds, 3),
+                "native_video_prepare_seconds": round(native_video_prepare_seconds, 3),
+                "native_video_clip_seconds": round(native_video_clip_seconds, 3),
+                "native_video_windows_processed": native_video_windows_processed,
+                "window_evidence_backend": pipeline.config.notes.window_evidence_backend,
+                "native_video_model": (
+                    pipeline.config.notes.native_video_model if native_video_mode else None
+                ),
                 "knowledge_extract_seconds": round(extract_seconds, 3),
                 "episode_track_seconds": round(episode_track_seconds, 3),
                 "graph_revision_seconds": round(graph_seconds, 3),
