@@ -95,6 +95,10 @@ def test_extract_api_video_clip_builds_compact_av_mp4(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("automatic_lecture_tex.media.run_checked", fake_run_checked)
+    monkeypatch.setattr(
+        "automatic_lecture_tex.media._api_video_clip_is_valid",
+        lambda *args, **kwargs: True,
+    )
 
     result = extract_api_video_clip(
         RuntimeConfig(),
