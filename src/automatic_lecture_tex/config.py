@@ -104,6 +104,16 @@ class LLMConfig(BaseModel):
 
 class NotesConfig(BaseModel):
     architecture: Literal["linear", "state", "knowledge", "legacy"] = "knowledge"
+    window_evidence_backend: Literal["asr_frames", "native_video"] = "asr_frames"
+    native_video_model: str = "qwen/qwen3.8-omni-flash"
+    native_video_height: int = Field(default=720, ge=240, le=1080)
+    native_video_video_bitrate_kbps: int = Field(default=1000, ge=200, le=5000)
+    native_video_audio_bitrate_kbps: int = Field(default=64, ge=32, le=256)
+    # Alibaba's base64 video URL must stay below 10 MB after encoding. 7 MB of binary payload
+    # leaves enough headroom for base64 expansion and the data-URL prefix.
+    native_video_max_bytes: int = Field(default=7_000_000, ge=1_000_000, le=7_500_000)
+    native_video_thinking: bool = False
+    native_video_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     chunk_target_seconds: float = Field(default=480.0, gt=0)
     chunk_overlap_seconds: float = Field(default=120.0, ge=0)
     boundary_context_seconds: float = Field(default=120.0, ge=0)
