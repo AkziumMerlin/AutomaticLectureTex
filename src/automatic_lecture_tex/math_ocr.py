@@ -299,6 +299,7 @@ class OpenAICompatibleVLMOCRBackend(MathOCRBackend):
         inherited_model = getattr(llm_config, "model", None)
         inherited_key = getattr(llm_config, "api_key", None)
         inherited_key_env = getattr(llm_config, "api_key_env", None)
+        inherited_proxy = getattr(llm_config, "proxy_url", None)
         inherited_headers = dict(getattr(llm_config, "default_headers", {}) or {})
 
         base_url = explicit_base_url or inherited_base_url
@@ -312,6 +313,11 @@ class OpenAICompatibleVLMOCRBackend(MathOCRBackend):
         if not api_key_env:
             api_key_env = inherited_key_env
         api_key = explicit_key if explicit_key is not None else inherited_key
+        proxy_url = (
+            config.openai_proxy_url
+            if not legacy and config.openai_proxy_url
+            else inherited_proxy
+        )
         timeout = (
             getattr(llm_config, "timeout_seconds", config.openai_timeout_seconds)
             if legacy
@@ -331,6 +337,7 @@ class OpenAICompatibleVLMOCRBackend(MathOCRBackend):
             api_key_env=api_key_env,
             timeout_seconds=timeout,
             default_headers=headers,
+            proxy_url=proxy_url,
         )
 
     def recognize(self, image_path: Path) -> MathOCRCandidate | None:
