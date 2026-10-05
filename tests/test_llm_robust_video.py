@@ -67,3 +67,50 @@ def test_robust_client_sends_video_url_with_model_override(tmp_path) -> None:
         client.usage_snapshot()["by_operation"]["knowledge_extract_native_video"]["cost_usd"]
         == 0.001
     )
+
+
+
+def test_robust_client_falls_back_when_guided_json_returns_wrong_top_level_type() -> None:
+    client = LectureModelClient.__new__(LectureModelClient)
+    client.config = LLMConfig(
+        model="fake",
+        compatibility_mode="generic",
+        structured_output_mode="native",
+        max_tokens=128,
+        max_retries=1,
+    )
+    client._usage_lock = threading.Lock()
+    client.reset_usage()
+    requests = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            requests.append(kwargs)
+            raw = "[]" if len(requests) == 1 else '{"value":"ok"}'
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=raw),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    total_tokens=12,
+                    cost=0.0,
+                    prompt_tokens_details=None,
+                    completion_tokens_details=None,
+                ),
+            )
+
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+
+    result = client._structured("Return payload.", Payload)
+
+    assert result.value == "ok"
+    assert "response_format" in requests[0]
+    assert "response_format" not in requests[1]
+    retry_text = requests[1]["messages"][1]["content"][0]["text"]
+    assert "JSON schema:" in retry_text
+    assert "previous response was invalid" in retry_text.lower()
