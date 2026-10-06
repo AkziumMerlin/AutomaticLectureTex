@@ -17,6 +17,7 @@ from automatic_lecture_tex.reader_surface import (
     ReaderProjectionChoices,
     ReaderSurfaceSegment,
     _candidate_units,
+    _canonicalize_plan,
     _materialize_projection,
     _projection_input,
     _reader_candidate_units,
@@ -166,6 +167,124 @@ def test_discourse_plan_requires_exact_ordered_coverage():
 
     assert _verify_plan(projection, reversed_plan)
 
+
+
+def test_discourse_plan_canonicalization_restores_reordered_groups():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id=node.id,
+                disposition="render",
+                selected_unit_indices=[0],
+            )
+            for node in spec.nodes
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    expected = [
+        fact.node_id for fact in projection.facts if fact.disposition == "render"
+    ]
+
+    broken = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="later",
+                type=BlockType.EQUATION,
+                purpose="Формула.",
+                node_ids=["linearity"],
+            ),
+            PlannedReaderBlock(
+                block_id="earlier",
+                type=BlockType.DEFINITION,
+                purpose="Определение.",
+                node_ids=["definition"],
+            ),
+        ]
+    )
+
+    normalized = _canonicalize_plan(projection, broken)
+
+    assert [node_id for block in normalized.blocks for node_id in block.node_ids] == expected
+    assert _verify_plan(projection, normalized) == []
+
+
+def test_discourse_plan_canonicalization_fills_missing_nodes():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id=node.id,
+                disposition="render",
+                selected_unit_indices=[0],
+            )
+            for node in spec.nodes
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    expected = [
+        fact.node_id for fact in projection.facts if fact.disposition == "render"
+    ]
+
+    broken = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="partial",
+                type=BlockType.DEFINITION,
+                purpose="Определение.",
+                node_ids=[expected[0]],
+            )
+        ]
+    )
+
+    normalized = _canonicalize_plan(projection, broken)
+
+    assert [node_id for block in normalized.blocks for node_id in block.node_ids] == expected
+    assert _verify_plan(projection, normalized) == []
+
+
+def test_discourse_plan_canonicalization_breaks_duplicate_memberships_safely():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id=node.id,
+                disposition="render",
+                selected_unit_indices=[0],
+            )
+            for node in spec.nodes
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    expected = [
+        fact.node_id for fact in projection.facts if fact.disposition == "render"
+    ]
+
+    broken = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="a",
+                type=BlockType.PARAGRAPH,
+                purpose="Первая группа.",
+                node_ids=expected,
+            ),
+            PlannedReaderBlock(
+                block_id="b",
+                type=BlockType.REMARK,
+                purpose="Дубликат.",
+                node_ids=[expected[0]],
+            ),
+        ]
+    )
+
+    normalized = _canonicalize_plan(projection, broken)
+
+    assert [node_id for block in normalized.blocks for node_id in block.node_ids] == expected
+    assert len({block.block_id for block in normalized.blocks}) == len(normalized.blocks)
+    assert _verify_plan(projection, normalized) == []
 
 def test_typed_inline_math_cannot_smuggle_a_new_relation():
     with pytest.raises(ValueError, match="cannot contain mathematical relations"):

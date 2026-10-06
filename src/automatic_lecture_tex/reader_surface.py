@@ -24,7 +24,7 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-READER_SURFACE_PIPELINE_VERSION = 2
+READER_SURFACE_PIPELINE_VERSION = 3
 
 _PROVENANCE_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск\w*|кадр\w*|окн\w*|лектор\w*|видео|распознан\w*|"
@@ -483,6 +483,133 @@ def _verify_plan(
     return errors
 
 
+
+def _fallback_block_type(
+    projection: ReaderSectionProjection,
+    node_ids: list[str],
+) -> GeneratedBlockType:
+    kinds = {
+        fact.kind.strip().lower()
+        for fact in projection.facts
+        if fact.node_id in set(node_ids)
+    }
+    if len(kinds) == 1:
+        kind = next(iter(kinds))
+        mapping: dict[str, GeneratedBlockType] = {
+            "definition": BlockType.DEFINITION,
+            "theorem": BlockType.THEOREM,
+            "lemma": BlockType.LEMMA,
+            "proposition": BlockType.PROPOSITION,
+            "corollary": BlockType.COROLLARY,
+            "proof": BlockType.PROOF,
+            "proof_step": BlockType.PROOF,
+            "example": BlockType.EXAMPLE,
+            "remark": BlockType.REMARK,
+            "equation": BlockType.EQUATION,
+            "exercise": BlockType.EXERCISE,
+        }
+        block_type = mapping.get(kind)
+        if block_type is not None:
+            if block_type != BlockType.EQUATION or len(node_ids) == 1:
+                return block_type
+    return BlockType.PARAGRAPH
+
+
+def _canonicalize_plan(
+    projection: ReaderSectionProjection,
+    plan: ReaderDiscoursePlan,
+) -> ReaderDiscoursePlan:
+    """Project an imperfect planner suggestion onto host-owned canonical node order.
+
+    The model may suggest grouping/type/title/purpose, but it never owns coverage or order.
+    Only pairwise grouping hints that are internally ordered, unique and contiguous survive.
+    Missing, duplicated, unknown or reordered ids simply create deterministic boundaries.
+    """
+
+    expected = [
+        fact.node_id for fact in projection.facts if fact.disposition == "render"
+    ]
+    if not expected:
+        return ReaderDiscoursePlan(blocks=[])
+
+    expected_set = set(expected)
+    occurrences: dict[str, list[tuple[int, int]]] = {node_id: [] for node_id in expected}
+    filtered_blocks: list[list[str]] = []
+    for block_index, block in enumerate(plan.blocks):
+        filtered: list[str] = []
+        for local_index, node_id in enumerate(block.node_ids):
+            if node_id not in expected_set:
+                continue
+            occurrences[node_id].append((block_index, local_index))
+            filtered.append(node_id)
+        filtered_blocks.append(filtered)
+
+    join_pairs: set[tuple[str, str]] = set()
+    position = {node_id: index for index, node_id in enumerate(expected)}
+    for block_index, filtered in enumerate(filtered_blocks):
+        if not filtered:
+            continue
+        # A block contributes grouping hints only for ids that occur exactly once globally and
+        # appear in canonical order inside this proposal block.
+        unique = [
+            node_id
+            for node_id in filtered
+            if len(occurrences.get(node_id, [])) == 1
+        ]
+        if unique != sorted(unique, key=position.__getitem__):
+            continue
+        for left, right in zip(unique, unique[1:], strict=False):
+            if position[right] == position[left] + 1:
+                join_pairs.add((left, right))
+
+    ranges: list[list[str]] = []
+    current = [expected[0]]
+    for left, right in zip(expected, expected[1:], strict=False):
+        if (left, right) in join_pairs:
+            current.append(right)
+        else:
+            ranges.append(current)
+            current = [right]
+    ranges.append(current)
+
+    blocks: list[PlannedReaderBlock] = []
+    for block_index, node_ids in enumerate(ranges):
+        matching: list[PlannedReaderBlock] = []
+        node_set = set(node_ids)
+        for proposal in plan.blocks:
+            filtered = [node_id for node_id in proposal.node_ids if node_id in expected_set]
+            if node_set.issubset(filtered):
+                ordered_subset = [node_id for node_id in filtered if node_id in node_set]
+                if ordered_subset == node_ids:
+                    matching.append(proposal)
+
+        source = matching[0] if len(matching) == 1 else None
+        title = source.title if source is not None else None
+        if title and _TEXT_FORBIDDEN.search(title):
+            title = None
+        purpose = (
+            source.purpose
+            if source is not None
+            else "Present the supplied canonical facts in order without adding new content."
+        )
+        block_type = (
+            source.type
+            if source is not None
+            else _fallback_block_type(projection, node_ids)
+        )
+        blocks.append(
+            PlannedReaderBlock(
+                block_id=f"reader_block_{block_index:03d}",
+                type=block_type,
+                title=title,
+                purpose=purpose,
+                node_ids=node_ids,
+            )
+        )
+
+    return ReaderDiscoursePlan(blocks=blocks)
+
+
 def _block_prompt(
     *,
     projection: ReaderSectionProjection,
@@ -838,6 +965,15 @@ def _plan_section(
                 **_call_kwargs(orchestrator),
             )
     errors = _verify_plan(projection, plan)
+    if errors:
+        logger.warning(
+            "discourse plan for section %s still violated the host contract after repair; "
+            "canonicalizing coverage/order deterministically: %s",
+            projection.section_id,
+            "; ".join(errors),
+        )
+        plan = _canonicalize_plan(projection, plan)
+        errors = _verify_plan(projection, plan)
     if errors:
         raise RuntimeError(
             f"discourse plan failed for section {projection.section_id}: " + "; ".join(errors)
