@@ -18,6 +18,8 @@ from automatic_lecture_tex.reader_surface import (
     ReaderSurfaceSegment,
     _candidate_units,
     _materialize_projection,
+    _projection_input,
+    _reader_candidate_units,
     _verify_block,
     _verify_plan,
     _verify_projection_choices,
@@ -88,40 +90,27 @@ def _definition_graph() -> GraphState:
     )
 
 
-def test_reader_projection_is_extractive_and_rejects_provenance_selection():
+def test_reader_projection_prefilters_provenance_before_model_selection():
     graph = _definition_graph()
     spec = graph_section_specs(graph, lecture_title="Lecture")[0]
     definition = next(node for node in spec.nodes if node.id == "definition")
-    units = _candidate_units(definition)
+    raw_units = _candidate_units(definition)
+    safe_units = _reader_candidate_units(definition)
+    payload = _projection_input(graph, spec)
+    definition_payload = next(item for item in payload["nodes"] if item["id"] == "definition")
 
-    assert units[0] == "Комплексно-линейный функционал"
-    assert "Функционал называется комплексно-линейным." in units
-    audit_index = next(index for index, unit in enumerate(units) if "доске" in unit)
-
-    bad = ReaderProjectionChoices(
-        choices=[
-            ReaderProjectionChoice(
-                node_id="definition",
-                disposition="render",
-                selected_unit_indices=[audit_index],
-            ),
-            ReaderProjectionChoice(
-                node_id="linearity",
-                disposition="render",
-                selected_unit_indices=[0],
-            ),
-        ]
-    )
-    errors = _verify_projection_choices(spec=spec, choices=bad)
-
-    assert any("provenance language" in error for error in errors)
+    assert raw_units[0] == "Комплексно-линейный функционал"
+    assert "Функционал называется комплексно-линейным." in safe_units
+    assert any("доске" in unit for unit in raw_units)
+    assert all("доске" not in unit for unit in safe_units)
+    assert definition_payload["candidate_units"] == safe_units
 
 
 def test_projection_materializes_only_selected_source_units():
     graph = _definition_graph()
     spec = graph_section_specs(graph, lecture_title="Lecture")[0]
     definition = next(node for node in spec.nodes if node.id == "definition")
-    units = _candidate_units(definition)
+    units = _reader_candidate_units(definition)
     semantic_index = units.index("Функционал называется комплексно-линейным.")
 
     choices = ReaderProjectionChoices(
@@ -226,7 +215,7 @@ def test_surface_pipeline_projection_plan_writer_end_to_end(tmp_path):
     graph = _definition_graph()
     spec = graph_section_specs(graph, lecture_title="Lecture")[0]
     definition = next(node for node in spec.nodes if node.id == "definition")
-    definition_units = _candidate_units(definition)
+    definition_units = _reader_candidate_units(definition)
     semantic_index = definition_units.index("Функционал называется комплексно-линейным.")
 
     projection = ReaderProjectionChoices(
@@ -392,7 +381,7 @@ def test_grounding_issue_forces_block_repair(tmp_path):
     graph = _definition_graph()
     spec = graph_section_specs(graph, lecture_title="Lecture")[0]
     definition = next(node for node in spec.nodes if node.id == "definition")
-    semantic_index = _candidate_units(definition).index(
+    semantic_index = _reader_candidate_units(definition).index(
         "Функционал называется комплексно-линейным."
     )
     projection = ReaderProjectionChoices(
@@ -482,3 +471,79 @@ def test_grounding_issue_forces_block_repair(tmp_path):
     assert "совпадает" not in ir.chunks[0].blocks[0].latex
     assert orchestrator.operations.count("graph_block_write_repair") == 1
     assert orchestrator.operations.count("graph_block_grounding_review") == 2
+
+
+
+def test_provenance_only_node_without_expression_must_be_omitted():
+    graph = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", start=0.0, end=1.0, text="audit"),
+            "e2": EvidenceRecord(id="e2", start=1.0, end=2.0, text="claim"),
+        },
+        nodes={
+            "audit": GraphNode(
+                id="audit",
+                kind="remark",
+                title="Комментарий на доске",
+                text="Лектор указывает на неоднозначное чтение кадра OCR.",
+                evidence_ids=["e1"],
+            ),
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                title="Непрерывность функционала",
+                text="Функционал непрерывен.",
+                evidence_ids=["e2"],
+            ),
+        },
+    )
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+
+    assert _reader_candidate_units(graph.nodes["audit"]) == []
+
+    bad = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="audit",
+                disposition="render",
+                selected_unit_indices=[],
+            ),
+            ReaderProjectionChoice(
+                node_id="claim",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    errors = _verify_projection_choices(spec=spec, choices=bad)
+
+    assert any("must be omitted" in error for error in errors)
+
+
+def test_materialization_indices_are_against_prefiltered_units():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    safe_units = _reader_candidate_units(definition)
+    semantic_index = safe_units.index("Функционал называется комплексно-линейным.")
+
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[semantic_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+
+    projection = _materialize_projection(graph, spec, choices)
+    fact = next(item for item in projection.facts if item.node_id == "definition")
+
+    assert fact.statement == "Функционал называется комплексно-линейным."
+    assert "доске" not in fact.statement
