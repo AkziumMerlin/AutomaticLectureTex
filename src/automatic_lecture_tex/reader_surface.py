@@ -24,7 +24,7 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-READER_SURFACE_PIPELINE_VERSION = 1
+READER_SURFACE_PIPELINE_VERSION = 2
 
 _PROVENANCE_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск\w*|кадр\w*|окн\w*|лектор\w*|видео|распознан\w*|"
@@ -218,6 +218,8 @@ def graph_section_specs(
 
 
 def _candidate_units(node: GraphNode) -> list[str]:
+    """Raw extractive units retained for diagnostics/tests; may contain provenance language."""
+
     units: list[str] = []
     title = _canonical_surface_text(node.title or "").strip()
     if title:
@@ -226,6 +228,23 @@ def _candidate_units(node: GraphNode) -> list[str]:
     if text:
         units.extend(item.strip() for item in _SENTENCE_SPLIT.split(text) if item.strip())
     return list(dict.fromkeys(units))
+
+
+def _reader_candidate_units(node: GraphNode) -> list[str]:
+    """Only units that are legal to expose to reader-facing stages."""
+
+    return [
+        unit
+        for unit in _candidate_units(node)
+        if not _PROVENANCE_LANGUAGE.search(unit)
+    ]
+
+
+def _reader_safe_title(node: GraphNode) -> str:
+    title = _canonical_surface_text(node.title or "").strip()
+    if title and not _PROVENANCE_LANGUAGE.search(title):
+        return title
+    return ""
 
 
 def _expression_for_node(node: GraphNode) -> ReaderExpression | None:
@@ -244,7 +263,7 @@ def _projection_input(state: GraphState, spec: GraphSectionSpec) -> dict[str, An
             {
                 "id": node.id,
                 "kind": node.kind,
-                "candidate_units": _candidate_units(node),
+                "candidate_units": _reader_candidate_units(node),
                 "expression_ids": (
                     [f"expr::{node.id}"] if (node.latex or "").strip() else []
                 ),
@@ -273,11 +292,12 @@ For every input node return exactly one choice with the same node_id and choose:
 - unresolved: the node contains a genuine mathematical ambiguity that the canonical graph did not
   resolve and should be surfaced as an unresolved item rather than asserted.
 
-selected_unit_indices refer only to candidate_units of that node. Select the smallest set that
-contains the reader-facing mathematical content. Do not select sentences about ASR/OCR, the board,
-frames, handwriting, pixels, the lecturer, reconstruction, or confidence. Prefer the canonical
-title when it already captures the mathematical fact. Nodes with an exact expression may use a
-short title as their prose fact because the host preserves the expression separately.
+selected_unit_indices refer only to candidate_units of that node. Candidate units have already
+been deterministically filtered to exclude provenance language. Select the smallest set that
+contains the reader-facing mathematical content. Prefer the canonical title when it is present.
+Nodes with an exact expression may use a short prose unit, or no prose unit when the expression
+alone carries the mathematical content. If candidate_units is empty and expression_ids is also
+empty, disposition MUST be omit.
 
 Do not invent text, formulas, node IDs, or indices. Language code is {output_language}.
 Return strict structured JSON only.
@@ -309,7 +329,7 @@ def _verify_projection_choices(
         node = by_id.get(choice.node_id)
         if node is None:
             continue
-        units = _candidate_units(node)
+        units = _reader_candidate_units(node)
         invalid = [
             index
             for index in choice.selected_unit_indices
@@ -323,6 +343,10 @@ def _verify_projection_choices(
                 errors.append(
                     f"{node.id}: {choice.disposition} requires a selected reader unit"
                 )
+        if not units and not (node.latex or "").strip() and choice.disposition != "omit":
+            errors.append(
+                f"{node.id}: node has no reader-safe units or expression and must be omitted"
+            )
         selected = " ".join(units[index] for index in choice.selected_unit_indices)
         if selected and _PROVENANCE_LANGUAGE.search(selected):
             errors.append(f"{node.id}: selected unit contains provenance language")
@@ -342,13 +366,13 @@ def _materialize_projection(
         if expression is not None:
             expressions.append(expression)
         choice = choice_by_id[node.id]
-        units = _candidate_units(node)
+        units = _reader_candidate_units(node)
         statement = " ".join(units[index] for index in choice.selected_unit_indices).strip()
         facts.append(
             ReaderFact(
                 node_id=node.id,
                 kind=node.kind,
-                title=_canonical_surface_text(node.title or "").strip(),
+                title=_reader_safe_title(node),
                 statement=statement,
                 disposition=choice.disposition,
                 expression_ids=((expression.id,) if expression is not None else ()),
