@@ -366,7 +366,7 @@ def _materialize_projection(
         if expression is not None:
             expressions.append(expression)
         choice = choice_by_id[node.id]
-        units = _candidate_units(node)
+        units = _reader_candidate_units(node)
         statement = " ".join(units[index] for index in choice.selected_unit_indices).strip()
         facts.append(
             ReaderFact(
