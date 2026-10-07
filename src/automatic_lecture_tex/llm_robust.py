@@ -15,6 +15,7 @@ from pydantic_core import ValidationError
 from .llm import LectureModelClient as BaseLectureModelClient
 from .llm import (
     SYSTEM,
+    StructuredBackendAmbiguousRejectionError,
     StructuredInputTooLargeError,
     StructuredOutputTruncatedError,
     StructuredTaskTooLargeError,
@@ -40,6 +41,13 @@ _EXPLICIT_MAX_TOKENS_CAP_RE = re.compile(
 )
 
 
+_AMBIGUOUS_CONTEXT_OR_PARAMS_RE = re.compile(
+    r"(?:possible causes?:\s*)?.*input exceeds.*maximum context length.*"
+    r"(?:or|and/or).*invalid parameters?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def _explicit_max_tokens_ceiling(error: Exception) -> int | None:
     """Extract an output-token ceiling explicitly reported by an OpenAI-compatible backend."""
 
@@ -48,6 +56,12 @@ def _explicit_max_tokens_ceiling(error: Exception) -> int | None:
         return None
     ceiling = int(match.group(1))
     return ceiling if ceiling > 0 else None
+
+
+def _is_ambiguous_context_or_params_error(error: Exception) -> bool:
+    """Recognize provider errors that explicitly conflate context overflow with invalid params."""
+
+    return bool(_AMBIGUOUS_CONTEXT_OR_PARAMS_RE.search(str(error)))
 
 
 def _is_input_context_overflow_error(error: Exception) -> bool:
@@ -259,6 +273,20 @@ class LectureModelClient(BaseLectureModelClient):
                     last_accepted_max_tokens = current_max_tokens
                     break
                 except BadRequestError as exc:
+                    ambiguous_rejection = _is_ambiguous_context_or_params_error(exc)
+                    if ambiguous_rejection:
+                        if split_oversized_task:
+                            logger.warning(
+                                "[%s] backend returned an ambiguous context-or-parameter rejection; "
+                                "delegating semantic split to caller",
+                                operation,
+                            )
+                            raise StructuredBackendAmbiguousRejectionError(
+                                f"{operation} backend rejected request as possible context overflow "
+                                "or invalid parameters",
+                                backend_error=exc,
+                            ) from exc
+                        raise
                     if not _is_context_overflow_error(exc):
                         raise
                     input_overflow = _is_input_context_overflow_error(exc)
