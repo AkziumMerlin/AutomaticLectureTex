@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .generated_notes import GeneratedBlockType
 from .graph_revision import GraphNode, GraphState
@@ -662,12 +662,14 @@ You are not allowed to introduce new mathematical claims.
 Segment contract:
 - text: ordinary prose only. No LaTeX commands, dollar signs, or Unicode math glyphs. Each text
   segment must cite the source_node_ids whose reader-safe facts it directly paraphrases.
-- inline_math: a short mathematical atom such as X, f, X^*, T_\\Phi, x_n, or \\|f\\|. It may not
-  contain an equality, inequality, membership, map, implication, or any other relation. Cite the
-  source node(s) that establish the notation.
+- inline_math: a short mathematical atom such as X, f, X^*, T_\\Phi, x_n, or \\|f\\|. It MUST NOT
+  contain an equality, inequality, membership, map, implication, quantified statement, absolute-
+  value relation, or any other relation. If a supplied canonical expression states the relation,
+  use an expression segment with its exact expression id. If no supplied expression states it,
+  OMIT the relation rather than inventing one.
 - expression: reference one exact host-owned expression id from the supplied facts. Do not retype
-  the formula. Set display=true for substantial formulas and false only when the exact canonical
-  expression naturally belongs inline.
+  the formula in latex/text fields. Set display=true for substantial formulas and false only when
+  the exact canonical expression naturally belongs inline.
 
 Use the planned block type/title/purpose as structure, but return only the ordered segments.
 Do not mention reconstruction, evidence, a board, OCR/ASR, confidence, or provenance.
@@ -676,7 +678,7 @@ Write prose in language code {output_language}. Return strict structured JSON on
 
 
 def _latex_key(value: str) -> str:
-    return re.sub(r"\\s+", "", value.strip())
+    return re.sub(r"\s+", "", value.strip())
 
 
 def _normalize_draft_block(
