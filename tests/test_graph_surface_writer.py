@@ -9,6 +9,8 @@ from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphEdge, Grap
 from automatic_lecture_tex.graph_revision_render import graph_state_to_ir
 from automatic_lecture_tex.graph_surface_writer import graph_section_specs, write_graph_surface
 from automatic_lecture_tex.reader_surface import (
+    DraftGeneratedReaderBlock,
+    DraftReaderSurfaceSegment,
     GeneratedReaderBlock,
     PlannedReaderBlock,
     ReaderDiscoursePlan,
@@ -22,6 +24,7 @@ from automatic_lecture_tex.reader_surface import (
     _deterministic_block_fallback,
     _grounding_prompt,
     _materialize_projection,
+    _normalize_draft_block,
     _projection_input,
     _reader_candidate_units,
     _verify_block,
@@ -879,3 +882,133 @@ def test_second_grounding_failure_falls_back_deterministically(tmp_path):
         ).read_text(encoding="utf-8")
     )
     assert payload["deterministic_fallback"] is True
+
+
+
+def test_reader_block_draft_ignores_extra_payload_on_canonical_expression():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    block = PlannedReaderBlock(
+        block_id="b",
+        type=BlockType.PARAGRAPH,
+        purpose="Render exact formula.",
+        node_ids=["definition", "linearity"],
+    )
+    draft = DraftGeneratedReaderBlock(
+        segments=[
+            DraftReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["definition", "linearity"],
+                expression_id="expr::linearity",
+                latex=r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)",
+                text="redundant",
+                display=True,
+            )
+        ]
+    )
+
+    normalized = _normalize_draft_block(projection, block, draft)
+
+    assert normalized is not None
+    assert len(normalized.segments) == 1
+    segment = normalized.segments[0]
+    assert segment.kind == "expression"
+    assert segment.expression_id == "expr::linearity"
+    assert segment.source_node_ids == ["linearity"]
+    assert segment.latex is None
+    assert segment.text is None
+
+
+def test_reader_block_draft_promotes_exact_relation_to_canonical_expression():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    block = PlannedReaderBlock(
+        block_id="b",
+        type=BlockType.PARAGRAPH,
+        purpose="Render exact formula.",
+        node_ids=["definition", "linearity"],
+    )
+    draft = DraftGeneratedReaderBlock(
+        segments=[
+            DraftReaderSurfaceSegment(
+                kind="inline_math",
+                source_node_ids=["linearity"],
+                latex=r" f(\alpha x + \beta y) = \alpha f(x) + \beta f(y) ",
+            )
+        ]
+    )
+
+    normalized = _normalize_draft_block(projection, block, draft)
+
+    assert normalized is not None
+    assert normalized.segments[0].kind == "expression"
+    assert normalized.segments[0].expression_id == "expr::linearity"
+
+
+def test_reader_block_draft_drops_uncanonical_relation_instead_of_inventing_math():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    projection = _materialize_projection(graph, spec, choices)
+    block = PlannedReaderBlock(
+        block_id="b",
+        type=BlockType.PARAGRAPH,
+        purpose="Do not invent relations.",
+        node_ids=["definition", "linearity"],
+    )
+    draft = DraftGeneratedReaderBlock(
+        segments=[
+            DraftReaderSurfaceSegment(
+                kind="inline_math",
+                source_node_ids=["definition"],
+                latex=r"\varphi \in \Phi",
+            )
+        ]
+    )
+
+    normalized = _normalize_draft_block(projection, block, draft)
+
+    assert normalized is None
