@@ -27,6 +27,7 @@ from .graph_revision import (
 )
 from .knowledge import KnowledgeOrchestrator
 from .llm import (
+    StructuredBackendAmbiguousRejectionError,
     StructuredInputTooLargeError,
     StructuredOutputTruncatedError,
     StructuredTaskTooLargeError,
@@ -1052,6 +1053,9 @@ def _process_focus_resilient(
                 except StructuredOutputTruncatedError as retry_exc:
                     split_exc = retry_exc
                     split_kind = "output_overflow"
+                except StructuredBackendAmbiguousRejectionError as retry_exc:
+                    split_exc = retry_exc
+                    split_kind = "ambiguous_backend_rejection"
                 except StructuredTaskTooLargeError as retry_exc:
                     split_exc = retry_exc
             else:
@@ -1060,6 +1064,9 @@ def _process_focus_resilient(
         except StructuredInputTooLargeError as exc:
             split_exc = exc
             split_kind = "input_overflow"
+        except StructuredBackendAmbiguousRejectionError as exc:
+            split_exc = exc
+            split_kind = "ambiguous_backend_rejection"
         except StructuredTaskTooLargeError as exc:
             # Compatibility with lightweight/older adapters that only know the base exception.
             split_exc = exc
@@ -1072,6 +1079,8 @@ def _process_focus_resilient(
                         max_tokens=getattr(split_exc, "max_tokens", max_tokens),
                         raw_chars=getattr(split_exc, "raw_chars", None),
                     ) from split_exc
+                if isinstance(split_exc, StructuredBackendAmbiguousRejectionError):
+                    raise split_exc.backend_error
                 raise StructuredInputTooLargeError(
                     f"{focus_id} still cannot fit after recursive focus splitting"
                 ) from split_exc
@@ -1082,6 +1091,10 @@ def _process_focus_resilient(
             stats["split_focuses"] += 1
             if split_kind == "output_overflow":
                 stats["output_split_focuses"] += 1
+            elif split_kind == "ambiguous_backend_rejection":
+                stats["ambiguous_backend_split_focuses"] = (
+                    int(stats.get("ambiguous_backend_split_focuses", 0)) + 1
+                )
             else:
                 stats["input_split_focuses"] += 1
             logger.warning(

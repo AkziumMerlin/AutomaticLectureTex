@@ -75,6 +75,19 @@ class StructuredInputTooLargeError(StructuredTaskTooLargeError):
     """The request input itself cannot fit and must be semantically split upstream."""
 
 
+class StructuredBackendAmbiguousRejectionError(StructuredTaskTooLargeError):
+    """Backend rejected a split-aware request as either context overflow or invalid parameters.
+
+    This must be handled upstream by semantic splitting while multiple evidence items remain.
+    If the same rejection survives down to a singleton task, callers should re-raise the original
+    backend error instead of masking a genuine invalid-parameter bug as a capacity failure.
+    """
+
+    def __init__(self, message: str, *, backend_error: Exception) -> None:
+        super().__init__(message)
+        self.backend_error = backend_error
+
+
 class StructuredOutputTruncatedError(StructuredTaskTooLargeError):
     """The model exhausted its completion budget before producing a complete structured object."""
 
