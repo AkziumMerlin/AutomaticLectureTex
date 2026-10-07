@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import json
 import pytest
 
 from automatic_lecture_tex.graph_revision import EvidenceRecord, GraphEdge, GraphNode, GraphState
