@@ -726,7 +726,7 @@ def test_grounding_prompt_includes_canonical_expression_latex():
         output_language="ru",
     )
 
-    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in prompt
+    assert r'"latex":"f(\\alpha x+\\beta y)=\\alpha f(x)+\\beta f(y)"' in prompt
     assert '"expressions":[{"id":"expr::linearity","latex":' in prompt
     assert "do not claim that a formula is absent" in prompt
 
