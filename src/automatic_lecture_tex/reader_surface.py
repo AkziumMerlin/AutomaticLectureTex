@@ -24,7 +24,7 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-READER_SURFACE_PIPELINE_VERSION = 3
+READER_SURFACE_PIPELINE_VERSION = 4
 
 _PROVENANCE_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск\w*|кадр\w*|окн\w*|лектор\w*|видео|распознан\w*|"
@@ -706,6 +706,7 @@ def _grounding_prompt(
     output_language: str,
 ) -> str:
     fact_by_id = {fact.node_id: fact for fact in projection.facts}
+    expression_by_id = {item.id: item for item in projection.expressions}
     payload = []
     for index, segment in enumerate(generated.segments):
         payload.append(
@@ -717,7 +718,13 @@ def _grounding_prompt(
                         "node_id": node_id,
                         "title": fact_by_id[node_id].title,
                         "statement": fact_by_id[node_id].statement,
-                        "expression_ids": list(fact_by_id[node_id].expression_ids),
+                        "expressions": [
+                            {
+                                "id": expression_id,
+                                "latex": expression_by_id[expression_id].latex,
+                            }
+                            for expression_id in fact_by_id[node_id].expression_ids
+                        ],
                     }
                     for node_id in segment.source_node_ids
                 ],
@@ -732,10 +739,14 @@ SEGMENTS WITH THEIR CITED READER FACTS:
 {json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}
 
 For each text or inline_math segment, decide whether it states anything mathematically stronger,
-more specific, or different from its cited reader facts. Flag a segment if it introduces an
-uncited theorem name, identifies an unresolved object, changes a space/domain/codomain, asserts a
-new equality/implication/property in prose, or otherwise adds mathematical content not entailed by
-the cited facts. Exact expression segments are host-owned and need no mathematical reinterpretation.
+more specific, or different from its cited reader facts. A cited fact includes BOTH its exact prose
+and every supplied host-owned canonical expression; prose may faithfully verbalize those canonical
+expressions. Flag a segment only when it goes beyond that combined support. In particular, do not
+claim that a formula is absent when it appears in cited_facts.expressions. Flag a segment if it
+introduces an uncited theorem name, identifies an unresolved object, changes a space/domain/codomain,
+asserts a new equality/implication/property not present in the cited prose or canonical expressions,
+or otherwise adds unsupported mathematical content. Exact expression segments are host-owned and
+need no mathematical reinterpretation.
 
 Do not rewrite the block. Return only issue indices and concise reasons. If every segment is
 grounded, return an empty issues list. Reasons use language code {output_language}.
@@ -779,6 +790,82 @@ def _review_grounding(
             f"grounding review malformed for {block.block_id}: " + "; ".join(errors)
         )
     return review
+
+
+
+def _fallback_fact_label(kind: str) -> str:
+    labels = {
+        "definition": "Определение.",
+        "theorem": "Теорема.",
+        "lemma": "Лемма.",
+        "proposition": "Предложение.",
+        "corollary": "Следствие.",
+        "proof": "Доказательство.",
+        "proof_step": "Шаг доказательства.",
+        "example": "Пример.",
+        "remark": "Замечание.",
+        "equation": "Формула.",
+        "claim": "Утверждение.",
+        "notation": "Обозначение.",
+    }
+    return labels.get(kind.strip().lower(), "Утверждение.")
+
+
+def _deterministic_block_fallback(
+    projection: ReaderSectionProjection,
+    block: PlannedReaderBlock,
+) -> GeneratedReaderBlock:
+    """Fail closed to exact reader facts and canonical expressions after writer repair fails."""
+
+    fact_by_id = {fact.node_id: fact for fact in projection.facts}
+    segments: list[ReaderSurfaceSegment] = []
+
+    for node_id in block.node_ids:
+        fact = fact_by_id[node_id]
+        added_for_node = False
+
+        candidates = []
+        if fact.statement.strip():
+            candidates.append(fact.statement.strip())
+        if fact.title.strip() and fact.title.strip() not in candidates:
+            candidates.append(fact.title.strip())
+
+        for candidate in candidates:
+            try:
+                segment = ReaderSurfaceSegment(
+                    kind="text",
+                    source_node_ids=[node_id],
+                    text=candidate,
+                )
+            except ValueError:
+                continue
+            segments.append(segment)
+            added_for_node = True
+            break
+
+        for expression_id in fact.expression_ids:
+            segments.append(
+                ReaderSurfaceSegment(
+                    kind="expression",
+                    source_node_ids=[node_id],
+                    expression_id=expression_id,
+                    display=True,
+                )
+            )
+            added_for_node = True
+
+        if not added_for_node:
+            # Preserve coverage without inventing mathematical content. This is intentionally
+            # content-neutral and is only reachable after both writer attempts failed grounding.
+            segments.append(
+                ReaderSurfaceSegment(
+                    kind="text",
+                    source_node_ids=[node_id],
+                    text=_fallback_fact_label(fact.kind),
+                )
+            )
+
+    return GeneratedReaderBlock(segments=segments)
 
 
 def _render_generated_block(
@@ -1062,8 +1149,24 @@ def _write_block(
                     for issue in review.issues
                 )
 
+    used_deterministic_fallback = False
     if errors:
-        raise RuntimeError(f"block writer failed for {block.block_id}: " + "; ".join(errors))
+        logger.warning(
+            "block writer still failed grounding for %s after repair; "
+            "falling back to exact reader facts and canonical expressions: %s",
+            block.block_id,
+            "; ".join(errors),
+        )
+        generated = _deterministic_block_fallback(projection, block)
+        errors = _verify_block(projection=projection, block=block, generated=generated)
+        if errors:
+            raise RuntimeError(
+                f"deterministic block fallback failed for {block.block_id}: "
+                + "; ".join(errors)
+            )
+        review = ReaderGroundingReview(issues=[])
+        used_deterministic_fallback = True
+
     atomic_json_dump(
         path,
         {
@@ -1072,6 +1175,7 @@ def _write_block(
             "grounding_review": (
                 review.model_dump(mode="json") if review is not None else {"issues": []}
             ),
+            "deterministic_fallback": used_deterministic_fallback,
         },
     )
     return generated
