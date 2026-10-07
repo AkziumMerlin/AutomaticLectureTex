@@ -27,6 +27,7 @@ from .graph_revision import (
 )
 from .knowledge import KnowledgeOrchestrator
 from .llm import (
+    StructuredBackendAmbiguousRejectionError,
     StructuredInputTooLargeError,
     StructuredOutputTruncatedError,
     StructuredTaskTooLargeError,
@@ -1052,6 +1053,9 @@ def _process_focus_resilient(
                 except StructuredOutputTruncatedError as retry_exc:
                     split_exc = retry_exc
                     split_kind = "output_overflow"
+                except StructuredBackendAmbiguousRejectionError as retry_exc:
+                    split_exc = retry_exc
+                    split_kind = "ambiguous_backend_rejection"
                 except StructuredTaskTooLargeError as retry_exc:
                     split_exc = retry_exc
             else:
