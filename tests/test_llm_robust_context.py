@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from automatic_lecture_tex.config import LLMConfig
 from automatic_lecture_tex.llm import (
+    StructuredBackendAmbiguousRejectionError,
     StructuredInputTooLargeError,
     StructuredOutputTruncatedError,
 )
@@ -147,3 +148,65 @@ def test_split_aware_structured_call_reports_output_truncation_separately() -> N
     assert caught.value.max_tokens == 16384
     assert caught.value.raw_chars == 0
     assert completions.max_tokens == [16384]
+
+
+
+def test_split_aware_structured_call_delegates_ambiguous_context_or_params_400(
+    monkeypatch,
+) -> None:
+    client, completions = _client(
+        monkeypatch,
+        "Provider returned error: invalid_request_error: The request was rejected. "
+        "Possible causes: input exceeds the model's maximum context length, "
+        "or the request contains invalid parameters.",
+    )
+
+    with pytest.raises(StructuredBackendAmbiguousRejectionError) as caught:
+        client._structured(
+            "prompt",
+            _Payload,
+            operation="graph_revision_proposal",
+            max_tokens=32768,
+            split_oversized_task=True,
+        )
+
+    assert "possible context overflow or invalid parameters" in str(caught.value)
+    assert isinstance(caught.value.backend_error, _FakeBadRequestError)
+    assert completions.max_tokens == [32768]
+
+
+def test_non_split_call_does_not_reclassify_ambiguous_provider_400(monkeypatch) -> None:
+    client, completions = _client(
+        monkeypatch,
+        "The request was rejected. Possible causes: input exceeds the model's maximum "
+        "context length, or the request contains invalid parameters.",
+    )
+
+    with pytest.raises(_FakeBadRequestError):
+        client._structured(
+            "prompt",
+            _Payload,
+            operation="ordinary_structured",
+            max_tokens=32768,
+            split_oversized_task=False,
+        )
+
+    assert completions.max_tokens == [32768]
+
+
+def test_plain_invalid_parameters_400_is_not_treated_as_context_overflow(monkeypatch) -> None:
+    client, completions = _client(
+        monkeypatch,
+        "invalid_request_error: request contains invalid parameters",
+    )
+
+    with pytest.raises(_FakeBadRequestError):
+        client._structured(
+            "prompt",
+            _Payload,
+            operation="graph_revision_proposal",
+            max_tokens=32768,
+            split_oversized_task=True,
+        )
+
+    assert completions.max_tokens == [32768]
