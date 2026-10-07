@@ -18,6 +18,8 @@ from automatic_lecture_tex.reader_surface import (
     ReaderSurfaceSegment,
     _candidate_units,
     _canonicalize_plan,
+    _deterministic_block_fallback,
+    _grounding_prompt,
     _materialize_projection,
     _projection_input,
     _reader_candidate_units,
@@ -666,3 +668,213 @@ def test_materialization_indices_are_against_prefiltered_units():
 
     assert fact.statement == "Функционал называется комплексно-линейным."
     assert "доске" not in fact.statement
+
+
+
+def test_grounding_prompt_includes_canonical_expression_latex():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    semantic_index = _reader_candidate_units(definition).index(
+        "Функционал называется комплексно-линейным."
+    )
+    projection = _materialize_projection(
+        graph,
+        spec,
+        ReaderProjectionChoices(
+            choices=[
+                ReaderProjectionChoice(
+                    node_id="definition",
+                    disposition="render",
+                    selected_unit_indices=[semantic_index],
+                ),
+                ReaderProjectionChoice(
+                    node_id="linearity",
+                    disposition="render",
+                    selected_unit_indices=[0],
+                ),
+            ]
+        ),
+    )
+    block = PlannedReaderBlock(
+        block_id="definition",
+        type=BlockType.DEFINITION,
+        purpose="Дать определение.",
+        node_ids=["definition", "linearity"],
+    )
+    generated = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["linearity"],
+                text="Выполняется условие комплексной линейности.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+
+    prompt = _grounding_prompt(
+        projection=projection,
+        block=block,
+        generated=generated,
+        output_language="ru",
+    )
+
+    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in prompt
+    assert '"expressions":[{"id":"expr::linearity","latex":' in prompt
+    assert "do not claim that a formula is absent" in prompt
+
+
+def test_deterministic_block_fallback_uses_exact_facts_and_expressions():
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    semantic_index = _reader_candidate_units(definition).index(
+        "Функционал называется комплексно-линейным."
+    )
+    projection = _materialize_projection(
+        graph,
+        spec,
+        ReaderProjectionChoices(
+            choices=[
+                ReaderProjectionChoice(
+                    node_id="definition",
+                    disposition="render",
+                    selected_unit_indices=[semantic_index],
+                ),
+                ReaderProjectionChoice(
+                    node_id="linearity",
+                    disposition="render",
+                    selected_unit_indices=[0],
+                ),
+            ]
+        ),
+    )
+    block = PlannedReaderBlock(
+        block_id="definition",
+        type=BlockType.DEFINITION,
+        purpose="Дать определение.",
+        node_ids=["definition", "linearity"],
+    )
+
+    generated = _deterministic_block_fallback(projection, block)
+
+    assert _verify_block(projection=projection, block=block, generated=generated) == []
+    assert any(
+        segment.kind == "text"
+        and segment.text == "Функционал называется комплексно-линейным."
+        for segment in generated.segments
+    )
+    assert any(
+        segment.kind == "expression"
+        and segment.expression_id == "expr::linearity"
+        for segment in generated.segments
+    )
+
+
+def test_second_grounding_failure_falls_back_deterministically(tmp_path):
+    graph = _definition_graph()
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    definition = next(node for node in spec.nodes if node.id == "definition")
+    semantic_index = _reader_candidate_units(definition).index(
+        "Функционал называется комплексно-линейным."
+    )
+    projection_choice = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="definition",
+                disposition="render",
+                selected_unit_indices=[semantic_index],
+            ),
+            ReaderProjectionChoice(
+                node_id="linearity",
+                disposition="render",
+                selected_unit_indices=[0],
+            ),
+        ]
+    )
+    plan = ReaderDiscoursePlan(
+        blocks=[
+            PlannedReaderBlock(
+                block_id="definition",
+                type=BlockType.DEFINITION,
+                purpose="Дать определение.",
+                node_ids=["definition", "linearity"],
+            )
+        ]
+    )
+    bad = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Добавляется неподдержанное утверждение.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    repaired_but_bad = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["definition"],
+                text="Снова добавляется неподдержанное утверждение.",
+            ),
+            ReaderSurfaceSegment(
+                kind="expression",
+                source_node_ids=["linearity"],
+                expression_id="expr::linearity",
+                display=True,
+            ),
+        ]
+    )
+    orchestrator = StubOrchestrator(
+        [
+            projection_choice,
+            plan,
+            bad,
+            ReaderGroundingReview(
+                issues=[ReaderGroundingIssue(segment_index=0, reason="unsupported")]
+            ),
+            repaired_but_bad,
+            ReaderGroundingReview(
+                issues=[ReaderGroundingIssue(segment_index=0, reason="still unsupported")]
+            ),
+        ]
+    )
+    metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
+
+    ir = write_graph_surface(
+        orchestrator,
+        state=graph,
+        lecture_id="l1",
+        lecture_title="Lecture",
+        fallback_ir=metadata_ir,
+        work=tmp_path,
+        llm_config={"model": "fake"},
+        force=True,
+    )
+
+    rendered = ir.chunks[0].blocks[0].latex
+    assert "неподдержанное" not in rendered
+    assert "Функционал называется комплексно-линейным." in rendered
+    assert r"f(\alpha x+\beta y)=\alpha f(x)+\beta f(y)" in rendered
+    payload = json.loads(
+        (
+            tmp_path
+            / "graph_surface_writer"
+            / "section_000"
+            / "block_000.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["deterministic_fallback"] is True
