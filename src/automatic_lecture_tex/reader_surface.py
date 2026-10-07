@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .generated_notes import GeneratedBlockType
 from .graph_revision import GraphNode, GraphState
@@ -24,7 +24,7 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-READER_SURFACE_PIPELINE_VERSION = 4
+READER_SURFACE_PIPELINE_VERSION = 5
 
 _PROVENANCE_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск\w*|кадр\w*|окн\w*|лектор\w*|видео|распознан\w*|"
@@ -147,6 +147,25 @@ class ReaderSurfaceSegment(BaseModel):
         if not self.expression_id or self.text is not None or self.latex is not None:
             raise ValueError("expression segment requires only expression_id")
         return self
+
+
+class DraftReaderSurfaceSegment(BaseModel):
+    """Model-facing segment schema; semantic restrictions are enforced host-side."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["text", "inline_math", "expression"]
+    source_node_ids: list[str] = Field(min_length=1)
+    text: str | None = None
+    latex: str | None = None
+    expression_id: str | None = None
+    display: bool = False
+
+
+class DraftGeneratedReaderBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segments: list[DraftReaderSurfaceSegment] = Field(min_length=1)
 
 
 class GeneratedReaderBlock(BaseModel):
@@ -643,17 +662,114 @@ You are not allowed to introduce new mathematical claims.
 Segment contract:
 - text: ordinary prose only. No LaTeX commands, dollar signs, or Unicode math glyphs. Each text
   segment must cite the source_node_ids whose reader-safe facts it directly paraphrases.
-- inline_math: a short mathematical atom such as X, f, X^*, T_\\Phi, x_n, or \\|f\\|. It may not
-  contain an equality, inequality, membership, map, implication, or any other relation. Cite the
-  source node(s) that establish the notation.
+- inline_math: a short mathematical atom such as X, f, X^*, T_\\Phi, x_n, or \\|f\\|. It MUST NOT
+  contain an equality, inequality, membership, map, implication, quantified statement, absolute-
+  value relation, or any other relation. If a supplied canonical expression states the relation,
+  use an expression segment with its exact expression id. If no supplied expression states it,
+  OMIT the relation rather than inventing one.
 - expression: reference one exact host-owned expression id from the supplied facts. Do not retype
-  the formula. Set display=true for substantial formulas and false only when the exact canonical
-  expression naturally belongs inline.
+  the formula in latex/text fields. Set display=true for substantial formulas and false only when
+  the exact canonical expression naturally belongs inline.
 
 Use the planned block type/title/purpose as structure, but return only the ordered segments.
 Do not mention reconstruction, evidence, a board, OCR/ASR, confidence, or provenance.
 Write prose in language code {output_language}. Return strict structured JSON only.
 """
+
+
+def _latex_key(value: str) -> str:
+    return re.sub(r"\s+", "", value.strip())
+
+
+def _normalize_draft_block(
+    projection: ReaderSectionProjection,
+    block: PlannedReaderBlock,
+    draft: DraftGeneratedReaderBlock,
+) -> GeneratedReaderBlock | None:
+    """Convert permissive model output into the strict host-owned segment contract.
+
+    Unsafe or unsupported segments are dropped rather than repaired semantically. Relation-bearing
+    inline math is promoted to a canonical expression only on an exact normalized LaTeX match.
+    """
+
+    allowed_nodes = set(block.node_ids)
+    expression_by_id = {
+        expression.id: expression
+        for expression in projection.expressions
+        if expression.source_node_id in allowed_nodes
+    }
+    expression_by_latex: dict[str, list[ReaderExpression]] = {}
+    for expression in expression_by_id.values():
+        expression_by_latex.setdefault(_latex_key(expression.latex), []).append(expression)
+
+    segments: list[ReaderSurfaceSegment] = []
+    for item in draft.segments:
+        source_nodes = list(
+            dict.fromkeys(node_id for node_id in item.source_node_ids if node_id in allowed_nodes)
+        )
+        if item.kind == "expression":
+            expression = expression_by_id.get((item.expression_id or "").strip())
+            if expression is None:
+                continue
+            segments.append(
+                ReaderSurfaceSegment(
+                    kind="expression",
+                    source_node_ids=[expression.source_node_id],
+                    expression_id=expression.id,
+                    display=bool(item.display),
+                )
+            )
+            continue
+
+        if not source_nodes:
+            continue
+
+        if item.kind == "inline_math":
+            latex = (item.latex or "").strip()
+            if not latex:
+                continue
+            if _INLINE_RELATION.search(latex):
+                matches = expression_by_latex.get(_latex_key(latex), [])
+                if len(matches) == 1:
+                    expression = matches[0]
+                    segments.append(
+                        ReaderSurfaceSegment(
+                            kind="expression",
+                            source_node_ids=[expression.source_node_id],
+                            expression_id=expression.id,
+                            display=bool(item.display),
+                        )
+                    )
+                continue
+            try:
+                segments.append(
+                    ReaderSurfaceSegment(
+                        kind="inline_math",
+                        source_node_ids=source_nodes,
+                        latex=latex,
+                    )
+                )
+            except ValueError:
+                continue
+            continue
+
+        text = (item.text or "").strip()
+        if not text:
+            continue
+        try:
+            segments.append(
+                ReaderSurfaceSegment(
+                    kind="text",
+                    source_node_ids=source_nodes,
+                    text=text,
+                )
+            )
+        except ValueError:
+            continue
+
+    if not segments:
+        return None
+    return GeneratedReaderBlock(segments=segments)
 
 
 def _verify_block(
@@ -1098,43 +1214,25 @@ def _write_block(
     generated = None if force else _load_cached_model(
         path, fingerprint, GeneratedReaderBlock, "generated"
     )
-    if generated is None:
-        generated = orchestrator._structured(
-            prompt,
-            GeneratedReaderBlock,
-            operation="graph_block_write",
-            **_call_kwargs(orchestrator),
-        )
-
-    errors = _verify_block(projection=projection, block=block, generated=generated)
+    errors: list[str] = []
     review = None
-    if not errors:
-        review = _review_grounding(
-            orchestrator,
-            projection=projection,
-            block=block,
-            generated=generated,
-        )
-        if review.issues:
-            errors.extend(
-                f"unsupported segment {issue.segment_index}: {issue.reason}"
-                for issue in review.issues
-            )
 
-    if errors:
-        repair = (
-            prompt
-            + "\n\nThe previous block violated the structural/grounding contract:\n- "
-            + "\n- ".join(errors)
-            + "\nPrevious JSON:\n"
-            + generated.model_dump_json()
-        )
-        generated = orchestrator._structured(
-            repair,
-            GeneratedReaderBlock,
-            operation="graph_block_write_repair",
-            **_call_kwargs(orchestrator),
-        )
+    if generated is None:
+        try:
+            draft = orchestrator._structured(
+                prompt,
+                DraftGeneratedReaderBlock,
+                operation="graph_block_write",
+                **_call_kwargs(orchestrator),
+            )
+        except (ValidationError, json.JSONDecodeError) as exc:
+            errors.append(f"writer response could not be parsed after retries: {exc}")
+        else:
+            generated = _normalize_draft_block(projection, block, draft)
+            if generated is None:
+                errors.append("writer produced no host-safe segments after normalization")
+
+    if generated is not None and not errors:
         errors = _verify_block(projection=projection, block=block, generated=generated)
         if not errors:
             review = _review_grounding(
@@ -1148,6 +1246,49 @@ def _write_block(
                     f"unsupported segment {issue.segment_index}: {issue.reason}"
                     for issue in review.issues
                 )
+
+    if errors and generated is not None:
+        repair = (
+            prompt
+            + "\n\nThe previous block violated the structural/grounding contract:\n- "
+            + "\n- ".join(errors)
+            + "\nPrevious host-normalized JSON:\n"
+            + generated.model_dump_json()
+            + "\nDo not reintroduce any relation that is absent from the supplied canonical "
+            "expressions."
+        )
+        try:
+            repair_draft = orchestrator._structured(
+                repair,
+                DraftGeneratedReaderBlock,
+                operation="graph_block_write_repair",
+                **_call_kwargs(orchestrator),
+            )
+        except (ValidationError, json.JSONDecodeError) as exc:
+            errors = [f"repair response could not be parsed after retries: {exc}"]
+        else:
+            repaired = _normalize_draft_block(projection, block, repair_draft)
+            if repaired is None:
+                errors = ["repair produced no host-safe segments after normalization"]
+            else:
+                generated = repaired
+                errors = _verify_block(
+                    projection=projection,
+                    block=block,
+                    generated=generated,
+                )
+                if not errors:
+                    review = _review_grounding(
+                        orchestrator,
+                        projection=projection,
+                        block=block,
+                        generated=generated,
+                    )
+                    if review.issues:
+                        errors.extend(
+                            f"unsupported segment {issue.segment_index}: {issue.reason}"
+                            for issue in review.issues
+                        )
 
     used_deterministic_fallback = False
     if errors:
