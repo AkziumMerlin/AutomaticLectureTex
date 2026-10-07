@@ -24,7 +24,7 @@ from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-READER_SURFACE_PIPELINE_VERSION = 4
+READER_SURFACE_PIPELINE_VERSION = 5
 
 _PROVENANCE_LANGUAGE = re.compile(
     r"\b(?:ASR|OCR|доск\w*|кадр\w*|окн\w*|лектор\w*|видео|распознан\w*|"
@@ -147,6 +147,25 @@ class ReaderSurfaceSegment(BaseModel):
         if not self.expression_id or self.text is not None or self.latex is not None:
             raise ValueError("expression segment requires only expression_id")
         return self
+
+
+class DraftReaderSurfaceSegment(BaseModel):
+    """Model-facing segment schema; semantic restrictions are enforced host-side."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["text", "inline_math", "expression"]
+    source_node_ids: list[str] = Field(min_length=1)
+    text: str | None = None
+    latex: str | None = None
+    expression_id: str | None = None
+    display: bool = False
+
+
+class DraftGeneratedReaderBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segments: list[DraftReaderSurfaceSegment] = Field(min_length=1)
 
 
 class GeneratedReaderBlock(BaseModel):
@@ -654,6 +673,101 @@ Use the planned block type/title/purpose as structure, but return only the order
 Do not mention reconstruction, evidence, a board, OCR/ASR, confidence, or provenance.
 Write prose in language code {output_language}. Return strict structured JSON only.
 """
+
+
+def _latex_key(value: str) -> str:
+    return re.sub(r"\\s+", "", value.strip())
+
+
+def _normalize_draft_block(
+    projection: ReaderSectionProjection,
+    block: PlannedReaderBlock,
+    draft: DraftGeneratedReaderBlock,
+) -> GeneratedReaderBlock | None:
+    """Convert permissive model output into the strict host-owned segment contract.
+
+    Unsafe or unsupported segments are dropped rather than repaired semantically. Relation-bearing
+    inline math is promoted to a canonical expression only on an exact normalized LaTeX match.
+    """
+
+    allowed_nodes = set(block.node_ids)
+    expression_by_id = {
+        expression.id: expression
+        for expression in projection.expressions
+        if expression.source_node_id in allowed_nodes
+    }
+    expression_by_latex: dict[str, list[ReaderExpression]] = {}
+    for expression in expression_by_id.values():
+        expression_by_latex.setdefault(_latex_key(expression.latex), []).append(expression)
+
+    segments: list[ReaderSurfaceSegment] = []
+    for item in draft.segments:
+        source_nodes = list(
+            dict.fromkeys(node_id for node_id in item.source_node_ids if node_id in allowed_nodes)
+        )
+        if item.kind == "expression":
+            expression = expression_by_id.get((item.expression_id or "").strip())
+            if expression is None:
+                continue
+            segments.append(
+                ReaderSurfaceSegment(
+                    kind="expression",
+                    source_node_ids=[expression.source_node_id],
+                    expression_id=expression.id,
+                    display=bool(item.display),
+                )
+            )
+            continue
+
+        if not source_nodes:
+            continue
+
+        if item.kind == "inline_math":
+            latex = (item.latex or "").strip()
+            if not latex:
+                continue
+            if _INLINE_RELATION.search(latex):
+                matches = expression_by_latex.get(_latex_key(latex), [])
+                if len(matches) == 1:
+                    expression = matches[0]
+                    segments.append(
+                        ReaderSurfaceSegment(
+                            kind="expression",
+                            source_node_ids=[expression.source_node_id],
+                            expression_id=expression.id,
+                            display=bool(item.display),
+                        )
+                    )
+                continue
+            try:
+                segments.append(
+                    ReaderSurfaceSegment(
+                        kind="inline_math",
+                        source_node_ids=source_nodes,
+                        latex=latex,
+                    )
+                )
+            except ValueError:
+                continue
+            continue
+
+        text = (item.text or "").strip()
+        if not text:
+            continue
+        try:
+            segments.append(
+                ReaderSurfaceSegment(
+                    kind="text",
+                    source_node_ids=source_nodes,
+                    text=text,
+                )
+            )
+        except ValueError:
+            continue
+
+    if not segments:
+        return None
+    return GeneratedReaderBlock(segments=segments)
 
 
 def _verify_block(
