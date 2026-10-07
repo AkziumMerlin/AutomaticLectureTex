@@ -1214,43 +1214,25 @@ def _write_block(
     generated = None if force else _load_cached_model(
         path, fingerprint, GeneratedReaderBlock, "generated"
     )
-    if generated is None:
-        generated = orchestrator._structured(
-            prompt,
-            GeneratedReaderBlock,
-            operation="graph_block_write",
-            **_call_kwargs(orchestrator),
-        )
-
-    errors = _verify_block(projection=projection, block=block, generated=generated)
+    errors: list[str] = []
     review = None
-    if not errors:
-        review = _review_grounding(
-            orchestrator,
-            projection=projection,
-            block=block,
-            generated=generated,
-        )
-        if review.issues:
-            errors.extend(
-                f"unsupported segment {issue.segment_index}: {issue.reason}"
-                for issue in review.issues
-            )
 
-    if errors:
-        repair = (
-            prompt
-            + "\n\nThe previous block violated the structural/grounding contract:\n- "
-            + "\n- ".join(errors)
-            + "\nPrevious JSON:\n"
-            + generated.model_dump_json()
-        )
-        generated = orchestrator._structured(
-            repair,
-            GeneratedReaderBlock,
-            operation="graph_block_write_repair",
-            **_call_kwargs(orchestrator),
-        )
+    if generated is None:
+        try:
+            draft = orchestrator._structured(
+                prompt,
+                DraftGeneratedReaderBlock,
+                operation="graph_block_write",
+                **_call_kwargs(orchestrator),
+            )
+        except (ValidationError, json.JSONDecodeError) as exc:
+            errors.append(f"writer response could not be parsed after retries: {exc}")
+        else:
+            generated = _normalize_draft_block(projection, block, draft)
+            if generated is None:
+                errors.append("writer produced no host-safe segments after normalization")
+
+    if generated is not None and not errors:
         errors = _verify_block(projection=projection, block=block, generated=generated)
         if not errors:
             review = _review_grounding(
@@ -1264,6 +1246,49 @@ def _write_block(
                     f"unsupported segment {issue.segment_index}: {issue.reason}"
                     for issue in review.issues
                 )
+
+    if errors and generated is not None:
+        repair = (
+            prompt
+            + "\n\nThe previous block violated the structural/grounding contract:\n- "
+            + "\n- ".join(errors)
+            + "\nPrevious host-normalized JSON:\n"
+            + generated.model_dump_json()
+            + "\nDo not reintroduce any relation that is absent from the supplied canonical "
+            "expressions."
+        )
+        try:
+            repair_draft = orchestrator._structured(
+                repair,
+                DraftGeneratedReaderBlock,
+                operation="graph_block_write_repair",
+                **_call_kwargs(orchestrator),
+            )
+        except (ValidationError, json.JSONDecodeError) as exc:
+            errors = [f"repair response could not be parsed after retries: {exc}"]
+        else:
+            repaired = _normalize_draft_block(projection, block, repair_draft)
+            if repaired is None:
+                errors = ["repair produced no host-safe segments after normalization"]
+            else:
+                generated = repaired
+                errors = _verify_block(
+                    projection=projection,
+                    block=block,
+                    generated=generated,
+                )
+                if not errors:
+                    review = _review_grounding(
+                        orchestrator,
+                        projection=projection,
+                        block=block,
+                        generated=generated,
+                    )
+                    if review.issues:
+                        errors.extend(
+                            f"unsupported segment {issue.segment_index}: {issue.reason}"
+                            for issue in review.issues
+                        )
 
     used_deterministic_fallback = False
     if errors:
