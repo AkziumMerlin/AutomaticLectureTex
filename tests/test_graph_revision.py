@@ -756,3 +756,128 @@ def test_missing_canonical_merge_source_remains_error() -> None:
                 ],
             ),
         )
+
+
+def test_replace_node_hoists_canonical_fields_from_metadata_update() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="weak convergence")},
+        nodes={
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                title="Overstated criterion",
+                text="Coordinate convergence is equivalent to weak convergence.",
+                latex=r"x_m \\rightharpoonup 0 \\iff (x_m,e_n)\\to0",
+                evidence_ids=["e1"],
+                metadata={"source": "revision"},
+            )
+        },
+    )
+
+    patch = GraphPatch.model_validate(
+        {
+            "id": "repair-l2-criterion",
+            "description": "Model emitted a full replacement inside metadata_update.",
+            "operations": [
+                {
+                    "op": "replace_node",
+                    "node_id": "claim",
+                    "title": None,
+                    "text": None,
+                    "latex": None,
+                    "metadata_update": {
+                        "title": "Weak convergence criterion with boundedness",
+                        "text": "The converse requires sup_m ||x_m|| < infinity.",
+                        "latex": (
+                            r"x_m \\rightharpoonup 0 \\Rightarrow (x_m,e_n)\\to0; "
+                            r"\\sup_m\\|x_m\\|<\\infty"
+                        ),
+                        "aliases": ["bounded coordinate criterion"],
+                        "review_note": "mathematical correction",
+                    },
+                }
+            ],
+        }
+    )
+
+    operation = patch.operations[0]
+    assert isinstance(operation, ReplaceNodeOp)
+    assert operation.text == "The converse requires sup_m ||x_m|| < infinity."
+    assert operation.aliases == ["bounded coordinate criterion"]
+    assert operation.metadata_update == {"review_note": "mathematical correction"}
+
+    revised = apply_patch(state, patch)
+    node = revised.nodes["claim"]
+    assert node.title == "Weak convergence criterion with boundedness"
+    assert node.text == "The converse requires sup_m ||x_m|| < infinity."
+    assert r"\\sup_m\\|x_m\\|<\\infty" in (node.latex or "")
+    assert node.aliases == ["bounded coordinate criterion"]
+    assert node.metadata == {
+        "source": "revision",
+        "review_note": "mathematical correction",
+    }
+    assert "text" not in node.metadata
+    assert "latex" not in node.metadata
+
+
+def test_merge_node_hoists_canonical_fields_from_metadata_update() -> None:
+    state = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1", text="old canonical"),
+            "e2": EvidenceRecord(id="e2", text="new observation"),
+        },
+        nodes={
+            "canonical": GraphNode(
+                id="canonical",
+                kind="claim",
+                title="Old title",
+                text="Old text",
+                evidence_ids=["e1"],
+            ),
+            "obs::e2": GraphNode(
+                id="obs::e2",
+                kind="provisional_claim",
+                text="new observation",
+                evidence_ids=["e2"],
+            ),
+        },
+    )
+
+    patch = GraphPatch.model_validate(
+        {
+            "id": "merge-and-rewrite",
+            "description": "Canonicalize while absorbing one observation.",
+            "operations": [
+                {
+                    "op": "merge_nodes",
+                    "node_ids": ["obs::e2"],
+                    "into_id": "canonical",
+                    "metadata_update": {
+                        "kind": "theorem",
+                        "title": "Correct title",
+                        "text": "Correct canonical text.",
+                        "latex": r"f(x)=0",
+                        "aliases": ["canonical alias"],
+                        "editor_note": "keep as metadata",
+                    },
+                }
+            ],
+        }
+    )
+
+    operation = patch.operations[0]
+    assert isinstance(operation, MergeNodesOp)
+    assert operation.kind == "theorem"
+    assert operation.text == "Correct canonical text."
+    assert operation.metadata_update == {"editor_note": "keep as metadata"}
+
+    revised = apply_patch(state, patch)
+    node = revised.nodes["canonical"]
+    assert node.kind == "theorem"
+    assert node.title == "Correct title"
+    assert node.text == "Correct canonical text."
+    assert node.latex == r"f(x)=0"
+    assert set(node.evidence_ids) == {"e1", "e2"}
+    assert "canonical alias" in node.aliases
+    assert node.metadata["editor_note"] == "keep as metadata"
+    assert "text" not in node.metadata
