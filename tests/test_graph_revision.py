@@ -923,3 +923,58 @@ def test_replace_node_can_explicitly_clear_nullable_canonical_fields() -> None:
     revised = apply_patch(state, patch)
     assert revised.nodes["claim"].latex is None
     assert revised.nodes["claim"].alternative_group is None
+
+
+def test_violation_repairs_legacy_model_field_names() -> None:
+    violation = Violation.model_validate(
+        {
+            "id": "diag::notation",
+            "kind": "notation_violation",
+            "description": "Canonical notation disagrees with the evidence.",
+            "node_ids": ["n1"],
+        }
+    )
+
+    assert violation.category == "math"
+    assert violation.severity == 1
+    assert violation.message == "Canonical notation disagrees with the evidence."
+    assert violation.related_nodes == ["n1"]
+
+
+def test_graph_patch_repairs_known_operation_aliases_and_null_collections() -> None:
+    patch = GraphPatch.model_validate(
+        {
+            "id": "schema-drift",
+            "description": "Repair common model-facing aliases.",
+            "rationale": None,
+            "incompatible_with": None,
+            "operations": [
+                {
+                    "op": "replace_node",
+                    "id": "definition::neighborhood_in_tau_Phi",
+                    "text": "Canonical replacement.",
+                },
+                {
+                    "op": "suppress_node",
+                    "id": "obs::obs_window_0026_003",
+                },
+                {
+                    "op": "resolve_violation",
+                    "id": "diag::old",
+                },
+            ],
+        }
+    )
+
+    assert patch.rationale == []
+    assert patch.incompatible_with == []
+    replace = patch.operations[0]
+    suppress = patch.operations[1]
+    resolve = patch.operations[2]
+    assert isinstance(replace, ReplaceNodeOp)
+    assert replace.node_id == "definition::neighborhood_in_tau_Phi"
+    assert isinstance(suppress, SuppressNodeOp)
+    assert suppress.node_id == "obs::obs_window_0026_003"
+    assert suppress.reason == "model-requested suppression"
+    assert isinstance(resolve, ResolveViolationOp)
+    assert resolve.violation_id == "diag::old"
