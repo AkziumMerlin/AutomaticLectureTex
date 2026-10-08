@@ -51,6 +51,52 @@ class GraphEdge(BaseModel):
 class Violation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_model_payload(cls, value: Any) -> Any:
+        """Normalize a narrow legacy/model-facing diagnostic schema before strict validation."""
+
+        if not isinstance(value, dict):
+            return value
+        repaired = dict(value)
+
+        legacy_kind = repaired.pop("kind", None)
+        if "category" not in repaired and isinstance(legacy_kind, str):
+            normalized = legacy_kind.strip().lower()
+            category_aliases = {
+                "evidence_violation": "evidence",
+                "grounding_violation": "evidence",
+                "math_violation": "math",
+                "mathematical_violation": "math",
+                "formula_violation": "math",
+                "notation_violation": "math",
+                "structure_violation": "structure",
+                "structural_violation": "structure",
+            }
+            category = category_aliases.get(normalized)
+            if category is not None:
+                repaired["category"] = category
+
+        legacy_description = repaired.pop("description", None)
+        if "message" not in repaired and isinstance(legacy_description, str):
+            repaired["message"] = legacy_description
+
+        legacy_node_ids = repaired.pop("node_ids", None)
+        if "related_nodes" not in repaired and isinstance(legacy_node_ids, list):
+            repaired["related_nodes"] = legacy_node_ids
+
+        if "severity" not in repaired:
+            # A missing severity should not discard a useful diagnosis. Use the least intrusive
+            # score; the controller may still resolve it in the same common patch.
+            repaired["severity"] = 1
+        elif isinstance(repaired["severity"], str):
+            severity_aliases = {"low": 1, "medium": 2, "high": 3}
+            normalized_severity = severity_aliases.get(repaired["severity"].strip().lower())
+            if normalized_severity is not None:
+                repaired["severity"] = normalized_severity
+
+        return repaired
+
     id: str
     category: Literal["evidence", "math", "structure"]
     severity: int = Field(ge=1, le=3)
@@ -280,49 +326,84 @@ PatchOp = Annotated[
 ]
 
 
+_NODE_ID_OPERATION_NAMES = frozenset(
+    {
+        "split_node",
+        "retype_node",
+        "replace_node",
+        "add_alias",
+        "attach_evidence",
+        "mark_alternative",
+        "suppress_node",
+    }
+)
+
+
 class GraphPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="before")
     @classmethod
-    def _repair_bare_graph_node_operations(cls, value: Any) -> Any:
-        """Repair a narrow model-output mistake without weakening the operation schema.
-
-        Vision/non-guided JSON calls occasionally emit a GraphNode directly inside operations[]
-        instead of wrapping it as {"op": "add_node", "node": {...}}. A bare object is repaired
-        only when it validates unambiguously as GraphNode. All other missing-discriminator shapes
-        are left untouched so Pydantic still reports the real schema error.
-        """
+    def _repair_model_payload(cls, value: Any) -> Any:
+        """Repair known schema aliases while leaving ambiguous malformed operations invalid."""
 
         if not isinstance(value, dict):
             return value
-        operations = value.get("operations")
-        if not isinstance(operations, list):
-            return value
-
-        repaired: list[Any] = []
-        changed = False
-        for operation in operations:
-            if not isinstance(operation, dict) or "op" in operation:
-                repaired.append(operation)
-                continue
-            try:
-                node = GraphNode.model_validate(operation)
-            except ValidationError:
-                repaired.append(operation)
-                continue
-            repaired.append(
-                {
-                    "op": "add_node",
-                    "node": node.model_dump(mode="json"),
-                }
-            )
-            changed = True
-
-        if not changed:
-            return value
         result = dict(value)
-        result["operations"] = repaired
+        if result.get("rationale") is None:
+            result["rationale"] = []
+        if result.get("incompatible_with") is None:
+            result["incompatible_with"] = []
+        if result.get("operations") is None:
+            result["operations"] = []
+
+        operations = result.get("operations")
+        if not isinstance(operations, list):
+            return result
+
+        repaired_operations: list[Any] = []
+        for operation in operations:
+            if not isinstance(operation, dict):
+                repaired_operations.append(operation)
+                continue
+
+            if "op" not in operation:
+                # A bare object is repaired only when it validates unambiguously as GraphNode.
+                try:
+                    node = GraphNode.model_validate(operation)
+                except ValidationError:
+                    repaired_operations.append(operation)
+                else:
+                    repaired_operations.append(
+                        {
+                            "op": "add_node",
+                            "node": node.model_dump(mode="json"),
+                        }
+                    )
+                continue
+
+            repaired_operation = dict(operation)
+            op = str(repaired_operation.get("op") or "")
+            if (
+                op in _NODE_ID_OPERATION_NAMES
+                and "node_id" not in repaired_operation
+                and isinstance(repaired_operation.get("id"), str)
+            ):
+                repaired_operation["node_id"] = repaired_operation.pop("id")
+
+            if (
+                op == "resolve_violation"
+                and "violation_id" not in repaired_operation
+                and isinstance(repaired_operation.get("id"), str)
+            ):
+                repaired_operation["violation_id"] = repaired_operation.pop("id")
+
+            if op == "suppress_node" and not str(repaired_operation.get("reason") or "").strip():
+                repaired_operation["reason"] = "model-requested suppression"
+
+            repaired_operations.append(repaired_operation)
+
+        result["operations"] = repaired_operations
         return result
 
     id: str
