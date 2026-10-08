@@ -763,14 +763,18 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 kind=operation.kind or base.kind,
                 title=operation.title if operation.title is not None else base.title,
                 text=operation.text if operation.text is not None else base.text,
-                latex=operation.latex if operation.latex is not None else base.latex,
+                latex=(
+                    operation.latex
+                    if "latex" in operation.model_fields_set
+                    else base.latex
+                ),
                 evidence_ids=evidence_ids,
                 derived_from=derived_from,
                 aliases=aliases,
                 status=operation.status or base.status,
                 alternative_group=(
                     operation.alternative_group
-                    if operation.alternative_group is not None
+                    if "alternative_group" in operation.model_fields_set
                     else base.alternative_group
                 ),
                 metadata=metadata,
@@ -817,7 +821,7 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 node.title = operation.title
             if operation.text is not None:
                 node.text = operation.text
-            if operation.latex is not None:
+            if "latex" in operation.model_fields_set:
                 node.latex = operation.latex
             if operation.evidence_ids is not None:
                 missing = [
@@ -845,7 +849,7 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 node.aliases = _dedupe(operation.aliases)
             if operation.status is not None:
                 node.status = operation.status
-            if operation.alternative_group is not None:
+            if "alternative_group" in operation.model_fields_set:
                 node.alternative_group = operation.alternative_group
             node.metadata.update(operation.metadata_update)
 
