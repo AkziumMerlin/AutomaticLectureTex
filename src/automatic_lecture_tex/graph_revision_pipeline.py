@@ -35,8 +35,8 @@ from .llm import (
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 5
-GRAPH_REVISION_RUNTIME_VERSION = 8
+GRAPH_REVISION_PROPOSAL_VERSION = 6
+GRAPH_REVISION_RUNTIME_VERSION = 9
 
 logger = logging.getLogger(__name__)
 
@@ -483,8 +483,15 @@ merge_nodes semantics:
 - into_id may be a new id when merging 2+ source nodes;
 - if into_id already exists and is not listed in node_ids, even a single source node is valid:
   its provenance/dependencies/aliases are absorbed into that existing canonical target;
-- use metadata_update for metadata that should be added to the merged canonical target;
+- canonical GraphNode replacements (kind/title/text/latex/evidence_ids/derived_from/aliases/status/
+  alternative_group) belong in the corresponding TOP-LEVEL operation fields;
+- metadata_update is ONLY for auxiliary metadata not represented by canonical GraphNode fields;
 - never emit merge_nodes with node_ids=[into_id] only; that is a meaningless self-merge.
+
+replace_node semantics:
+- put every canonical replacement directly in the corresponding TOP-LEVEL operation field;
+- metadata_update is ONLY for auxiliary metadata. Never put kind, title, text, latex, evidence_ids,
+  derived_from, aliases, status, or alternative_group inside metadata_update.
 
 Important invariants:
 - Never delete or rewrite raw evidence.
