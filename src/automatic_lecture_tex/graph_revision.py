@@ -91,19 +91,65 @@ class AddNodeOp(BaseModel):
     node: GraphNode
 
 
+_CANONICAL_NODE_UPDATE_FIELDS = frozenset(
+    {
+        "kind",
+        "title",
+        "text",
+        "latex",
+        "evidence_ids",
+        "derived_from",
+        "aliases",
+        "status",
+        "alternative_group",
+    }
+)
+
+
+def _hoist_canonical_node_updates(value: Any) -> Any:
+    """Repair legacy/model payloads that put canonical GraphNode fields in metadata_update.
+
+    Generated graph revisions have historically emitted a full replacement node inside
+    metadata_update while leaving the explicit operation fields null. Keeping those values as
+    metadata creates two competing semantic surfaces: graph validation/revision may inspect the
+    metadata copy while renderers read GraphNode.text/latex. Canonical node fields must therefore
+    never remain shadowed inside metadata.
+    """
+
+    if not isinstance(value, dict):
+        return value
+    metadata = value.get("metadata_update")
+    if not isinstance(metadata, dict):
+        return value
+
+    repaired = dict(value)
+    metadata = dict(metadata)
+    changed = False
+    for field in _CANONICAL_NODE_UPDATE_FIELDS:
+        if field not in metadata:
+            continue
+        if field not in repaired or repaired[field] is None:
+            repaired[field] = metadata[field]
+        metadata.pop(field)
+        changed = True
+
+    if changed:
+        repaired["metadata_update"] = metadata
+    return repaired
+
+
 class MergeNodesOp(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="before")
     @classmethod
-    def _repair_metadata_alias(cls, value: Any) -> Any:
+    def _repair_model_payload(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-        if "metadata" not in value or "metadata_update" in value:
-            return value
         repaired = dict(value)
-        repaired["metadata_update"] = repaired.pop("metadata")
-        return repaired
+        if "metadata" in repaired and "metadata_update" not in repaired:
+            repaired["metadata_update"] = repaired.pop("metadata")
+        return _hoist_canonical_node_updates(repaired)
 
     op: Literal["merge_nodes"]
     node_ids: list[str] = Field(min_length=1)
@@ -112,6 +158,11 @@ class MergeNodesOp(BaseModel):
     title: str | None = None
     text: str | None = None
     latex: str | None = None
+    evidence_ids: list[str] | None = None
+    derived_from: list[str] | None = None
+    aliases: list[str] | None = None
+    status: Literal["active", "alternative", "suppressed"] | None = None
+    alternative_group: str | None = None
     metadata_update: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -131,11 +182,23 @@ class RetypeNodeOp(BaseModel):
 
 class ReplaceNodeOp(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_model_payload(cls, value: Any) -> Any:
+        return _hoist_canonical_node_updates(value)
+
     op: Literal["replace_node"]
     node_id: str
+    kind: str | None = None
     title: str | None = None
     text: str | None = None
     latex: str | None = None
+    evidence_ids: list[str] | None = None
+    derived_from: list[str] | None = None
+    aliases: list[str] | None = None
+    status: Literal["active", "alternative", "suppressed"] | None = None
+    alternative_group: str | None = None
     metadata_update: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -648,6 +711,11 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
             evidence_ids = _dedupe(
                 [item for node in members for item in node.evidence_ids]
             )
+            if operation.evidence_ids is not None:
+                # A merge must never lose provenance. Model-supplied evidence is additive even
+                # when it arrived as part of a full canonical replacement payload.
+                evidence_ids = _dedupe([*evidence_ids, *operation.evidence_ids])
+
             absorbed_ids = {
                 node_id for node_id in member_ids if node_id != operation.into_id
             }
@@ -660,7 +728,19 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                     and dependency != operation.into_id
                 ]
             )
+            if operation.derived_from is not None:
+                derived_from = _dedupe(
+                    [
+                        dependency
+                        for dependency in operation.derived_from
+                        if dependency not in absorbed_ids
+                        and dependency != operation.into_id
+                    ]
+                )
+
             aliases = _dedupe([item for node in members for item in node.aliases])
+            if operation.aliases is not None:
+                aliases = _dedupe([*aliases, *operation.aliases])
 
             metadata = dict(base.metadata)
             metadata.update(operation.metadata_update)
@@ -687,8 +767,12 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 evidence_ids=evidence_ids,
                 derived_from=derived_from,
                 aliases=aliases,
-                status=base.status,
-                alternative_group=base.alternative_group,
+                status=operation.status or base.status,
+                alternative_group=(
+                    operation.alternative_group
+                    if operation.alternative_group is not None
+                    else base.alternative_group
+                ),
                 metadata=metadata,
             )
 
@@ -727,12 +811,42 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
 
         elif isinstance(operation, ReplaceNodeOp):
             node = out.nodes[operation.node_id]
+            if operation.kind is not None:
+                node.kind = operation.kind
             if operation.title is not None:
                 node.title = operation.title
             if operation.text is not None:
                 node.text = operation.text
             if operation.latex is not None:
                 node.latex = operation.latex
+            if operation.evidence_ids is not None:
+                missing = [
+                    evidence_id
+                    for evidence_id in operation.evidence_ids
+                    if evidence_id not in out.evidence
+                ]
+                if missing:
+                    raise ValueError(
+                        f"node {operation.node_id} references missing evidence: {missing}"
+                    )
+                node.evidence_ids = _dedupe(operation.evidence_ids)
+            if operation.derived_from is not None:
+                missing = [
+                    dependency
+                    for dependency in operation.derived_from
+                    if dependency not in out.nodes
+                ]
+                if missing:
+                    raise ValueError(
+                        f"node {operation.node_id} derived_from missing nodes: {missing}"
+                    )
+                node.derived_from = _dedupe(operation.derived_from)
+            if operation.aliases is not None:
+                node.aliases = _dedupe(operation.aliases)
+            if operation.status is not None:
+                node.status = operation.status
+            if operation.alternative_group is not None:
+                node.alternative_group = operation.alternative_group
             node.metadata.update(operation.metadata_update)
 
         elif isinstance(operation, AddAliasOp):
