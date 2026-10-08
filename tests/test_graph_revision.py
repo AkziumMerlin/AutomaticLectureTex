@@ -881,3 +881,45 @@ def test_merge_node_hoists_canonical_fields_from_metadata_update() -> None:
     assert "canonical alias" in node.aliases
     assert node.metadata["editor_note"] == "keep as metadata"
     assert "text" not in node.metadata
+
+
+def test_replace_node_can_explicitly_clear_nullable_canonical_fields() -> None:
+    state = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", text="claim")},
+        nodes={
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                text="Claim without a standalone formula after revision.",
+                latex=r"x=1",
+                evidence_ids=["e1"],
+                alternative_group="old_convention",
+            )
+        },
+    )
+
+    patch = GraphPatch.model_validate(
+        {
+            "id": "clear-stale-canonical-fields",
+            "description": "Remove stale formula and resolved alternative marker.",
+            "operations": [
+                {
+                    "op": "replace_node",
+                    "node_id": "claim",
+                    "metadata_update": {
+                        "latex": None,
+                        "alternative_group": None,
+                    },
+                }
+            ],
+        }
+    )
+
+    operation = patch.operations[0]
+    assert isinstance(operation, ReplaceNodeOp)
+    assert "latex" in operation.model_fields_set
+    assert "alternative_group" in operation.model_fields_set
+
+    revised = apply_patch(state, patch)
+    assert revised.nodes["claim"].latex is None
+    assert revised.nodes["claim"].alternative_group is None
