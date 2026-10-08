@@ -35,8 +35,8 @@ from .llm import (
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 6
-GRAPH_REVISION_RUNTIME_VERSION = 9
+GRAPH_REVISION_PROPOSAL_VERSION = 7
+GRAPH_REVISION_RUNTIME_VERSION = 10
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +477,14 @@ suppress_node, add_violation, and resolve_violation.
 Every entry in operations must be an operation object with an explicit "op" discriminator. Never
 place a GraphNode directly in operations. For a new node, emit exactly the wrapper
 {{"op":"add_node","node":{{...}}}} (or {{"op":"add_derived","node":{{...}}}} when appropriate).
+For operations that target an existing node (replace_node, retype_node, split_node, add_alias,
+attach_evidence, mark_alternative, suppress_node), the target field is node_id, NOT id.
+Every suppress_node operation must include a non-empty reason.
+Patch rationale and incompatible_with are JSON arrays; emit [] rather than null.
+Each diagnosed_violations entry MUST use exactly:
+{{"id":"...", "category":"evidence|math|structure", "severity":1|2|3,
+  "message":"...", "related_nodes":["..."]}}.
+Do not use kind/description/node_ids aliases for diagnosed_violations.
 
 merge_nodes semantics:
 - node_ids are source nodes to absorb;
