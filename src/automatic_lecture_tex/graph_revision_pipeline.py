@@ -557,6 +557,12 @@ replace_node semantics:
   latex, evidence_ids, derived_from, aliases, status, alternative_group, provenance_notes,
   reconstruction_notes, or ambiguities inside metadata_update.
 
+Raw-window evidence may include board_state and board_delta produced by the literal
+native-video board reader. board_state is the complete writing visible at the END of that chunk;
+board_delta is a deterministic host diff between consecutive snapshots. Treat these as literal
+visual evidence, not already-interpreted mathematics. A removed board line is not a mathematical
+retraction unless other evidence establishes that meaning.
+
 Important invariants:
 - Never delete or rewrite raw evidence.
 - Every non-derived canonical claim must retain direct evidence_ids.
