@@ -35,8 +35,8 @@ from .llm import (
 from .schemas import LectureState
 from .util import atomic_json_dump, stable_hash
 
-GRAPH_REVISION_PROPOSAL_VERSION = 7
-GRAPH_REVISION_RUNTIME_VERSION = 10
+GRAPH_REVISION_PROPOSAL_VERSION = 8
+GRAPH_REVISION_RUNTIME_VERSION = 11
 
 logger = logging.getLogger(__name__)
 
@@ -498,14 +498,24 @@ merge_nodes semantics:
 
 replace_node semantics:
 - put every canonical replacement directly in the corresponding TOP-LEVEL operation field;
-- metadata_update is ONLY for auxiliary metadata. Never put kind, title, text, latex, evidence_ids,
-  derived_from, aliases, status, or alternative_group inside metadata_update.
+- metadata_update is ONLY for auxiliary metadata. Never put kind, title, text, semantic_text,
+  latex, evidence_ids, derived_from, aliases, status, alternative_group, provenance_notes,
+  reconstruction_notes, or ambiguities inside metadata_update.
 
 Important invariants:
 - Never delete or rewrite raw evidence.
 - Every non-derived canonical claim must retain direct evidence_ids.
 - Derived nodes must cite derived_from nodes.
 - Prefer mathematical correctness and coherent global definitions/proofs over local OCR wording.
+- GraphNode.semantic_text is reader-facing mathematical prose only. Put board/OCR/ASR/provenance
+  commentary in provenance_notes and reconstruction/debug commentary in reconstruction_notes.
+  Keep legacy text for compatibility when needed, but do not mix audit prose into semantic_text.
+- Use GraphNode.ambiguities for unresolved semantic uncertainty. Set blocking=true whenever the
+  ambiguity can change mathematical truth, object identity, space type, scalar/inner-product
+  convention, or the displayed formula. Advisory reading/notation uncertainty may use
+  blocking=false. Do not hide a truth-changing ambiguity only inside metadata.
+- A blocking ambiguity must remain explicit until evidence resolves it; do not render one branch
+  as canonical merely because it is typographically convenient.
 - Do not import unrelated textbook material merely because it would be true.
 - Distinguish a real mathematical contradiction from harmless notation/wording variation.
 - If two globally coherent interpretations remain possible, return them as alternatives rather
