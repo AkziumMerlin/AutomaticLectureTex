@@ -31,6 +31,66 @@ class GraphAmbiguity(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_model_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        repaired = dict(value)
+        if "message" not in repaired and isinstance(repaired.get("description"), str):
+            repaired["message"] = repaired.pop("description")
+        if "alternatives" not in repaired and isinstance(repaired.get("options"), list):
+            repaired["alternatives"] = repaired.pop("options")
+        if "affects_fields" not in repaired and isinstance(repaired.get("fields"), list):
+            repaired["affects_fields"] = repaired.pop("fields")
+
+        raw_kind = str(repaired.get("kind") or "other").strip().lower()
+        allowed = {
+            "notation",
+            "reading",
+            "convention",
+            "object_identity",
+            "space_type",
+            "formula",
+            "proof",
+            "other",
+        }
+        if raw_kind not in allowed:
+            if "convention" in raw_kind or "scalar" in raw_kind or "inner_product" in raw_kind:
+                repaired["kind"] = "convention"
+            elif "space" in raw_kind or "banach" in raw_kind or "hilbert" in raw_kind:
+                repaired["kind"] = "space_type"
+            elif "formula" in raw_kind or "equation" in raw_kind or "sign" in raw_kind:
+                repaired["kind"] = "formula"
+            elif "symbol" in raw_kind or "notation" in raw_kind:
+                repaired["kind"] = "notation"
+            elif "proof" in raw_kind:
+                repaired["kind"] = "proof"
+            elif "reading" in raw_kind or "ocr" in raw_kind:
+                repaired["kind"] = "reading"
+            else:
+                repaired["kind"] = "other"
+
+        if "blocking" not in repaired:
+            severity = str(repaired.pop("severity", "") or "").strip().lower()
+            if severity:
+                repaired["blocking"] = severity in {
+                    "blocking",
+                    "critical",
+                    "high",
+                    "fatal",
+                }
+            elif repaired.get("kind") in {
+                "convention",
+                "object_identity",
+                "space_type",
+                "formula",
+            }:
+                repaired["blocking"] = True
+        else:
+            repaired.pop("severity", None)
+        return repaired
+
     kind: Literal[
         "notation",
         "reading",
