@@ -2839,15 +2839,31 @@ def run_knowledge_pipeline(
             native_video_windows_processed += 1
 
             extract_started = time.perf_counter()
+            current_board_state: GeneratedBoardStateWindow | None = None
+            removed_board_lines = []
             try:
-                batch = orchestrator.extract_observations_from_video(
-                    chunk,
-                    native_video_clip,
-                    kb,
-                    model=pipeline.config.notes.native_video_model,
-                    thinking=pipeline.config.notes.native_video_thinking,
-                    temperature=pipeline.config.notes.native_video_temperature,
-                )
+                if board_state_mode:
+                    current_board_state = orchestrator.extract_board_state_from_video(
+                        chunk,
+                        native_video_clip,
+                        model=pipeline.config.notes.native_video_model,
+                        thinking=pipeline.config.notes.native_video_thinking,
+                        temperature=pipeline.config.notes.native_video_temperature,
+                    )
+                    batch, removed_board_lines = board_state_delta_to_observations(
+                        chunk,
+                        previous=previous_board_state,
+                        current=current_board_state,
+                    )
+                else:
+                    batch = orchestrator.extract_observations_from_video(
+                        chunk,
+                        native_video_clip,
+                        kb,
+                        model=pipeline.config.notes.native_video_model,
+                        thinking=pipeline.config.notes.native_video_thinking,
+                        temperature=pipeline.config.notes.native_video_temperature,
+                    )
             except Exception as exc:
                 if "invalid video file" not in str(exc).lower():
                     raise
@@ -2878,14 +2894,28 @@ def run_knowledge_pipeline(
                     conservative=True,
                 )
                 native_video_clip_seconds += time.perf_counter() - clip_started
-                batch = orchestrator.extract_observations_from_video(
-                    chunk,
-                    native_video_clip,
-                    kb,
-                    model=pipeline.config.notes.native_video_model,
-                    thinking=pipeline.config.notes.native_video_thinking,
-                    temperature=pipeline.config.notes.native_video_temperature,
-                )
+                if board_state_mode:
+                    current_board_state = orchestrator.extract_board_state_from_video(
+                        chunk,
+                        native_video_clip,
+                        model=pipeline.config.notes.native_video_model,
+                        thinking=pipeline.config.notes.native_video_thinking,
+                        temperature=pipeline.config.notes.native_video_temperature,
+                    )
+                    batch, removed_board_lines = board_state_delta_to_observations(
+                        chunk,
+                        previous=previous_board_state,
+                        current=current_board_state,
+                    )
+                else:
+                    batch = orchestrator.extract_observations_from_video(
+                        chunk,
+                        native_video_clip,
+                        kb,
+                        model=pipeline.config.notes.native_video_model,
+                        thinking=pipeline.config.notes.native_video_thinking,
+                        temperature=pipeline.config.notes.native_video_temperature,
+                    )
             extract_seconds += time.perf_counter() - extract_started
         else:
             requests, evidence, visual_elapsed = _collect_visual_evidence(
@@ -2910,10 +2940,16 @@ def run_knowledge_pipeline(
 
         added_ids = merge_window_observations(kb, batch)
 
-        track_started = time.perf_counter()
-        tracking = orchestrator.track_episodes(kb, batch, added_ids)
-        episode_track_seconds += time.perf_counter() - track_started
-        apply_episode_tracking(kb, tracking, added_ids, window_id=chunk.id)
+        if board_state_mode:
+            tracking = EpisodeTrackingUpdate()
+            if current_board_state is None:
+                raise RuntimeError("board-state extraction did not produce a snapshot")
+            previous_board_state = current_board_state
+        else:
+            track_started = time.perf_counter()
+            tracking = orchestrator.track_episodes(kb, batch, added_ids)
+            episode_track_seconds += time.perf_counter() - track_started
+            apply_episode_tracking(kb, tracking, added_ids, window_id=chunk.id)
         processed_windows += 1
 
         atomic_json_dump(
@@ -2921,11 +2957,25 @@ def run_knowledge_pipeline(
             {
                 "fingerprint": window_fingerprint,
                 "chunk": chunk.model_dump(mode="json"),
-                "evidence_backend": (
-                    "native_video" if native_video_mode else "asr_frames"
-                ),
+                "evidence_backend": pipeline.config.notes.window_evidence_backend,
                 "native_video_clip": (
                     str(native_video_clip) if native_video_clip is not None else None
+                ),
+                "board_state": (
+                    current_board_state.model_dump(mode="json")
+                    if board_state_mode and current_board_state is not None
+                    else None
+                ),
+                "board_delta": (
+                    {
+                        "added_observation_ids": [item.id for item in batch.observations],
+                        "removed": [
+                            item.model_dump(mode="json")
+                            for item in removed_board_lines
+                        ],
+                    }
+                    if board_state_mode
+                    else None
                 ),
                 "visual_requests": [item.model_dump(mode="json") for item in requests],
                 "visual_evidence": [item.model_dump(mode="json") for item in evidence],
