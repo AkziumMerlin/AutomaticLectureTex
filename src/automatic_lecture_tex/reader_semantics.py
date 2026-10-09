@@ -579,8 +579,17 @@ def build_occurrence_plan(
             if dispositions.get(support_id) == "unresolved"
         ]
         proof_groups[node_id] = (ordered_support, unresolved)
+        explicitly_reused = {
+            edge.source
+            for edge in state.edges
+            if edge.relation.strip().lower() == "reused_in"
+            and edge.target == node_id
+            and edge.source in support
+        }
         support_consumed.update(
-            support_id for support_id in support if support_id in section_set
+            support_id
+            for support_id in support
+            if support_id in section_set and support_id not in explicitly_reused
         )
 
     # Attach exact formalizations/equations to the semantic statement they derive from. This is
