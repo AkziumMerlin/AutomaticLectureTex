@@ -312,11 +312,53 @@ def _focus_raw_windows(
         ) <= end + 30.0
         if raw_id not in window_ids and not overlaps:
             continue
+        board_state = raw.get("board_state") or {}
+        board_delta = raw.get("board_delta") or {}
         item = {
             "window_id": raw_id,
             "start": raw.get("start"),
             "end": raw.get("end"),
             "asr": str(raw.get("asr") or "")[:1200],
+            "board_state": (
+                {
+                    "lines": [
+                        {
+                            "region": str(line.get("region") or "")[:80],
+                            "literal_text": str(line.get("literal_text") or "")[:500],
+                            "latex": str(line.get("latex") or "")[:700] or None,
+                            "complete": bool(line.get("complete", True)),
+                            "legibility": str(line.get("legibility") or "clear"),
+                        }
+                        for line in board_state.get("lines", [])[:40]
+                    ],
+                    "unresolved": [
+                        str(value)[:400]
+                        for value in board_state.get("unresolved", [])[:6]
+                    ],
+                }
+                if board_state
+                else None
+            ),
+            "board_delta": (
+                {
+                    "added_observation_ids": [
+                        str(value)
+                        for value in board_delta.get("added_observation_ids", [])[:40]
+                    ],
+                    "removed": [
+                        {
+                            "region": str(line.get("region") or "")[:80],
+                            "literal_text": str(line.get("literal_text") or "")[:500],
+                            "latex": str(line.get("latex") or "")[:700] or None,
+                            "complete": bool(line.get("complete", True)),
+                            "legibility": str(line.get("legibility") or "clear"),
+                        }
+                        for line in board_delta.get("removed", [])[:40]
+                    ],
+                }
+                if board_delta
+                else None
+            ),
             "visual_latex": [
                 str(value)[:500]
                 for value in raw.get("visual_latex", [])[:3]
