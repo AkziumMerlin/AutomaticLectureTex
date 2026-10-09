@@ -183,7 +183,7 @@ def test_occurrence_plan_uses_relation_local_time_for_shared_proof_fact() -> Non
             GraphEdge(
                 source="complex_reconstruction",
                 target="theorem",
-                relation="supports",
+                relation="reused_in",
                 evidence_ids=["reconstruct"],
             ),
             GraphEdge(source="real_hb", target="define_u", relation="uses"),
@@ -224,7 +224,7 @@ def test_occurrence_plan_uses_relation_local_time_for_shared_proof_fact() -> Non
             for item in plan.occurrences
             if item.node_id == "complex_reconstruction"
         ]
-    ) == 1
+    ) == 2
     reconstruction_occurrence = next(
         item
         for item in plan.occurrences
