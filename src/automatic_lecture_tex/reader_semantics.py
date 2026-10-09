@@ -557,13 +557,6 @@ def build_occurrence_plan(
         if dispositions.get(node_id) == "render" and node_id not in support_consumed
     ]
     ordered_anchors = _topological_order(state, set(anchor_ids))
-    position = {node_id: index for index, node_id in enumerate(ordered_node_ids)}
-    ordered_anchors.sort(
-        key=lambda node_id: (
-            0 if not state.nodes[node_id].derived_from else 1,
-            position.get(node_id, 10**9),
-        )
-    )
 
     occurrences: list[ReaderOccurrenceSpec] = []
     blocks: list[ReaderOccurrenceBlockSpec] = []
