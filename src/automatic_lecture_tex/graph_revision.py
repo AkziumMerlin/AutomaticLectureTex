@@ -724,9 +724,10 @@ def _dedupe(seq: list[str]) -> list[str]:
 
 
 def _node_signature(node: GraphNode) -> tuple[str, str, str]:
+    semantic_text = node.semantic_text if node.semantic_text is not None else node.text
     return (
         node.kind,
-        " ".join(node.text.split()).casefold(),
+        " ".join(semantic_text.split()).casefold(),
         "".join((node.latex or "").split()),
     )
 
