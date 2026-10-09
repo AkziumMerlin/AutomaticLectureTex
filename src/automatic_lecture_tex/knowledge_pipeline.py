@@ -2705,10 +2705,17 @@ def run_knowledge_pipeline(
         lecture_id=lecture.id,
         title=lecture.title or lecture.id,
     )
+    board_state_mode = (
+        pipeline.config.notes.window_evidence_backend == "native_video_board_state"
+    )
     chunks = chunk_transcript(
         transcript,
-        pipeline.config.notes.chunk_target_seconds,
-        pipeline.config.notes.chunk_overlap_seconds,
+        (
+            pipeline.config.notes.native_video_board_chunk_seconds
+            if board_state_mode
+            else pipeline.config.notes.chunk_target_seconds
+        ),
+        0.0 if board_state_mode else pipeline.config.notes.chunk_overlap_seconds,
     )
     figures_root = pipeline.config.latex.output_dir / "figures" / lecture.id
 
@@ -2719,7 +2726,11 @@ def run_knowledge_pipeline(
     vision_seconds = 0.0
     extract_seconds = 0.0
     episode_track_seconds = 0.0
-    native_video_mode = pipeline.config.notes.window_evidence_backend == "native_video"
+    native_video_mode = pipeline.config.notes.window_evidence_backend in {
+        "native_video",
+        "native_video_board_state",
+    }
+    previous_board_state: GeneratedBoardStateWindow | None = None
     native_source_video: Path | None = None
     native_video_prepare_seconds = 0.0
     native_video_clip_seconds = 0.0
@@ -2727,7 +2738,11 @@ def run_knowledge_pipeline(
     native_video_provider_retries = 0
 
     for chunk in chunks:
-        state_before = compact_knowledge_state(kb, pipeline.config.notes)
+        state_before = (
+            {}
+            if board_state_mode
+            else compact_knowledge_state(kb, pipeline.config.notes)
+        )
         window_fingerprint = stable_hash(
             {
                 "source": source_identity,
@@ -2739,14 +2754,27 @@ def run_knowledge_pipeline(
                 "vision": pipeline.config.vision.model_dump(mode="json"),
                 "llm": pipeline.config.llm.model_dump(mode="json"),
                 "knowledge_cache_version": KNOWLEDGE_CACHE_VERSION,
+                "board_state_extraction_version": (
+                    BOARD_STATE_EXTRACTION_VERSION if board_state_mode else None
+                ),
             }
         )
         artifact = work / "knowledge_windows" / f"{chunk.id}.json"
-        cached = None if force else _load_window_artifact(artifact, window_fingerprint)
+        cached = None
+        if not force:
+            cached = (
+                _load_board_state_window_artifact(artifact, window_fingerprint)
+                if board_state_mode
+                else _load_window_artifact(artifact, window_fingerprint)
+            )
         if cached is not None:
-            payload, batch, tracking = cached
-            added_ids = merge_window_observations(kb, batch)
-            apply_episode_tracking(kb, tracking, added_ids, window_id=chunk.id)
+            if board_state_mode:
+                payload, batch, previous_board_state = cached
+                merge_window_observations(kb, batch)
+            else:
+                payload, batch, tracking = cached
+                added_ids = merge_window_observations(kb, batch)
+                apply_episode_tracking(kb, tracking, added_ids, window_id=chunk.id)
             cache_hits += 1
             visual_requests_processed += len(payload.get("visual_requests", []))
             visual_evidence_successful += sum(
