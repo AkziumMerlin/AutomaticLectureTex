@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -70,6 +70,122 @@ class GeneratedNativeVideoWindow(BaseModel):
 
     observations: list[GeneratedNativeVideoObservation] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
+
+
+class GeneratedBoardStateLine(BaseModel):
+    """Literal writing visible on the board at the END of one video chunk."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    region: str = Field(default="board", min_length=1, max_length=80)
+    literal_text: str = ""
+    latex: str | None = None
+    complete: bool = True
+    legibility: Literal["clear", "partial", "uncertain"] = "clear"
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "GeneratedBoardStateLine":
+        if not self.literal_text.strip() and not (self.latex or "").strip():
+            raise ValueError("board-state line requires literal_text or latex")
+        return self
+
+
+class GeneratedBoardStateWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lines: list[GeneratedBoardStateLine] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+def _normalize_board_text(value: str) -> str:
+    return " ".join(value.split()).strip().casefold()
+
+
+def _normalize_board_latex(value: str) -> str:
+    return "".join(value.split()).strip()
+
+
+def board_state_line_key(line: GeneratedBoardStateLine) -> tuple[str, str, str]:
+    region = _normalize_board_text(line.region)
+    latex = _normalize_board_latex(line.latex or "")
+    if latex:
+        return region, "latex", latex
+    return region, "text", _normalize_board_text(line.literal_text)
+
+
+def board_state_delta(
+    previous: GeneratedBoardStateWindow | None,
+    current: GeneratedBoardStateWindow,
+) -> tuple[list[GeneratedBoardStateLine], list[GeneratedBoardStateLine]]:
+    """Exact host-owned diff between consecutive final-board snapshots."""
+
+    previous_lines = previous.lines if previous is not None else []
+    previous_by_key = {
+        board_state_line_key(line): line for line in previous_lines
+    }
+    current_by_key = {
+        board_state_line_key(line): line for line in current.lines
+    }
+    added = [
+        line for key, line in current_by_key.items()
+        if key not in previous_by_key
+    ]
+    removed = [
+        line for key, line in previous_by_key.items()
+        if key not in current_by_key
+    ]
+    return added, removed
+
+
+def board_state_delta_to_observations(
+    chunk: LectureChunk,
+    *,
+    previous: GeneratedBoardStateWindow | None,
+    current: GeneratedBoardStateWindow,
+) -> tuple[WindowObservations, list[GeneratedBoardStateLine]]:
+    """Expose only newly visible complete board entries to semantic graph revision."""
+
+    added, removed = board_state_delta(previous, current)
+    complete_added = [line for line in added if line.complete]
+    observations: list[LectureObservation] = []
+    confidence_by_legibility = {
+        "clear": 0.9,
+        "partial": 0.65,
+        "uncertain": 0.4,
+    }
+    for index, line in enumerate(complete_added):
+        latex = (line.latex or "").strip() or None
+        text = line.literal_text.strip()
+        observations.append(
+            LectureObservation(
+                id=f"obs_{chunk.id}_{index:03d}",
+                window_id=chunk.id,
+                window_ids=[chunk.id],
+                start=chunk.start,
+                end=chunk.end,
+                kind=(
+                    ObservationKind.EQUATION
+                    if latex is not None
+                    else ObservationKind.REMARK
+                ),
+                text=text,
+                latex=latex,
+                confidence=confidence_by_legibility[line.legibility],
+                source_status=SourceStatus.OBSERVED,
+                evidence_refs=[f"board_state:{chunk.id}"],
+            )
+        )
+
+    return (
+        WindowObservations(
+            window_id=chunk.id,
+            start=chunk.start,
+            end=chunk.end,
+            observations=observations,
+            unresolved=list(current.unresolved),
+        ),
+        removed,
+    )
 
 
 
@@ -682,6 +798,61 @@ Write descriptive strings in language code {self.output_language}.
             end=chunk.end,
             observations=observations,
             unresolved=list(generated.unresolved),
+        )
+
+    def extract_board_state_from_video(
+        self,
+        chunk: LectureChunk,
+        video_path: Path,
+        *,
+        model: str,
+        thinking: bool,
+        temperature: float,
+    ) -> GeneratedBoardStateWindow:
+        """Read only the final visible board state; do not perform mathematical interpretation."""
+
+        duration = chunk.end - chunk.start
+        prompt = f"""Inspect ONE video chunk from a university mathematics lecture.
+
+Your only task is to transcribe the WRITING THAT IS VISIBLE ON THE BOARD at the END of the clip.
+Do not extract mathematical claims, definitions, proofs, topics, episodes, or lecturer intent.
+Do not explain the mathematics.
+Do not repair a formula from textbook knowledge or from speech.
+Do not use the lecturer's speech to fill in symbols that are not visibly readable.
+Do not report gestures, spoken statements, or transitions.
+
+Window id: {chunk.id}
+Clip duration: {duration:.3f} seconds.
+Absolute lecture interval: [{chunk.start:.3f}, {chunk.end:.3f}].
+
+Return every distinct written entry still visible at the end of the clip.
+For each entry:
+- region: a short visual locator such as left, center, right, left_upper, right_lower;
+- literal_text: literal visible prose/labels, or an empty string when the entry is purely formulaic;
+- latex: a literal LaTeX transcription when mathematical notation is visible, otherwise null;
+- complete: false when the lecturer is visibly still writing an unfinished entry at clip end;
+- legibility: clear, partial, or uncertain.
+
+Rules:
+- Prefer '?' for an unreadable symbol over guessing it.
+- Preserve visible mistakes exactly; do not silently correct them.
+- A line that was written earlier but is still visible MUST be included: this is a final-state
+  snapshot, not a list of events.
+- Do not include erased/covered writing that is no longer visible.
+- Do not duplicate the same visible entry.
+- unresolved may briefly describe purely visual ambiguities only.
+
+Return strict structured JSON. Descriptive strings use language code {self.output_language}.
+"""
+        return self._structured(
+            prompt,
+            GeneratedBoardStateWindow,
+            videos=[video_path],
+            operation="knowledge_extract_native_board_state",
+            guided_json=False,
+            model=model,
+            thinking=thinking,
+            temperature=temperature,
         )
 
     def track_episodes(
