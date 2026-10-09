@@ -503,8 +503,9 @@ merge_nodes semantics:
 - into_id may be a new id when merging 2+ source nodes;
 - if into_id already exists and is not listed in node_ids, even a single source node is valid:
   its provenance/dependencies/aliases are absorbed into that existing canonical target;
-- canonical GraphNode replacements (kind/title/text/latex/evidence_ids/derived_from/aliases/status/
-  alternative_group) belong in the corresponding TOP-LEVEL operation fields;
+- canonical GraphNode replacements (kind/title/text/semantic_text/latex/evidence_ids/
+  derived_from/aliases/status/alternative_group/provenance_notes/reconstruction_notes/ambiguities)
+  belong in the corresponding TOP-LEVEL operation fields;
 - metadata_update is ONLY for auxiliary metadata not represented by canonical GraphNode fields;
 - never emit merge_nodes with node_ids=[into_id] only; that is a meaningless self-merge.
 
