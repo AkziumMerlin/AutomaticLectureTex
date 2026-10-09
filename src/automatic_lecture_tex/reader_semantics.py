@@ -40,7 +40,7 @@ TOPIC_PROPAGATION_RELATIONS = {
     "denotes_convergence_in",
 }
 
-_EXPLICIT_TOPIC_FORWARD = {"contains", "contains_node"}
+_EXPLICIT_TOPIC_FORWARD = {"contains", "contains_node", "has_part"}
 _EXPLICIT_TOPIC_REVERSE = {"part_of", "in_section", "in_topic"}
 
 _BLOCKING_LEGACY_KEYS = {
@@ -302,6 +302,14 @@ def infer_topic_memberships(
     """Prefer semantic relations; use chronological legacy assignment only as a last fallback."""
 
     memberships: dict[str, set[str]] = defaultdict(set)
+    for node_id in renderable_node_ids:
+        node = state.nodes.get(node_id)
+        if node is None:
+            continue
+        section_id = node.metadata.get("section_id")
+        if section_id in topic_ids:
+            memberships[node_id].add(str(section_id))
+
     for edge in state.edges:
         source, target = edge.source, edge.target
         relation = edge.relation.strip().lower()
