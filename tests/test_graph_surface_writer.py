@@ -383,7 +383,7 @@ def test_surface_pipeline_projection_plan_writer_end_to_end(tmp_path):
         ]
     )
     orchestrator = StubOrchestrator(
-        [projection, plan, generated, ReaderGroundingReview(issues=[])]
+        [projection, generated, ReaderGroundingReview(issues=[])]
     )
     metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
 
@@ -477,7 +477,7 @@ def test_projection_can_omit_pure_audit_node_without_surface_fallback(tmp_path):
         ]
     )
     orchestrator = StubOrchestrator(
-        [projection, plan, generated, ReaderGroundingReview(issues=[])]
+        [projection, generated, ReaderGroundingReview(issues=[])]
     )
     metadata_ir = graph_state_to_ir(graph, lecture_id="l1", title="Lecture")
 
