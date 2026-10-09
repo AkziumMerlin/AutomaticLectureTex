@@ -124,7 +124,10 @@ class Pipeline:
 
         native_video_mode = (
             self.config.notes.architecture in {"knowledge", "state"}
-            and self.config.notes.window_evidence_backend == "native_video"
+            and self.config.notes.window_evidence_backend in {
+                "native_video",
+                "native_video_board_state",
+            }
         )
 
         if native_video_mode:
@@ -134,7 +137,16 @@ class Pipeline:
                     "mode": "native_video_timing_v1",
                     "segment_seconds": min(
                         5.0,
-                        max(1.0, self.config.notes.chunk_target_seconds / 4.0),
+                        max(
+                            1.0,
+                            (
+                                self.config.notes.native_video_board_chunk_seconds
+                                if self.config.notes.window_evidence_backend
+                                == "native_video_board_state"
+                                else self.config.notes.chunk_target_seconds
+                            )
+                            / 4.0,
+                        ),
                     ),
                 }
             )
@@ -158,7 +170,16 @@ class Pipeline:
                 media_seconds = time.perf_counter() - media_started
                 segment_seconds = min(
                     5.0,
-                    max(1.0, self.config.notes.chunk_target_seconds / 4.0),
+                    max(
+                        1.0,
+                        (
+                            self.config.notes.native_video_board_chunk_seconds
+                            if self.config.notes.window_evidence_backend
+                            == "native_video_board_state"
+                            else self.config.notes.chunk_target_seconds
+                        )
+                        / 4.0,
+                    ),
                 )
                 transcript = timing_transcript(
                     lecture.id,
