@@ -596,6 +596,30 @@ def _verify_plan(
 
 
 
+def _reader_fact_block_type(
+    state: GraphState,
+    projection: ReaderSectionProjection,
+    node_id: str,
+) -> GeneratedBlockType:
+    block_type = _fallback_block_type(projection, [node_id])
+    node = state.nodes[node_id]
+    if block_type == BlockType.PARAGRAPH and node.kind.strip().lower() == "claim":
+        title = (node.title or "").lower()
+        if any(
+            token in title
+            for token in (
+                "теорем",
+                "характерист",
+                "критер",
+                "минималь",
+                "равенство норм",
+                "изоморф",
+            )
+        ):
+            return BlockType.THEOREM
+    return block_type
+
+
 def _fallback_block_type(
     projection: ReaderSectionProjection,
     node_ids: list[str],
@@ -904,6 +928,20 @@ def _verify_block(
         errors.append(
             "block omits canonical expressions: " + ", ".join(sorted(missing_expressions))
         )
+
+    if block.type == BlockType.PROOF:
+        first_appearance: list[str] = []
+        seen: set[str] = set()
+        for segment in generated.segments:
+            for node_id in segment.source_node_ids:
+                if node_id in allowed_nodes and node_id not in seen:
+                    seen.add(node_id)
+                    first_appearance.append(node_id)
+        if first_appearance != block.node_ids:
+            errors.append(
+                "proof segments must preserve host-owned occurrence order: "
+                + ", ".join(block.node_ids)
+            )
     return errors
 
 
@@ -1261,7 +1299,11 @@ def _plan_section(
                 "without adding mathematical content."
             )
         else:
-            block_type = _fallback_block_type(projection, list(item.node_ids))
+            block_type = _reader_fact_block_type(
+                state,
+                projection,
+                item.anchor_node_id,
+            )
             fact = fact_by_id[item.anchor_node_id]
             title = fact.title or None
             purpose = (
