@@ -22,19 +22,50 @@ class EvidenceRecord(BaseModel):
     latex: str | None = None
 
 
+class GraphAmbiguity(BaseModel):
+    """Typed uncertainty attached to canonical mathematical content.
+
+    blocking=True means the uncertainty can change the truth/identity/type of the rendered
+    mathematical statement and therefore must not be silently asserted by the reader surface.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[
+        "notation",
+        "reading",
+        "convention",
+        "object_identity",
+        "space_type",
+        "formula",
+        "proof",
+        "other",
+    ] = "other"
+    blocking: bool = False
+    message: str
+    alternatives: list[str] = Field(default_factory=list)
+    affects_fields: list[str] = Field(default_factory=list)
+
+
 class GraphNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
     kind: str
     title: str = ""
+    # Legacy mixed-content field retained for cache/backward compatibility.
     text: str = ""
+    # Reader-facing mathematical prose only. New graph revisions should prefer this field.
+    semantic_text: str | None = None
     latex: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     derived_from: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
     status: Literal["active", "alternative", "suppressed"] = "active"
     alternative_group: str | None = None
+    provenance_notes: list[str] = Field(default_factory=list)
+    reconstruction_notes: list[str] = Field(default_factory=list)
+    ambiguities: list[GraphAmbiguity] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -142,12 +173,16 @@ _CANONICAL_NODE_UPDATE_FIELDS = frozenset(
         "kind",
         "title",
         "text",
+        "semantic_text",
         "latex",
         "evidence_ids",
         "derived_from",
         "aliases",
         "status",
         "alternative_group",
+        "provenance_notes",
+        "reconstruction_notes",
+        "ambiguities",
     }
 )
 
@@ -203,12 +238,16 @@ class MergeNodesOp(BaseModel):
     kind: str | None = None
     title: str | None = None
     text: str | None = None
+    semantic_text: str | None = None
     latex: str | None = None
     evidence_ids: list[str] | None = None
     derived_from: list[str] | None = None
     aliases: list[str] | None = None
     status: Literal["active", "alternative", "suppressed"] | None = None
     alternative_group: str | None = None
+    provenance_notes: list[str] | None = None
+    reconstruction_notes: list[str] | None = None
+    ambiguities: list[GraphAmbiguity] | None = None
     metadata_update: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -239,12 +278,16 @@ class ReplaceNodeOp(BaseModel):
     kind: str | None = None
     title: str | None = None
     text: str | None = None
+    semantic_text: str | None = None
     latex: str | None = None
     evidence_ids: list[str] | None = None
     derived_from: list[str] | None = None
     aliases: list[str] | None = None
     status: Literal["active", "alternative", "suppressed"] | None = None
     alternative_group: str | None = None
+    provenance_notes: list[str] | None = None
+    reconstruction_notes: list[str] | None = None
+    ambiguities: list[GraphAmbiguity] | None = None
     metadata_update: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -515,11 +558,13 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
             node.kind,
             node.title,
             node.text,
+            node.semantic_text,
             node.latex,
             tuple(sorted(node.derived_from)),
             tuple(sorted(node.aliases)),
             node.status,
             node.alternative_group,
+            tuple(item.model_dump_json() for item in node.ambiguities),
         )
 
     ambiguous_evidence: set[str] = set()
@@ -533,7 +578,11 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
                     "kind": node.kind,
                     "title": node.title,
                     "text": node.text,
+                    "semantic_text": node.semantic_text,
                     "latex": node.latex,
+                    "ambiguities": [
+                        item.model_dump(mode="json") for item in node.ambiguities
+                    ],
                 }
                 for node in nodes
             ]
@@ -844,6 +893,11 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 kind=operation.kind or base.kind,
                 title=operation.title if operation.title is not None else base.title,
                 text=operation.text if operation.text is not None else base.text,
+                semantic_text=(
+                    operation.semantic_text
+                    if "semantic_text" in operation.model_fields_set
+                    else base.semantic_text
+                ),
                 latex=(
                     operation.latex
                     if "latex" in operation.model_fields_set
@@ -857,6 +911,21 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                     operation.alternative_group
                     if "alternative_group" in operation.model_fields_set
                     else base.alternative_group
+                ),
+                provenance_notes=(
+                    operation.provenance_notes
+                    if operation.provenance_notes is not None
+                    else base.provenance_notes
+                ),
+                reconstruction_notes=(
+                    operation.reconstruction_notes
+                    if operation.reconstruction_notes is not None
+                    else base.reconstruction_notes
+                ),
+                ambiguities=(
+                    operation.ambiguities
+                    if operation.ambiguities is not None
+                    else base.ambiguities
                 ),
                 metadata=metadata,
             )
@@ -902,6 +971,8 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 node.title = operation.title
             if operation.text is not None:
                 node.text = operation.text
+            if "semantic_text" in operation.model_fields_set:
+                node.semantic_text = operation.semantic_text
             if "latex" in operation.model_fields_set:
                 node.latex = operation.latex
             if operation.evidence_ids is not None:
@@ -932,6 +1003,12 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                 node.status = operation.status
             if "alternative_group" in operation.model_fields_set:
                 node.alternative_group = operation.alternative_group
+            if operation.provenance_notes is not None:
+                node.provenance_notes = _dedupe(operation.provenance_notes)
+            if operation.reconstruction_notes is not None:
+                node.reconstruction_notes = _dedupe(operation.reconstruction_notes)
+            if operation.ambiguities is not None:
+                node.ambiguities = [item.model_copy(deep=True) for item in operation.ambiguities]
             node.metadata.update(operation.metadata_update)
 
         elif isinstance(operation, AddAliasOp):
