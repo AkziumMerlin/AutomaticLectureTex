@@ -8,6 +8,7 @@ from .reader_surface import (
     GraphSectionSpec,
     PlannedReaderBlock,
     ReaderDiscoursePlan,
+    ReaderOccurrence,
     ReaderProjectionChoice,
     ReaderProjectionChoices,
     ReaderSectionProjection,
@@ -17,7 +18,7 @@ from .reader_surface import (
 )
 from .schemas import LectureIR
 
-GRAPH_SURFACE_WRITER_VERSION = 5
+GRAPH_SURFACE_WRITER_VERSION = 6
 
 
 def write_graph_surface(
@@ -51,6 +52,7 @@ __all__ = [
     "GraphSectionSpec",
     "PlannedReaderBlock",
     "ReaderDiscoursePlan",
+    "ReaderOccurrence",
     "ReaderProjectionChoice",
     "ReaderProjectionChoices",
     "ReaderSectionProjection",
