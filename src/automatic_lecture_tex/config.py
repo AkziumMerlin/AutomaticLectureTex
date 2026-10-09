@@ -104,7 +104,7 @@ class LLMConfig(BaseModel):
 
 class NotesConfig(BaseModel):
     architecture: Literal["linear", "state", "knowledge", "legacy"] = "knowledge"
-    window_evidence_backend: Literal["asr_frames", "native_video"] = "asr_frames"
+    window_evidence_backend: Literal["asr_frames", "native_video", "native_video_board_state"] = "asr_frames"
     native_video_model: str = "qwen/qwen3.8-omni-flash"
     native_video_height: int = Field(default=720, ge=240, le=1080)
     native_video_video_bitrate_kbps: int = Field(default=1000, ge=200, le=5000)
@@ -114,6 +114,7 @@ class NotesConfig(BaseModel):
     native_video_max_bytes: int = Field(default=7_000_000, ge=1_000_000, le=7_500_000)
     native_video_thinking: bool = False
     native_video_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    native_video_board_chunk_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
     chunk_target_seconds: float = Field(default=480.0, gt=0)
     chunk_overlap_seconds: float = Field(default=120.0, ge=0)
     boundary_context_seconds: float = Field(default=120.0, ge=0)
@@ -184,6 +185,12 @@ class NotesConfig(BaseModel):
                 "notes.state_graph_revision_overlap_observations must be smaller than "
                 "notes.state_graph_revision_batch_observations"
             )
+        if self.window_evidence_backend == "native_video_board_state":
+            if self.architecture != "state" or self.state_semantic_backend != "mutable_graph":
+                raise ValueError(
+                    "notes.window_evidence_backend=native_video_board_state currently requires "
+                    "architecture=state and state_semantic_backend=mutable_graph"
+                )
         return self
 
 
