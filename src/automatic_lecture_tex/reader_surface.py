@@ -209,7 +209,7 @@ class ReaderGroundingReview(BaseModel):
 
 def _reader_section_title(value: str) -> str:
     title = _canonical_surface_text(value).strip()
-    title = re.sub(r"^(?:Новый блок|Блок\\s+[^:]+):\\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^(?:Новый блок|Блок\s+[^:]+):\s*", "", title, flags=re.IGNORECASE)
     title = title.replace("H^^*", "H^*")
     return title.strip(" .:")
 
