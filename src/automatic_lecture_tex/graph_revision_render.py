@@ -8,7 +8,7 @@ from .latex import escape_tex
 from .schemas import BlockType, ChunkNotes, LectureIR, NoteBlock
 
 
-GRAPH_SURFACE_RENDER_VERSION = 3
+GRAPH_SURFACE_RENDER_VERSION = 4
 
 _TOPIC_KINDS = {"topic", "section", "subsection"}
 _NONRENDER_KINDS = {
@@ -232,7 +232,8 @@ def _surface_display_latex(value: str) -> str:
 def _surface_text(node: GraphNode) -> str:
     """Return reader-facing prose only; provenance stays in graph/audit artifacts."""
 
-    text = _canonical_surface_text(node.text)
+    source_text = node.semantic_text if node.semantic_text is not None else node.text
+    text = _canonical_surface_text(source_text)
     if not text:
         return ""
     if not _PROVENANCE_LANGUAGE.search(text):
@@ -425,7 +426,8 @@ def _is_renderable(node: GraphNode) -> bool:
     if latex and "?" in latex and _PROVENANCE_LANGUAGE.search(node.text):
         return False
 
-    return bool(node.text.strip() or latex)
+    semantic_text = node.semantic_text if node.semantic_text is not None else node.text
+    return bool(semantic_text.strip() or latex)
 
 
 def _topic_membership(state: GraphState) -> dict[str, str]:
