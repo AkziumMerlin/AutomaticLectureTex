@@ -1457,17 +1457,19 @@ def write_reader_surface(
     """
 
     specs = graph_section_specs(state, lecture_title=lecture_title)
-    if len(specs) != len(fallback_ir.chunks):
-        raise RuntimeError(
-            "reader surface section mismatch: "
-            f"{len(specs)} canonical specs vs {len(fallback_ir.chunks)} metadata chunks"
-        )
+    metadata_by_id = {
+        chunk.chunk_id: chunk for chunk in fallback_ir.chunks
+    }
 
     root = work / "graph_surface_writer"
     root.mkdir(parents=True, exist_ok=True)
     chunks: list[ChunkNotes] = []
 
-    for index, (spec, metadata_chunk) in enumerate(zip(specs, fallback_ir.chunks, strict=True)):
+    for index, spec in enumerate(specs):
+        metadata_chunk = metadata_by_id.get(spec.section_id)
+        metadata_unresolved = (
+            list(metadata_chunk.unresolved) if metadata_chunk is not None else []
+        )
         section_root = root / f"section_{index:03d}"
         section_root.mkdir(parents=True, exist_ok=True)
 
@@ -1529,7 +1531,7 @@ def write_reader_surface(
                 section_title=spec.title,
                 blocks=blocks,
                 unresolved=list(
-                    dict.fromkeys([*metadata_chunk.unresolved, *projection_unresolved])
+                    dict.fromkeys([*metadata_unresolved, *projection_unresolved])
                 ),
             )
         )
