@@ -656,7 +656,11 @@ def _clip_state_raw_text(value: str | None, limit: int) -> str:
     return text[: max(0, limit - 1)] + "…"
 
 
-def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
+def _load_state_raw_window_index(
+    work: Path,
+    *,
+    evidence_backend: str | None = None,
+) -> list[dict[str, Any]]:
     """Load compact literal ASR/OCR evidence retained by the extraction stage.
 
     The final state writer is allowed to reinterpret the intermediate semantic state, therefore it
@@ -674,6 +678,11 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            continue
+        if (
+            evidence_backend is not None
+            and str(payload.get("evidence_backend") or "") != evidence_backend
+        ):
             continue
 
         chunk = payload.get("chunk") or {}
@@ -3031,7 +3040,10 @@ def run_knowledge_pipeline(
             work / "lecture_state_pre_graph_revision.json",
             source_state.model_dump(mode="json"),
         )
-        raw_window_index = _load_state_raw_window_index(work)
+        raw_window_index = _load_state_raw_window_index(
+            work,
+            evidence_backend=pipeline.config.notes.window_evidence_backend,
+        )
         logger.info(
             "[graph_revision] semantic backend start: lecture=%s observations=%d raw_windows=%d",
             lecture.id,
@@ -3184,7 +3196,10 @@ def run_knowledge_pipeline(
             work / "lecture_state_pre_repair.json",
             make_lecture_state(kb).model_dump(mode="json"),
         )
-        raw_window_index = _load_state_raw_window_index(work)
+        raw_window_index = _load_state_raw_window_index(
+            work,
+            evidence_backend=pipeline.config.notes.window_evidence_backend,
+        )
         repair_started = time.perf_counter()
         kb, repair_stats, state_repair_unresolved = _repair_lecture_state(
             orchestrator,
