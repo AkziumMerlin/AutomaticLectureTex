@@ -40,7 +40,9 @@ from .episode_synthesis import (
     write_episode_batch,
 )
 from .knowledge import (
+    GeneratedBoardStateWindow,
     KnowledgeOrchestrator,
+    board_state_delta_to_observations,
     compact_knowledge_state,
     evidence_for_section,
     make_lecture_state,
@@ -83,6 +85,7 @@ logger = logging.getLogger(__name__)
 # Version 2 invalidates the former claim/anchor/free-form-outline cache. Old window artifacts cannot be
 # replayed into the episode graph because they let an LLM create canonical claims independently.
 KNOWLEDGE_CACHE_VERSION = 3
+BOARD_STATE_EXTRACTION_VERSION = 1
 STATE_PIPELINE_VERSION = 10
 STATE_SEMANTIC_TEXT_VERSION = 1
 STATE_SEMANTIC_TEXT_RETRY_VERSION = 1
@@ -229,6 +232,27 @@ def _load_window_artifact(path: Path, fingerprint: str):
             return None
         tracking = EpisodeTrackingUpdate.model_validate(payload["episode_update"])
         return payload, batch, tracking
+    except (json.JSONDecodeError, KeyError, ValidationError):
+        return None
+
+
+def _load_board_state_window_artifact(path: Path, fingerprint: str):
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("fingerprint") != fingerprint:
+            return None
+        batch = WindowObservations.model_validate(payload["observations"])
+        board_state = GeneratedBoardStateWindow.model_validate(payload["board_state"])
+        ids = [item.id for item in batch.observations]
+        expected_ids = [
+            f"obs_{batch.window_id}_{index:03d}"
+            for index in range(len(batch.observations))
+        ]
+        if ids != expected_ids or len(ids) != len(set(ids)):
+            return None
+        return payload, batch, board_state
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
 
@@ -737,12 +761,14 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
                 "end": float(chunk.get("end", start)),
                 "asr": (
                     ""
-                    if payload.get("evidence_backend") == "native_video"
+                    if str(payload.get("evidence_backend") or "").startswith("native_video")
                     else _clip_state_raw_text(
                         str(chunk.get("timestamped_text") or chunk.get("text") or ""),
                         1200,
                     )
                 ),
+                "board_state": payload.get("board_state"),
+                "board_delta": payload.get("board_delta"),
                 "visual_latex": visual_latex[:3],
                 "math_ocr_candidates": ocr_candidates,
                 "extraction_unresolved": extraction_unresolved,
