@@ -38,10 +38,14 @@ TOPIC_PROPAGATION_RELATIONS = {
     "yields",
     "introduces",
     "denotes_convergence_in",
+    "proof_step_of",
+    "uses_result",
+    "belongs_to_topic",
+    "reused_in",
 }
 
 _EXPLICIT_TOPIC_FORWARD = {"contains", "contains_node", "has_part"}
-_EXPLICIT_TOPIC_REVERSE = {"part_of", "in_section", "in_topic"}
+_EXPLICIT_TOPIC_REVERSE = {"part_of", "in_section", "in_topic", "belongs_to_topic"}
 
 _BLOCKING_LEGACY_KEYS = {
     "complex_convention",
@@ -249,7 +253,7 @@ def dependency_graph(state: GraphState, node_ids: set[str] | None = None) -> dic
         relation = edge.relation.strip().lower()
         if relation == "supported_by":
             deps[source].add(target)
-        elif relation == "uses":
+        elif relation in {"uses", "uses_result"}:
             if state.nodes[source].kind.strip().lower() in {"proof", "proof_step", "equation", "claim"}:
                 deps[source].add(target)
         elif relation in {
@@ -409,6 +413,12 @@ def proof_support_nodes(
             and edge.target in section_node_ids
         ):
             support.add(edge.target)
+        elif (
+            relation == "proof_step_of"
+            and edge.target == claim_id
+            and edge.source in section_node_ids
+        ):
+            support.add(edge.source)
 
     queue = deque(support)
     while queue:
@@ -481,8 +491,18 @@ def _proof_occurrence_times(
 ) -> dict[str, float]:
     result = {node_id: _node_time(state, node_id) for node_id in support}
     for support_id in support:
-        direct = _edge_time(state, support_id, claim_id, {"supports"})
-        reverse = _edge_time(state, claim_id, support_id, {"has_proof_step", "proved_by"})
+        direct = _edge_time(
+            state,
+            support_id,
+            claim_id,
+            {"supports", "proof_step_of"},
+        )
+        reverse = _edge_time(
+            state,
+            claim_id,
+            support_id,
+            {"has_proof_step", "proved_by"},
+        )
         candidates = [value for value in (direct, reverse) if value != math.inf]
         if candidates:
             result[support_id] = min(candidates)
