@@ -1009,3 +1009,114 @@ def test_reader_block_draft_drops_uncanonical_relation_instead_of_inventing_math
     normalized = _normalize_draft_block(projection, block, draft)
 
     assert normalized is None
+
+
+def test_host_blocking_ambiguity_overrides_projection_render():
+    from automatic_lecture_tex.graph_revision import GraphAmbiguity
+
+    graph = GraphState(
+        evidence={"e1": EvidenceRecord(id="e1", start=0.0, end=1.0)},
+        nodes={
+            "claim": GraphNode(
+                id="claim",
+                kind="claim",
+                title="Представление",
+                text="Функционал представим скалярным произведением.",
+                latex=r"f(x)=(x,y_f)",
+                evidence_ids=["e1"],
+                ambiguities=[
+                    GraphAmbiguity(
+                        kind="convention",
+                        blocking=True,
+                        message="Не зафиксирована комплексная конвенция.",
+                    )
+                ],
+            )
+        },
+    )
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    choices = ReaderProjectionChoices(
+        choices=[
+            ReaderProjectionChoice(
+                node_id="claim",
+                disposition="render",
+                selected_unit_indices=[0],
+            )
+        ]
+    )
+
+    projection = _materialize_projection(graph, spec, choices)
+    fact = projection.facts[0]
+
+    assert fact.disposition == "unresolved"
+    assert any("конвенц" in item.lower() for item in fact.unresolved_reasons)
+
+
+def test_proof_block_rejects_writer_reordering():
+    graph = GraphState(
+        evidence={
+            "e1": EvidenceRecord(id="e1"),
+            "e2": EvidenceRecord(id="e2"),
+        },
+        nodes={
+            "step1": GraphNode(
+                id="step1",
+                kind="proof_step",
+                text="Сначала первый шаг.",
+                evidence_ids=["e1"],
+            ),
+            "step2": GraphNode(
+                id="step2",
+                kind="proof_step",
+                text="Затем второй шаг.",
+                evidence_ids=["e2"],
+            ),
+        },
+    )
+    spec = graph_section_specs(graph, lecture_title="Lecture")[0]
+    projection = _materialize_projection(
+        graph,
+        spec,
+        ReaderProjectionChoices(
+            choices=[
+                ReaderProjectionChoice(
+                    node_id="step1",
+                    disposition="render",
+                    selected_unit_indices=[0],
+                ),
+                ReaderProjectionChoice(
+                    node_id="step2",
+                    disposition="render",
+                    selected_unit_indices=[0],
+                ),
+            ]
+        ),
+    )
+    block = PlannedReaderBlock(
+        block_id="proof",
+        type=BlockType.PROOF,
+        purpose="Доказательство.",
+        node_ids=["step1", "step2"],
+    )
+    generated = GeneratedReaderBlock(
+        segments=[
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["step2"],
+                text="Затем второй шаг.",
+            ),
+            ReaderSurfaceSegment(
+                kind="text",
+                source_node_ids=["step1"],
+                text="Сначала первый шаг.",
+            ),
+        ]
+    )
+
+    errors = _verify_block(
+        projection=projection,
+        block=block,
+        generated=generated,
+    )
+
+    assert any("occurrence order" in error for error in errors)
