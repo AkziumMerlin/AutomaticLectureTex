@@ -37,12 +37,15 @@ class GraphAmbiguity(BaseModel):
         if not isinstance(value, dict):
             return value
         repaired = dict(value)
-        if "message" not in repaired and isinstance(repaired.get("description"), str):
-            repaired["message"] = repaired.pop("description")
-        if "alternatives" not in repaired and isinstance(repaired.get("options"), list):
-            repaired["alternatives"] = repaired.pop("options")
-        if "affects_fields" not in repaired and isinstance(repaired.get("fields"), list):
-            repaired["affects_fields"] = repaired.pop("fields")
+        description = repaired.pop("description", None)
+        if "message" not in repaired and isinstance(description, str):
+            repaired["message"] = description
+        options = repaired.pop("options", None)
+        if "alternatives" not in repaired and isinstance(options, list):
+            repaired["alternatives"] = options
+        fields = repaired.pop("fields", None)
+        if "affects_fields" not in repaired and isinstance(fields, list):
+            repaired["affects_fields"] = fields
 
         raw_kind = str(repaired.get("kind") or "other").strip().lower()
         allowed = {
