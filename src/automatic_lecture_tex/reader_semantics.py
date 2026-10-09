@@ -579,10 +579,40 @@ def build_occurrence_plan(
             support_id for support_id in support if support_id in section_set
         )
 
+    # Attach exact formalizations/equations to the semantic statement they derive from. This is
+    # host-owned grouping, not model-owned coverage: it keeps a definition and its canonical
+    # formula in one block without allowing arbitrary regrouping.
+    position = {node_id: index for index, node_id in enumerate(ordered_node_ids)}
+    attachments: dict[str, list[str]] = defaultdict(list)
+    attachment_consumed: set[str] = set()
+    for node_id in ordered_node_ids:
+        if dispositions.get(node_id) != "render" or node_id in support_consumed:
+            continue
+        node = state.nodes[node_id]
+        if node.kind.strip().lower() not in {"equation", "notation"}:
+            continue
+        parents = [
+            dependency
+            for dependency in node.derived_from
+            if dependency in section_set
+            and dispositions.get(dependency) == "render"
+            and dependency not in support_consumed
+        ]
+        if len(parents) != 1:
+            continue
+        parent = parents[0]
+        attachments[parent].append(node_id)
+        attachment_consumed.add(node_id)
+
+    for parent, children in attachments.items():
+        children.sort(key=lambda node_id: position.get(node_id, 10**9))
+
     anchor_ids = [
         node_id
         for node_id in ordered_node_ids
-        if dispositions.get(node_id) == "render" and node_id not in support_consumed
+        if dispositions.get(node_id) == "render"
+        and node_id not in support_consumed
+        and node_id not in attachment_consumed
     ]
     ordered_anchors = _topological_order(state, set(anchor_ids))
 
@@ -591,23 +621,29 @@ def build_occurrence_plan(
     incomplete: list[str] = []
 
     for anchor_id in ordered_anchors:
-        fact_occurrence_id = f"{section_id}::fact::{anchor_id}"
-        occurrences.append(
-            ReaderOccurrenceSpec(
-                occurrence_id=fact_occurrence_id,
-                node_id=anchor_id,
-                role="fact",
-                owner_node_id=None,
-                anchor_time=_node_time(state, anchor_id),
+        fact_node_ids = [anchor_id, *attachments.get(anchor_id, [])]
+        fact_occurrence_ids: list[str] = []
+        for fact_index, fact_node_id in enumerate(fact_node_ids):
+            fact_occurrence_id = (
+                f"{section_id}::fact::{anchor_id}::{fact_index:03d}::{fact_node_id}"
             )
-        )
+            fact_occurrence_ids.append(fact_occurrence_id)
+            occurrences.append(
+                ReaderOccurrenceSpec(
+                    occurrence_id=fact_occurrence_id,
+                    node_id=fact_node_id,
+                    role="fact",
+                    owner_node_id=anchor_id if fact_node_id != anchor_id else None,
+                    anchor_time=_node_time(state, fact_node_id),
+                )
+            )
         blocks.append(
             ReaderOccurrenceBlockSpec(
                 block_id=f"{section_id}::block::fact::{anchor_id}",
                 role="fact",
                 anchor_node_id=anchor_id,
-                node_ids=(anchor_id,),
-                occurrence_ids=(fact_occurrence_id,),
+                node_ids=tuple(fact_node_ids),
+                occurrence_ids=tuple(fact_occurrence_ids),
             )
         )
 
