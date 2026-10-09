@@ -237,22 +237,16 @@ def _load_window_artifact(path: Path, fingerprint: str):
 
 
 def _load_board_state_window_artifact(path: Path, fingerprint: str):
+    """Cache the visual snapshot itself; host-owned deltas are recomputed sequentially."""
+
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("fingerprint") != fingerprint:
             return None
-        batch = WindowObservations.model_validate(payload["observations"])
         board_state = GeneratedBoardStateWindow.model_validate(payload["board_state"])
-        ids = [item.id for item in batch.observations]
-        expected_ids = [
-            f"obs_{batch.window_id}_{index:03d}"
-            for index in range(len(batch.observations))
-        ]
-        if ids != expected_ids or len(ids) != len(set(ids)):
-            return None
-        return payload, batch, board_state
+        return payload, board_state
     except (json.JSONDecodeError, KeyError, ValidationError):
         return None
 
@@ -2769,8 +2763,25 @@ def run_knowledge_pipeline(
             )
         if cached is not None:
             if board_state_mode:
-                payload, batch, previous_board_state = cached
+                payload, current_board_state = cached
+                batch, removed_board_lines = board_state_delta_to_observations(
+                    chunk,
+                    previous=previous_board_state,
+                    current=current_board_state,
+                )
                 merge_window_observations(kb, batch)
+                previous_board_state = current_board_state
+                payload["observations"] = batch.model_dump(mode="json")
+                payload["board_delta"] = {
+                    "added_observation_ids": [
+                        item.id for item in batch.observations
+                    ],
+                    "removed": [
+                        item.model_dump(mode="json")
+                        for item in removed_board_lines
+                    ],
+                }
+                atomic_json_dump(artifact, payload)
             else:
                 payload, batch, tracking = cached
                 added_ids = merge_window_observations(kb, batch)
