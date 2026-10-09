@@ -19,19 +19,22 @@ from .graph_revision_render import (
     _order_nodes,
     _section_assignment,
 )
+from .reader_semantics import (
+    PROVENANCE_LANGUAGE as _PROVENANCE_LANGUAGE,
+    ambiguity_policy,
+    build_occurrence_plan,
+    infer_topic_memberships,
+    propagate_unresolved,
+    semantic_candidate_units,
+    semantic_title,
+)
 from .schemas import BlockType, ChunkNotes, LectureIR, NoteBlock
 from .util import atomic_json_dump, stable_hash
 
 logger = logging.getLogger(__name__)
 
-READER_SURFACE_PIPELINE_VERSION = 5
+READER_SURFACE_PIPELINE_VERSION = 6
 
-_PROVENANCE_LANGUAGE = re.compile(
-    r"\b(?:ASR|OCR|доск\w*|кадр\w*|окн\w*|лектор\w*|видео|распознан\w*|"
-    r"реконструкц\w*|уверенност\w*|provenance|рукопис\w*|пиксел\w*|"
-    r"панел\w*|гипотез\w*|чтени\w*)\b",
-    re.IGNORECASE,
-)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-ZА-ЯЁ])")
 _TEXT_FORBIDDEN = re.compile(r"[$\\]")
 _UNICODE_MATH = re.compile(
@@ -69,6 +72,8 @@ class ReaderFact:
     statement: str
     disposition: Literal["render", "omit", "unresolved"]
     expression_ids: tuple[str, ...]
+    unresolved_reasons: tuple[str, ...] = ()
+    advisory_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,16 @@ class ReaderProjectionChoices(BaseModel):
     choices: list[ReaderProjectionChoice] = Field(default_factory=list)
 
 
+class ReaderOccurrence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    occurrence_id: str
+    node_id: str
+    role: Literal["fact", "proof_step"]
+    owner_node_id: str | None = None
+    anchor_time: float
+
+
 class PlannedReaderBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -102,12 +117,17 @@ class PlannedReaderBlock(BaseModel):
     title: str | None = None
     purpose: str = Field(min_length=1, max_length=800)
     node_ids: list[str] = Field(min_length=1)
+    occurrence_ids: list[str] = Field(default_factory=list)
+    anchor_node_id: str | None = None
+    proof_status: Literal["not_applicable", "complete", "incomplete"] = "not_applicable"
 
 
 class ReaderDiscoursePlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    occurrences: list[ReaderOccurrence] = Field(default_factory=list)
     blocks: list[PlannedReaderBlock] = Field(default_factory=list)
+    incomplete_proofs: list[str] = Field(default_factory=list)
 
 
 class ReaderSurfaceSegment(BaseModel):
@@ -187,6 +207,13 @@ class ReaderGroundingReview(BaseModel):
     issues: list[ReaderGroundingIssue] = Field(default_factory=list)
 
 
+def _reader_section_title(value: str) -> str:
+    title = _canonical_surface_text(value).strip()
+    title = re.sub(r"^(?:Новый блок|Блок\\s+[^:]+):\\s*", "", title, flags=re.IGNORECASE)
+    title = title.replace("H^^*", "H^*")
+    return title.strip(" .:")
+
+
 def graph_section_specs(
     state: GraphState,
     *,
@@ -196,18 +223,57 @@ def graph_section_specs(
         state,
         [node for node in state.nodes.values() if _is_renderable(node)],
     )
-    topics, grouped = _section_assignment(state, renderable)
+    topics, legacy_grouped = _section_assignment(state, renderable)
+    if not topics:
+        ordered = _order_nodes(state, legacy_grouped.get("__lecture__", renderable))
+        if not ordered:
+            return []
+        ranges = [
+            _node_times(state, node)
+            for node in ordered
+            if _node_times(state, node)[0] != float("inf")
+        ]
+        return [
+            GraphSectionSpec(
+                section_id="__lecture__",
+                title=lecture_title,
+                start=min((item[0] for item in ranges), default=0.0),
+                end=max((item[1] for item in ranges), default=0.0),
+                nodes=ordered,
+            )
+        ]
+
+    topic_ids = {topic.id for topic in topics}
+    renderable_ids = {node.id for node in renderable}
+    legacy_membership: dict[str, str] = {}
+    for topic in topics:
+        for node in legacy_grouped.get(topic.id, []):
+            legacy_membership[node.id] = topic.id
+
+    memberships = infer_topic_memberships(
+        state,
+        renderable_node_ids=renderable_ids,
+        topic_ids=topic_ids,
+        legacy_membership=legacy_membership,
+    )
 
     pairs: list[tuple[GraphNode | None, list[GraphNode], str]] = []
-    if not topics:
-        pairs.append((None, grouped.get("__lecture__", []), "__lecture__"))
-    else:
-        if grouped.get("__prelude__"):
-            pairs.append((None, grouped["__prelude__"], "__prelude__"))
-        for topic in topics:
-            nodes = grouped.get(topic.id, [])
-            if nodes:
-                pairs.append((topic, nodes, topic.id))
+    prelude = [
+        node
+        for node in renderable
+        if node.id not in topic_ids and not memberships.get(node.id)
+    ]
+    if prelude:
+        pairs.append((None, prelude, "__prelude__"))
+
+    for topic in topics:
+        nodes = [
+            node
+            for node in renderable
+            if node.id != topic.id and topic.id in memberships.get(node.id, set())
+        ]
+        if nodes:
+            pairs.append((topic, nodes, topic.id))
 
     specs: list[GraphSectionSpec] = []
     for topic, nodes, section_id in pairs:
@@ -220,9 +286,9 @@ def graph_section_specs(
             if _node_times(state, node)[0] != float("inf")
         ]
         title = (
-            _canonical_surface_text(topic.title)
+            _reader_section_title(topic.title)
             if topic is not None
-            else ("Начало лекции" if topics else lecture_title)
+            else "Начало лекции"
         )
         specs.append(
             GraphSectionSpec(
@@ -234,7 +300,6 @@ def graph_section_specs(
             )
         )
     return specs
-
 
 def _candidate_units(node: GraphNode) -> list[str]:
     """Raw extractive units retained for diagnostics/tests; may contain provenance language."""
@@ -250,20 +315,13 @@ def _candidate_units(node: GraphNode) -> list[str]:
 
 
 def _reader_candidate_units(node: GraphNode) -> list[str]:
-    """Only units that are legal to expose to reader-facing stages."""
+    """Only semantic units that are legal to expose to reader-facing stages."""
 
-    return [
-        unit
-        for unit in _candidate_units(node)
-        if not _PROVENANCE_LANGUAGE.search(unit)
-    ]
+    return semantic_candidate_units(node)
 
 
 def _reader_safe_title(node: GraphNode) -> str:
-    title = _canonical_surface_text(node.title or "").strip()
-    if title and not _PROVENANCE_LANGUAGE.search(title):
-        return title
-    return ""
+    return _canonical_surface_text(semantic_title(node))
 
 
 def _expression_for_node(node: GraphNode) -> ReaderExpression | None:
@@ -286,6 +344,11 @@ def _projection_input(state: GraphState, spec: GraphSectionSpec) -> dict[str, An
                 "expression_ids": (
                     [f"expr::{node.id}"] if (node.latex or "").strip() else []
                 ),
+                "host_policy": {
+                    "disposition_override": ambiguity_policy(node).disposition_override,
+                    "blocking_reasons": list(ambiguity_policy(node).blocking_reasons),
+                    "advisory_notes": list(ambiguity_policy(node).advisory_notes),
+                },
             }
             for node in spec.nodes
         ],
@@ -379,22 +442,51 @@ def _materialize_projection(
 ) -> ReaderSectionProjection:
     choice_by_id = {choice.node_id: choice for choice in choices.choices}
     expressions: list[ReaderExpression] = []
+    dispositions: dict[str, str] = {}
+    unresolved_reasons: dict[str, list[str]] = {}
+    advisory_notes: dict[str, list[str]] = {}
+    statements: dict[str, str] = {}
+
+    for node in spec.nodes:
+        choice = choice_by_id[node.id]
+        policy = ambiguity_policy(node)
+        units = _reader_candidate_units(node)
+        statement = " ".join(
+            units[index] for index in choice.selected_unit_indices
+        ).strip()
+        statements[node.id] = statement
+        disposition = choice.disposition
+        if policy.disposition_override is not None:
+            disposition = policy.disposition_override
+        dispositions[node.id] = disposition
+        unresolved_reasons[node.id] = list(policy.blocking_reasons)
+        advisory_notes[node.id] = list(policy.advisory_notes)
+        if choice.disposition == "unresolved" and not unresolved_reasons[node.id]:
+            unresolved_reasons[node.id].append(
+                "reader projection marked this mathematical item unresolved"
+            )
+
+    propagate_unresolved(state, dispositions, unresolved_reasons)
+
     facts: list[ReaderFact] = []
     for node in spec.nodes:
         expression = _expression_for_node(node)
         if expression is not None:
             expressions.append(expression)
-        choice = choice_by_id[node.id]
-        units = _reader_candidate_units(node)
-        statement = " ".join(units[index] for index in choice.selected_unit_indices).strip()
         facts.append(
             ReaderFact(
                 node_id=node.id,
                 kind=node.kind,
                 title=_reader_safe_title(node),
-                statement=statement,
-                disposition=choice.disposition,
+                statement=statements[node.id],
+                disposition=dispositions[node.id],
                 expression_ids=((expression.id,) if expression is not None else ()),
+                unresolved_reasons=tuple(
+                    dict.fromkeys(unresolved_reasons.get(node.id, []))
+                ),
+                advisory_notes=tuple(
+                    dict.fromkeys(advisory_notes.get(node.id, []))
+                ),
             )
         )
 
@@ -412,7 +504,6 @@ def _materialize_projection(
         relations=relations,
     )
 
-
 def _projection_json(projection: ReaderSectionProjection) -> dict[str, Any]:
     return {
         "section_id": projection.section_id,
@@ -425,6 +516,8 @@ def _projection_json(projection: ReaderSectionProjection) -> dict[str, Any]:
                 "statement": fact.statement,
                 "disposition": fact.disposition,
                 "expression_ids": list(fact.expression_ids),
+                "unresolved_reasons": list(fact.unresolved_reasons),
+                "advisory_notes": list(fact.advisory_notes),
             }
             for fact in projection.facts
         ],
@@ -1128,62 +1221,86 @@ def _project_section(
 def _plan_section(
     orchestrator: Any,
     *,
+    state: GraphState,
     projection: ReaderSectionProjection,
     root: Path,
     llm_config: dict[str, Any],
     force: bool,
 ) -> ReaderDiscoursePlan:
-    prompt = _planner_prompt(projection, orchestrator.output_language)
-    fingerprint = stable_hash(
-        {
-            "version": READER_SURFACE_PIPELINE_VERSION,
-            "stage": "plan",
-            "projection": _projection_json(projection),
-            "prompt": prompt,
-            "llm": llm_config,
-        }
-    )
-    path = root / "plan.json"
-    plan = None if force else _load_cached_model(path, fingerprint, ReaderDiscoursePlan, "plan")
-    if plan is None:
-        plan = orchestrator._structured(
-            prompt,
-            ReaderDiscoursePlan,
-            operation="graph_discourse_plan",
-            **_call_kwargs(orchestrator),
-        )
-        errors = _verify_plan(projection, plan)
-        if errors:
-            repair = (
-                prompt
-                + "\n\nThe previous plan violated the structural contract:\n- "
-                + "\n- ".join(errors)
-                + "\nPrevious JSON:\n"
-                + plan.model_dump_json()
-            )
-            plan = orchestrator._structured(
-                repair,
-                ReaderDiscoursePlan,
-                operation="graph_discourse_plan_repair",
-                **_call_kwargs(orchestrator),
-            )
-    errors = _verify_plan(projection, plan)
-    if errors:
-        logger.warning(
-            "discourse plan for section %s still violated the host contract after repair; "
-            "canonicalizing coverage/order deterministically: %s",
-            projection.section_id,
-            "; ".join(errors),
-        )
-        plan = _canonicalize_plan(projection, plan)
-        errors = _verify_plan(projection, plan)
-    if errors:
-        raise RuntimeError(
-            f"discourse plan failed for section {projection.section_id}: " + "; ".join(errors)
-        )
-    atomic_json_dump(path, {"fingerprint": fingerprint, "plan": plan.model_dump(mode="json")})
-    return plan
+    """Build discourse occurrences host-side; the model no longer owns coverage or order."""
 
+    dispositions = {
+        fact.node_id: fact.disposition for fact in projection.facts
+    }
+    occurrence_plan = build_occurrence_plan(
+        state,
+        section_id=projection.section_id,
+        ordered_node_ids=[fact.node_id for fact in projection.facts],
+        dispositions=dispositions,
+    )
+    fact_by_id = {fact.node_id: fact for fact in projection.facts}
+
+    occurrences = [
+        ReaderOccurrence(
+            occurrence_id=item.occurrence_id,
+            node_id=item.node_id,
+            role=item.role,
+            owner_node_id=item.owner_node_id,
+            anchor_time=item.anchor_time,
+        )
+        for item in occurrence_plan.occurrences
+    ]
+
+    blocks: list[PlannedReaderBlock] = []
+    for item in occurrence_plan.blocks:
+        if item.role == "proof":
+            block_type: GeneratedBlockType = BlockType.PROOF
+            title = None
+            purpose = (
+                "Present the supplied proof steps in host-owned dependency/evidence order "
+                "without adding mathematical content."
+            )
+        else:
+            block_type = _fallback_block_type(projection, list(item.node_ids))
+            fact = fact_by_id[item.anchor_node_id]
+            title = fact.title or None
+            purpose = (
+                "Present the supplied canonical mathematical fact without adding new content."
+            )
+
+        blocks.append(
+            PlannedReaderBlock(
+                block_id=item.block_id,
+                type=block_type,
+                title=title,
+                purpose=purpose,
+                node_ids=list(item.node_ids),
+                occurrence_ids=list(item.occurrence_ids),
+                anchor_node_id=item.anchor_node_id,
+                proof_status=item.proof_status,
+            )
+        )
+
+    plan = ReaderDiscoursePlan(
+        occurrences=occurrences,
+        blocks=blocks,
+        incomplete_proofs=list(occurrence_plan.incomplete_proofs),
+    )
+    atomic_json_dump(
+        root / "plan.json",
+        {
+            "fingerprint": stable_hash(
+                {
+                    "version": READER_SURFACE_PIPELINE_VERSION,
+                    "stage": "host_occurrence_plan",
+                    "projection": _projection_json(projection),
+                    "state_nodes": [fact.node_id for fact in projection.facts],
+                }
+            ),
+            "plan": plan.model_dump(mode="json"),
+        },
+    )
+    return plan
 
 def _write_block(
     orchestrator: Any,
@@ -1364,6 +1481,7 @@ def write_reader_surface(
         )
         plan = _plan_section(
             orchestrator,
+            state=state,
             projection=projection,
             root=section_root,
             llm_config=llm_config,
@@ -1391,10 +1509,18 @@ def write_reader_surface(
             )
 
         projection_unresolved = [
-            fact.statement or fact.title
+            (
+                (fact.statement or fact.title or fact.node_id)
+                + (
+                    " — " + "; ".join(fact.unresolved_reasons)
+                    if fact.unresolved_reasons
+                    else ""
+                )
+            )
             for fact in projection.facts
-            if fact.disposition == "unresolved" and (fact.statement or fact.title)
+            if fact.disposition == "unresolved"
         ]
+        projection_unresolved.extend(plan.incomplete_proofs)
         chunks.append(
             ChunkNotes(
                 chunk_id=spec.section_id,
@@ -1420,6 +1546,11 @@ def write_reader_surface(
                 "unresolved_nodes": [
                     fact.node_id for fact in projection.facts if fact.disposition == "unresolved"
                 ],
+                "occurrences": [
+                    occurrence.model_dump(mode="json")
+                    for occurrence in plan.occurrences
+                ],
+                "incomplete_proofs": list(plan.incomplete_proofs),
                 "blocks": [block.model_dump(mode="json") for block in plan.blocks],
             },
         )
