@@ -1506,6 +1506,16 @@ def write_reader_surface(
     root = work / "graph_surface_writer"
     root.mkdir(parents=True, exist_ok=True)
     chunks: list[ChunkNotes] = []
+    aggregate = {
+        "version": READER_SURFACE_PIPELINE_VERSION,
+        "sections": 0,
+        "rendered_nodes": 0,
+        "omitted_nodes": 0,
+        "unresolved_nodes": 0,
+        "occurrences": 0,
+        "incomplete_proofs": 0,
+        "blocks": 0,
+    }
 
     for index, spec in enumerate(specs):
         metadata_chunk = metadata_by_id.get(spec.section_id)
@@ -1598,6 +1608,20 @@ def write_reader_surface(
                 "blocks": [block.model_dump(mode="json") for block in plan.blocks],
             },
         )
+        aggregate["sections"] += 1
+        aggregate["rendered_nodes"] += sum(
+            fact.disposition == "render" for fact in projection.facts
+        )
+        aggregate["omitted_nodes"] += sum(
+            fact.disposition == "omit" for fact in projection.facts
+        )
+        aggregate["unresolved_nodes"] += sum(
+            fact.disposition == "unresolved" for fact in projection.facts
+        )
+        aggregate["occurrences"] += len(plan.occurrences)
+        aggregate["incomplete_proofs"] += len(plan.incomplete_proofs)
+        aggregate["blocks"] += len(blocks)
+
         logger.info(
             "[reader_surface] section %d/%d ready: id=%s facts=%d blocks=%d",
             index + 1,
@@ -1607,4 +1631,5 @@ def write_reader_surface(
             len(blocks),
         )
 
+    atomic_json_dump(root / "summary.json", aggregate)
     return LectureIR(lecture_id=lecture_id, title=lecture_title, chunks=chunks)
