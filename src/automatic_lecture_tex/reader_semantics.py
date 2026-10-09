@@ -405,7 +405,11 @@ def proof_support_nodes(
     support: set[str] = set()
     for edge in state.edges:
         relation = edge.relation.strip().lower()
-        if relation == "supports" and edge.target == claim_id and edge.source in section_node_ids:
+        if (
+            relation in {"supports", "reused_in"}
+            and edge.target == claim_id
+            and edge.source in section_node_ids
+        ):
             support.add(edge.source)
         elif (
             relation in {"has_proof_step", "proved_by"}
@@ -495,7 +499,7 @@ def _proof_occurrence_times(
             state,
             support_id,
             claim_id,
-            {"supports", "proof_step_of"},
+            {"supports", "proof_step_of", "reused_in"},
         )
         reverse = _edge_time(
             state,
