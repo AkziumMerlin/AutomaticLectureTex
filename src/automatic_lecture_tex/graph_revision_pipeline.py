@@ -535,6 +535,11 @@ Important invariants:
   symbol identity, or conjugation convention when the lecture evidence does not determine it.
 - Topic/section nodes and contains/part_of relations may be added when they clarify final lecture
   organization, but do not invent a rigid outline just to satisfy formatting.
+- Prefer typed discourse relations when the evidence supports them: proof_step_of for a proof step
+  belonging to a theorem/claim; uses_result when a step semantically depends on an earlier result;
+  belongs_to_topic for semantic topic ownership; reused_in when one canonical fact is intentionally
+  reused in another proof/context. Keep semantic identity in one node rather than cloning a node
+  merely because it has multiple discourse occurrences.
 - Do not create duplicate nodes for repeated/overlapping measurements of the same mathematical
   event.
 - Nodes whose kind starts with provisional_ are only weak initialization from raw observations.
