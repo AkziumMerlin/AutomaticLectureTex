@@ -229,10 +229,18 @@ def _compact_catalog(
             "kind": node.kind,
             "title": node.title,
             "text": node.text[:320],
+            "semantic_text": (
+                (node.semantic_text or "")[:320] or None
+            ),
             "latex": (node.latex or "")[:600] or None,
             "aliases": node.aliases[:8],
             "status": node.status,
             "alternative_group": node.alternative_group,
+            "ambiguities": [
+                item.model_dump(mode="json") for item in node.ambiguities[:8]
+            ],
+            "provenance_notes": node.provenance_notes[:6],
+            "reconstruction_notes": node.reconstruction_notes[:6],
             "evidence_ids": node.evidence_ids[:20],
             "derived_from": node.derived_from[:12],
         }
@@ -396,7 +404,11 @@ def _frontier_summary(
                 "kind": node.kind,
                 "title": node.title,
                 "text": node.text[:220],
+                "semantic_text": (node.semantic_text or "")[:220] or None,
                 "latex": (node.latex or "")[:350] or None,
+                "ambiguities": [
+                    item.model_dump(mode="json") for item in node.ambiguities[:6]
+                ],
                 "status": node.status,
             }
             for node in state.nodes.values()
