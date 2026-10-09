@@ -400,7 +400,6 @@ def test_surface_pipeline_projection_plan_writer_end_to_end(tmp_path):
 
     assert orchestrator.operations == [
         "graph_reader_projection",
-        "graph_discourse_plan",
         "graph_block_write",
         "graph_block_grounding_review",
     ]
@@ -566,7 +565,6 @@ def test_grounding_issue_forces_block_repair(tmp_path):
     orchestrator = StubOrchestrator(
         [
             projection,
-            plan,
             bad,
             ReaderGroundingReview(
                 issues=[
@@ -845,7 +843,6 @@ def test_second_grounding_failure_falls_back_deterministically(tmp_path):
     orchestrator = StubOrchestrator(
         [
             projection_choice,
-            plan,
             bad,
             ReaderGroundingReview(
                 issues=[ReaderGroundingIssue(segment_index=0, reason="unsupported")]
