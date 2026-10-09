@@ -667,7 +667,10 @@ def _load_state_raw_window_index(work: Path) -> list[dict[str, Any]]:
 
     root = work / "knowledge_windows"
     windows: list[dict[str, Any]] = []
-    for path in sorted(root.glob("window_*.json")):
+    paths = sorted(
+        [*root.glob("window_*.json"), *root.glob("chunk_*.json")]
+    )
+    for path in paths:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
