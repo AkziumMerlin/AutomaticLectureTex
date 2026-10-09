@@ -597,6 +597,12 @@ def graph_consensus(states: list[GraphState]) -> GraphState:
         node.evidence_ids = _dedupe(
             [evidence_id for item in nodes for evidence_id in item.evidence_ids]
         )
+        node.provenance_notes = _dedupe(
+            [note for item in nodes for note in item.provenance_notes]
+        )
+        node.reconstruction_notes = _dedupe(
+            [note for item in nodes for note in item.reconstruction_notes]
+        )
 
         metadata_keys = set.intersection(
             *(set(item.metadata) for item in nodes)
@@ -873,6 +879,38 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
             if operation.aliases is not None:
                 aliases = _dedupe([*aliases, *operation.aliases])
 
+            provenance_notes = _dedupe(
+                [item for node in members for item in node.provenance_notes]
+            )
+            if operation.provenance_notes is not None:
+                provenance_notes = _dedupe(
+                    [*provenance_notes, *operation.provenance_notes]
+                )
+
+            reconstruction_notes = _dedupe(
+                [item for node in members for item in node.reconstruction_notes]
+            )
+            if operation.reconstruction_notes is not None:
+                reconstruction_notes = _dedupe(
+                    [*reconstruction_notes, *operation.reconstruction_notes]
+                )
+
+            if "ambiguities" in operation.model_fields_set:
+                ambiguities = [
+                    item.model_copy(deep=True)
+                    for item in (operation.ambiguities or [])
+                ]
+            else:
+                ambiguity_by_json = {
+                    item.model_dump_json(): item
+                    for node in members
+                    for item in node.ambiguities
+                }
+                ambiguities = [
+                    item.model_copy(deep=True)
+                    for item in ambiguity_by_json.values()
+                ]
+
             metadata = dict(base.metadata)
             metadata.update(operation.metadata_update)
             previous_merged = metadata.get("merged_from", [])
@@ -913,21 +951,9 @@ def apply_patch(state: GraphState, patch: GraphPatch) -> GraphState:
                     if "alternative_group" in operation.model_fields_set
                     else base.alternative_group
                 ),
-                provenance_notes=(
-                    operation.provenance_notes
-                    if operation.provenance_notes is not None
-                    else base.provenance_notes
-                ),
-                reconstruction_notes=(
-                    operation.reconstruction_notes
-                    if operation.reconstruction_notes is not None
-                    else base.reconstruction_notes
-                ),
-                ambiguities=(
-                    operation.ambiguities
-                    if operation.ambiguities is not None
-                    else base.ambiguities
-                ),
+                provenance_notes=provenance_notes,
+                reconstruction_notes=reconstruction_notes,
+                ambiguities=ambiguities,
                 metadata=metadata,
             )
 
