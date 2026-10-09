@@ -2769,7 +2769,9 @@ def run_knowledge_pipeline(
                     previous=previous_board_state,
                     current=current_board_state,
                 )
-                merge_window_observations(kb, batch)
+                kb.observations.extend(
+                    item.model_copy(deep=True) for item in batch.observations
+                )
                 previous_board_state = current_board_state
                 payload["observations"] = batch.model_dump(mode="json")
                 payload["board_delta"] = {
@@ -2938,7 +2940,13 @@ def run_knowledge_pipeline(
             batch = orchestrator.extract_observations(chunk, evidence, kb)
             extract_seconds += time.perf_counter() - extract_started
 
-        added_ids = merge_window_observations(kb, batch)
+        if board_state_mode:
+            kb.observations.extend(
+                item.model_copy(deep=True) for item in batch.observations
+            )
+            added_ids = [item.id for item in batch.observations]
+        else:
+            added_ids = merge_window_observations(kb, batch)
 
         if board_state_mode:
             tracking = EpisodeTrackingUpdate()
